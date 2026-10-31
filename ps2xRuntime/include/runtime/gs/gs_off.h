@@ -8,6 +8,11 @@ namespace ps2x
 {
     void setGsOff(bool off);
     bool gsOff();
+    // No packet path either (a port whose picture and VU work are entirely native, from its game's own data: DC): the
+    // game's VIF1 and GIF DMA transfers are not read at all, not even their tags; each channel ends at once as an
+    // empty transfer does (its STR cleared, its end interrupt raised), which is what the game's waits look for.
+    void setPacketPathOff(bool off);
+    bool packetPathOff();
 }
 
 #endif

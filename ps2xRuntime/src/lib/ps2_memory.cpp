@@ -1,6 +1,7 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/gs_off.h"
 #include "runtime/native/native_vif1.h"
 #include "ps2_log.h"
 #include <atomic>
@@ -1647,6 +1648,13 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             const uint32_t madr = m_ioRegisters[channelBase + 0x10];
             const uint32_t qwc = m_ioRegisters[channelBase + 0x20] & 0xFFFFu;
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+
+            // ps2x::packetPathOff (runtime/gs/gs_off.h): VIF1 and GIF transfers are not read; the channel ends at once.
+            if (ps2x::packetPathOff() && (channelBase == kVif1Channel || channelBase == 0x1000A000u))
+            {
+                completeDmacChannel(channelBase, channelBase == 0x1000A000u ? 2u : 1u);
+                return true;
+            }
 
             if (tryProcessScratchpadDma(channelBase, value))
             {

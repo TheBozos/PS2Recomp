@@ -695,6 +695,21 @@ bool ps2x::gsOff()
     return g_gsOff.load(std::memory_order_acquire);
 }
 
+namespace
+{
+    std::atomic<bool> g_packetPathOff{false};
+}
+
+void ps2x::setPacketPathOff(bool off)
+{
+    g_packetPathOff.store(off, std::memory_order_release);
+}
+
+bool ps2x::packetPathOff()
+{
+    return g_packetPathOff.load(std::memory_order_acquire);
+}
+
 void GS::submitGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
     if (!data || sizeBytes < 16u)
