@@ -59,6 +59,11 @@ namespace ps2x::native
         // has no such frame: not drawn there); tex0 gives TFX / TCC.
         uint8_t fromFrame = 0;
         uint16_t frameWidth = 0, frameHeight = 0;
+        // present() only (no stream draws): the batch draws into offscreen target n (1..7, the frame's size) instead of
+        // the frame, as a game points its frame at a work texture (DC's message balloons); with fromFrame, it samples
+        // target n instead of the frame (u, v over frameWidth x frameHeight as for the frame). The frame itself is
+        // sampled with fromFrame alone: a copy of it as drawn so far, level n read with a mip bias of n.
+        uint8_t target = 0, source = 0;
         bool fog = false;           // PRIM.FGE: the colour goes toward fogColour by 1 - Vertex::fog, after texturing
         // The texture is the target being drawn into, as it is when this batch is drawn (a game's screen distortion:
         // heat haze sampling the frame through TEX0 = the frame buffer); u, v in the target's GS pixels. Stream draws

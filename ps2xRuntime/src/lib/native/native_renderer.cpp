@@ -2,6 +2,7 @@
 
 #include "raylib.h"
 #include "rlgl.h"
+#include "external/glad.h" // glDepthFunc: Material::depthTest
 
 #include <algorithm>
 #include <chrono>
@@ -59,11 +60,17 @@ uniform float uAlphaRef;
 uniform int uOpaque;
 uniform int uFog;
 uniform vec3 uFogColour;
+uniform int uFrameSource;
 out vec4 fragColor;
 void main()
 {
     vec4 colour = vCol * (255.0 / 128.0);
-    vec4 texel = uTextured != 0 ? texture(uTex, vUv) * vec4(1.0, 1.0, 1.0, 255.0 / 128.0) : vec4(1.0); // GS alpha
+    vec4 raw = texture(uTex, vUv);
+    vec4 texel = uTextured != 0 ? raw * vec4(1.0, 1.0, 1.0, 255.0 / 128.0) : vec4(1.0); // GS alpha
+    if (uFrameSource == 1)
+        texel.a = 1.0; // the frame: its alpha is coverage, the draw's alpha is the vertices' (TCC 0)
+    else if (uFrameSource == 2)
+        texel.a = raw.a; // an offscreen target: what was drawn there (coverage, 1.0 the GS's 0x80)
     fragColor = clamp(texel * colour, 0.0, 1.0);
     if (uAlphaTest != 0 && fragColor.a <= uAlphaRef)
         discard;
@@ -86,11 +93,15 @@ void main()
     {
         unsigned int shader = 0;
         int locM = -1, locScreen = -1, locDepthMax = -1, locTex = -1, locTextured = -1, locAlphaTest = -1, locAlphaRef = -1, locOpaque = -1, locFog = -1,
-            locFogColour = -1;
+            locFogColour = -1, locFrameSource = -1;
         unsigned int vao = 0, vbo = 0;
         size_t vboBytes = 0;
         RenderTexture2D target{};
         int targetWidth = 0, targetHeight = 0;
+        // Material::target / source: offscreen targets the frame's size, and the copy of the frame fromFrame samples.
+        RenderTexture2D offscreen[8]{};
+        RenderTexture2D frameCopy{};
+        int offscreenWidth = 0, offscreenHeight = 0;
         struct GpuTexture
         {
             unsigned int id = 0;
@@ -134,6 +145,7 @@ void main()
             locAlphaRef = rlGetLocationUniform(shader, "uAlphaRef");
             locOpaque = rlGetLocationUniform(shader, "uOpaque");
             locFog = rlGetLocationUniform(shader, "uFog");
+            locFrameSource = rlGetLocationUniform(shader, "uFrameSource");
             locFogColour = rlGetLocationUniform(shader, "uFogColour");
             vao = rlLoadVertexArray();
             return true;
@@ -216,6 +228,15 @@ void main()
             batch.texture = ps2x::native::textures().texture(material.tex0, batch.material.texa, material.region);
         if (texture)
             batch.texture = std::move(texture);
+        // present() samples the frame and its offscreen targets bottom-up (GL render textures): v flipped for it.
+        std::vector<Vertex> flipped;
+        if (material.fromFrame != 0u && !m_streamDraws)
+        {
+            flipped.assign(vertices, vertices + count);
+            for (Vertex &v : flipped)
+                v.v = 1.0f - v.v;
+            vertices = flipped.data();
+        }
         batch.first = static_cast<uint32_t>(m_building.vertices.size());
         batch.count = count;
         batch.key = m_key;
@@ -459,6 +480,26 @@ void main()
             gpu.targetHeight = h;
         }
 
+        if (gpu.offscreenWidth != w || gpu.offscreenHeight != h)
+        {
+            for (RenderTexture2D &rt : gpu.offscreen)
+                if (rt.id != 0)
+                    UnloadRenderTexture(rt), rt = RenderTexture2D{};
+            if (gpu.frameCopy.id != 0)
+                UnloadRenderTexture(gpu.frameCopy), gpu.frameCopy = RenderTexture2D{};
+            gpu.offscreenWidth = w;
+            gpu.offscreenHeight = h;
+        }
+        for (const Batch &batch : frame->batches)
+        {
+            const Material &m = batch.material;
+            for (const uint8_t n : {m.target, m.source})
+                if (n != 0u && n < 8u && gpu.offscreen[n].id == 0)
+                    gpu.offscreen[n] = LoadRenderTexture(w, h);
+            if (m.fromFrame != 0u && m.source == 0u && gpu.frameCopy.id == 0)
+                gpu.frameCopy = LoadRenderTexture(w, h);
+        }
+
         const size_t bytes = frame->vertices.size() * sizeof(Vertex);
         rlEnableVertexArray(gpu.vao);
         if (bytes > gpu.vboBytes)
@@ -535,13 +576,24 @@ void main()
             }
         }
         bool scissored = false;
+        uint8_t drawingInto = 0;     // Material::target being drawn into (0: the frame)
+        bool frameCopied = false;    // the frame copied for the run of fromFrame batches being drawn
         for (size_t index = 0; index < frame->batches.size(); ++index)
         {
             const Batch &batch = frame->batches[index];
             const Material &m = batch.material;
             const Rect &clip = clips[index];
-            if (clip.y1 < 0 || m.fromFrame != 0u) // no frame drawn so far here (Material::fromFrame)
+            if (clip.y1 < 0)
                 continue;
+            const uint8_t into = m.target < 8u ? m.target : 0u;
+            if (into != drawingInto)
+            {
+                rlDrawRenderBatchActive();
+                rlEnableFramebuffer(into != 0u ? gpu.offscreen[into].id : gpu.target.id);
+                drawingInto = into;
+            }
+            if (m.fromFrame == 0u)
+                frameCopied = false;
             float matrix[16];
             std::memcpy(matrix, batch.matrix, sizeof(matrix));
             if (s_interpolate && previous && batch.key != 0u)
@@ -563,6 +615,10 @@ void main()
                                           kGlOne, kGlOneMinusSrcAlpha, kGlFuncAdd, kGlFuncAdd);
                 rlSetBlendMode(RL_BLEND_CUSTOM_SEPARATE);
             }
+            // Material::depthTest: the GS's ZTST, GEQUAL with larger nearer (LEQUAL on this depth) or ALWAYS; the test stays
+            // on so a draw without it still writes depth when asked (a Z clear).
+            rlDrawRenderBatchActive();
+            glDepthFunc(m.depthTest ? GL_LEQUAL : GL_ALWAYS);
             if (m.depthWrite)
                 rlEnableDepthMask();
             else
@@ -574,7 +630,7 @@ void main()
             rlSetUniform(gpu.locTex, &slot, RL_SHADER_UNIFORM_INT, 1);
             rlSetUniform(gpu.locM, matrix, RL_SHADER_UNIFORM_VEC4, 4);
             std::shared_ptr<const TextureCache::Texture> texture = batch.texture;
-            if (m.textured && !texture)
+            if (m.textured && !texture && m.fromFrame == 0u)
                 texture = ps2x::native::textures().texture(m.tex0, m.texa, m.region);
             // PS2X_NATIVE_DUMP_TEXTURE=<tex0, hex>: that texture as the cache decoded it, once, as texture_<tex0>.png
             // (in PS2X_NATIVE_CAPTURE_DIR, or the current folder).
@@ -594,8 +650,12 @@ void main()
                 std::snprintf(path, sizeof(path), "%s/texture_%016llx.png", dir && *dir ? dir : ".", static_cast<unsigned long long>(s_dumpTex0));
                 ExportImage(image, path);
             }
-            const int textured = m.textured && texture ? 1 : 0, alphaTest = m.alphaTest ? 1 : 0;
-            const int opaque = m.blend == Material::Blend::Opaque ? 1 : 0;
+            const int textured = m.textured && (texture || m.fromFrame != 0u) ? 1 : 0, alphaTest = m.alphaTest ? 1 : 0;
+            const int frameSource = m.fromFrame == 0u ? 0 : m.source != 0u ? 2 : 1;
+            rlSetUniform(gpu.locFrameSource, &frameSource, RL_SHADER_UNIFORM_INT, 1);
+            // Opaque draws cover the frame fully; into an offscreen target they write their own alpha (a game clearing its
+            // work texture to transparent before drawing a shape into it: DC's balloons).
+            const int opaque = m.blend == Material::Blend::Opaque && m.target == 0u ? 1 : 0;
             rlSetUniform(gpu.locOpaque, &opaque, RL_SHADER_UNIFORM_INT, 1);
             const int fog = m.fog ? 1 : 0;
             const float fogColour[3] = {static_cast<float>(m.fogColour & 0xffu) / 255.0f, static_cast<float>((m.fogColour >> 8) & 0xffu) / 255.0f,
@@ -606,7 +666,36 @@ void main()
             rlSetUniform(gpu.locTextured, &textured, RL_SHADER_UNIFORM_INT, 1);
             rlSetUniform(gpu.locAlphaTest, &alphaTest, RL_SHADER_UNIFORM_INT, 1);
             rlSetUniform(gpu.locAlphaRef, &alphaRef, RL_SHADER_UNIFORM_FLOAT, 1);
-            if (textured)
+            if (textured && m.fromFrame != 0u)
+            {
+                unsigned int id = 0;
+                if (m.source != 0u && m.source < 8u)
+                    id = gpu.offscreen[m.source].texture.id;
+                else
+                {
+                    if (!frameCopied)
+                    {
+                        // The frame as drawn so far: copied, its levels made (the game's stretched copies).
+                        rlDrawRenderBatchActive();
+                        rlBindFramebuffer(RL_READ_FRAMEBUFFER, drawingInto != 0u ? gpu.offscreen[drawingInto].id : gpu.target.id);
+                        rlBindFramebuffer(RL_DRAW_FRAMEBUFFER, gpu.frameCopy.id);
+                        rlBlitFramebuffer(0, 0, w, h, 0, 0, w, h, 0x00004000); // GL_COLOR_BUFFER_BIT
+                        rlEnableFramebuffer(drawingInto != 0u ? gpu.offscreen[drawingInto].id : gpu.target.id);
+                        int levels = 1;
+                        rlGenTextureMipmaps(gpu.frameCopy.texture.id, w, h, gpu.frameCopy.texture.format, &levels);
+                        rlTextureParameters(gpu.frameCopy.texture.id, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_MIP_LINEAR);
+                        rlTextureParameters(gpu.frameCopy.texture.id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                        frameCopied = true;
+                    }
+                    id = gpu.frameCopy.texture.id;
+                    rlTextureParameters(id, RL_TEXTURE_MIPMAP_BIAS_RATIO, static_cast<int>(m.fromFrame) * 100);
+                }
+                rlTextureParameters(id, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
+                rlTextureParameters(id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+                rlActiveTextureSlot(0);
+                rlEnableTexture(id);
+            }
+            else if (textured)
             {
                 const unsigned int id = gpu.texture(batch.ownTexture ? (texture->version | 1ull << 63)
                                                                      : m.tex0 ^ (m.texa * 0x9e3779b97f4a7c15ull) ^ (m.region * 0xc2b2ae3d27d4eb4full),
@@ -631,6 +720,11 @@ void main()
             rlDrawVertexArray(static_cast<int>(batch.first), static_cast<int>(batch.count));
         }
         rlDisableScissorTest();
+        if (drawingInto != 0u)
+        {
+            rlDrawRenderBatchActive();
+            rlEnableFramebuffer(gpu.target.id);
+        }
         if (secondsNow() - m_depthWantedAt.load(std::memory_order_relaxed) < 1.0)
         {
             std::vector<float> depth;
@@ -646,6 +740,7 @@ void main()
         rlDisableVertexArray();
         rlDisableShader();
         rlDisableTexture();
+        glDepthFunc(GL_LEQUAL);
         rlEnableDepthMask();
         rlDisableDepthTest();
         rlEnableColorBlend();
