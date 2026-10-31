@@ -101,6 +101,8 @@ void main()
         // Material::target / source: offscreen targets the frame's size, and the copy of the frame fromFrame samples.
         RenderTexture2D offscreen[8]{};
         RenderTexture2D frameCopy{};
+        RenderTexture2D previousFrame{}; // Material::kPreviousFrame: the last frame drawn, kept before the next clears it
+        bool previousValid = false;
         int offscreenWidth = 0, offscreenHeight = 0;
         struct GpuTexture
         {
@@ -487,17 +489,31 @@ void main()
                     UnloadRenderTexture(rt), rt = RenderTexture2D{};
             if (gpu.frameCopy.id != 0)
                 UnloadRenderTexture(gpu.frameCopy), gpu.frameCopy = RenderTexture2D{};
+            if (gpu.previousFrame.id != 0)
+                UnloadRenderTexture(gpu.previousFrame), gpu.previousFrame = RenderTexture2D{};
+            gpu.previousValid = false;
             gpu.offscreenWidth = w;
             gpu.offscreenHeight = h;
         }
+        // A new render texture starts transparent black, as a game's memory for it would be dark: a feedback loop (DC's
+        // title trail draws its work texture back each frame, then copies the frame into it) keeps what it starts with.
+        auto created = [](int width, int height) {
+            RenderTexture2D rt = LoadRenderTexture(width, height);
+            BeginTextureMode(rt);
+            ClearBackground(BLANK);
+            EndTextureMode();
+            return rt;
+        };
         for (const Batch &batch : frame->batches)
         {
             const Material &m = batch.material;
             for (const uint8_t n : {m.target, m.source})
                 if (n != 0u && n < 8u && gpu.offscreen[n].id == 0)
-                    gpu.offscreen[n] = LoadRenderTexture(w, h);
+                    gpu.offscreen[n] = created(w, h);
+            if (m.fromFrame != 0u && m.source == Material::kPreviousFrame && gpu.previousFrame.id == 0)
+                gpu.previousFrame = created(w, h);
             if (m.fromFrame != 0u && m.source == 0u && gpu.frameCopy.id == 0)
-                gpu.frameCopy = LoadRenderTexture(w, h);
+                gpu.frameCopy = created(w, h);
         }
 
         const size_t bytes = frame->vertices.size() * sizeof(Vertex);
@@ -521,6 +537,14 @@ void main()
             rlUpdateVertexBuffer(gpu.vbo, frame->vertices.data(), static_cast<int>(bytes), 0);
         rlDisableVertexArray();
 
+        if (gpu.previousFrame.id != 0 && gpu.targetWidth == w && gpu.targetHeight == h)
+        {
+            rlBindFramebuffer(RL_READ_FRAMEBUFFER, gpu.target.id);
+            rlBindFramebuffer(RL_DRAW_FRAMEBUFFER, gpu.previousFrame.id);
+            rlBlitFramebuffer(0, 0, w, h, 0, 0, w, h, 0x00004000); // GL_COLOR_BUFFER_BIT
+            rlBindFramebuffer(RL_DRAW_FRAMEBUFFER, 0);
+            gpu.previousValid = true;
+        }
         BeginTextureMode(gpu.target);
         ClearBackground(BLANK);
         rlDrawRenderBatchActive();
@@ -651,7 +675,7 @@ void main()
                 ExportImage(image, path);
             }
             const int textured = m.textured && (texture || m.fromFrame != 0u) ? 1 : 0, alphaTest = m.alphaTest ? 1 : 0;
-            const int frameSource = m.fromFrame == 0u ? 0 : m.source != 0u ? 2 : 1;
+            const int frameSource = m.fromFrame == 0u ? 0 : m.source != 0u && m.source != Material::kPreviousFrame ? 2 : 1;
             rlSetUniform(gpu.locFrameSource, &frameSource, RL_SHADER_UNIFORM_INT, 1);
             // Opaque draws cover the frame fully; into an offscreen target they write their own alpha (a game clearing its
             // work texture to transparent before drawing a shape into it: DC's balloons).
@@ -669,7 +693,9 @@ void main()
             if (textured && m.fromFrame != 0u)
             {
                 unsigned int id = 0;
-                if (m.source != 0u && m.source < 8u)
+                if (m.source == Material::kPreviousFrame)
+                    id = gpu.previousFrame.texture.id;
+                else if (m.source != 0u && m.source < 8u)
                     id = gpu.offscreen[m.source].texture.id;
                 else
                 {
@@ -677,7 +703,7 @@ void main()
                     {
                         // The frame as drawn so far: copied, its levels made (the game's stretched copies).
                         rlDrawRenderBatchActive();
-                        rlBindFramebuffer(RL_READ_FRAMEBUFFER, drawingInto != 0u ? gpu.offscreen[drawingInto].id : gpu.target.id);
+                        rlBindFramebuffer(RL_READ_FRAMEBUFFER, gpu.target.id);
                         rlBindFramebuffer(RL_DRAW_FRAMEBUFFER, gpu.frameCopy.id);
                         rlBlitFramebuffer(0, 0, w, h, 0, 0, w, h, 0x00004000); // GL_COLOR_BUFFER_BIT
                         rlEnableFramebuffer(drawingInto != 0u ? gpu.offscreen[drawingInto].id : gpu.target.id);

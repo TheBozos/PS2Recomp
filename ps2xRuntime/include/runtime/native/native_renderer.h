@@ -64,6 +64,7 @@ namespace ps2x::native
         // target n instead of the frame (u, v over frameWidth x frameHeight as for the frame). The frame itself is
         // sampled with fromFrame alone: a copy of it as drawn so far, level n read with a mip bias of n.
         uint8_t target = 0, source = 0;
+        static constexpr uint8_t kPreviousFrame = 8; // source: the frame presented last (a game's feedback trail)
         bool fog = false;           // PRIM.FGE: the colour goes toward fogColour by 1 - Vertex::fog, after texturing
         // The texture is the target being drawn into, as it is when this batch is drawn (a game's screen distortion:
         // heat haze sampling the frame through TEX0 = the frame buffer); u, v in the target's GS pixels. Stream draws
