@@ -1,3 +1,4 @@
+#include "runtime/gs/gs_off.h"
 #include "runtime/native/native_renderer.h"
 
 #include "raylib.h"
@@ -1553,6 +1554,12 @@ bool PS2Runtime::initialize(const char *title)
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
 #endif
         SetTargetFPS(60);
+        // PS2X_GS_RENDERER=none: no GS at all, the picture is the native renderer's alone (runtime/gs/gs_off.h).
+        if (const char *renderer = std::getenv("PS2X_GS_RENDERER"); renderer && std::string_view(renderer) == "none")
+        {
+            ps2x::setGsOff(true);
+            ps2x::native::setUploadsWanted(false);
+        }
 #if defined(PS2X_HAVE_NATIVE_GS)
         // The native renderer draws on a context shared with the window's (created here, on the main thread).
         if (const char *renderer = std::getenv("PS2X_GS_RENDERER"); renderer && std::string_view(renderer) == "native")
@@ -3705,7 +3712,8 @@ void PS2Runtime::run()
             const char *value = std::getenv("PS2X_NATIVE_VIEW");
             return value && std::string_view(value) == "only";
         }();
-        if (!(s_nativeOnly && ps2x::native::Renderer::instance().enabled() && ps2x::native::Renderer::instance().hasDraws()))
+        if (!ps2x::gsOff() &&
+            !(s_nativeOnly && ps2x::native::Renderer::instance().enabled() && ps2x::native::Renderer::instance().hasDraws()))
             DrawTexturePro(shownTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
         ps2x::native::Renderer::instance().setGsFrame(shownTex.id, shownTex.width, shownTex.height, shownTex.format);
         ps2x::native::Renderer::instance().present(dstRect.x, dstRect.y, dstRect.width, dstRect.height);

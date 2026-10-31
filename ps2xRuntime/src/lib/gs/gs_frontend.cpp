@@ -2,6 +2,7 @@
 #include "runtime/native/native_renderer.h"
 #include "ThreadNaming.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/gs_off.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_parallel.h"
 #include "runtime/gs/gs_trace.h"
@@ -663,10 +664,60 @@ void GS::workerLoop()
     }
 }
 
+namespace
+{
+    std::atomic<bool> g_gsOff{false};
+}
+
+void ps2x::setGsOff(bool off)
+{
+    g_gsOff.store(off, std::memory_order_release);
+}
+
+bool ps2x::gsOff()
+{
+    return g_gsOff.load(std::memory_order_acquire);
+}
+
 void GS::submitGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
     if (!data || sizeBytes < 16u)
         return;
+    if (ps2x::gsOff())
+    {
+        // The tags' A+D writes of SIGNAL / FINISH / LABEL: the only part of the stream the game waits on.
+        uint32_t offset = 0;
+        while (offset + 16u <= sizeBytes)
+        {
+            const uint64_t tagLo = loadLE64(data + offset);
+            const uint64_t tagHi = loadLE64(data + offset + 8u);
+            offset += 16u;
+            const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu);
+            const uint8_t flg = static_cast<uint8_t>((tagLo >> 58) & 0x3u);
+            const uint32_t nreg = ((tagLo >> 60) & 0xFu) ? static_cast<uint32_t>((tagLo >> 60) & 0xFu) : 16u;
+            if (flg == GIF_FMT_PACKED)
+            {
+                for (uint32_t i = 0; i < nloop * nreg && offset + 16u <= sizeBytes; ++i, offset += 16u)
+                {
+                    if (((tagHi >> ((i % nreg) * 4u)) & 0xFu) != 0xEu)
+                        continue;
+                    const uint64_t lo = loadLE64(data + offset);
+                    switch (static_cast<uint8_t>(loadLE64(data + offset + 8u) & 0xFFu))
+                    {
+                    case GS_REG_SIGNAL: postCpuEvent(GsCpuEvent::Signal, lo, 0u); break;
+                    case GS_REG_FINISH: postCpuEvent(GsCpuEvent::Finish, lo, 0u); break;
+                    case GS_REG_LABEL: postCpuEvent(GsCpuEvent::Label, lo, 0u); break;
+                    default: break;
+                    }
+                }
+            }
+            else if (flg == GIF_FMT_REGLIST)
+                offset += ((nloop * nreg + 1u) & ~1u) * 8u;
+            else
+                offset += nloop * 16u;
+        }
+        return;
+    }
     if (ps2x::native::uploadsWanted()) // the native textures: the game's own uploads
         ps2x::native::textures().scanGifPacket(data, sizeBytes);
     if (!shouldQueue())
@@ -2719,6 +2770,12 @@ bool GS::clearActiveFramebuffer(uint32_t rgba)
 
 uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 {
+    if (ps2x::gsOff())
+    {
+        if (dst)
+            std::memset(dst, 0, maxBytes);
+        return maxBytes;
+    }
     if (m_parallelRequested)
     {
         uint32_t copied = 0u;
