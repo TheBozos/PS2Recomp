@@ -75,6 +75,10 @@ namespace ps2x::native
         bool texaFromGs = false;
         bool alphaBlend = true;
         uint8_t context = 0; // PRIM.CTXT of a fromGsContext draw
+        // How the texel and the vertex colour combine (the game's texture function): 0 modulate, 1 decal, 2 highlight,
+        // 3 highlight2; textureAlpha false takes the alpha from the vertex alone (the texture's colour only).
+        uint8_t textureFunction = 0;
+        bool textureAlpha = true;
     };
 
     // The blend of a draw whose PRIM.ABE is set, from the GS's ALPHA register ((A - B) * C + D): Opaque when A = B,
