@@ -1,4 +1,5 @@
 #include "runtime/native/native_renderer.h"
+#include "runtime/gs/gs_off.h"
 
 #include "raylib.h"
 #include "rlgl.h"
@@ -363,9 +364,21 @@ void main()
             if (m_frameLastGroups.size() > 64u)
                 m_frameLastGroups.pop_front();
         }
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_previous = std::move(m_published);
-        m_published = std::move(frame);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_previous = std::move(m_published);
+            m_published = std::move(frame);
+            ++m_publishes;
+        }
+        m_publishedChanged.notify_all();
+    }
+
+    bool Renderer::waitForFrame(uint64_t &seen, double timeout)
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        const bool fresh = m_publishedChanged.wait_for(lock, std::chrono::duration<double>(timeout), [&] { return m_publishes != seen; });
+        seen = m_publishes;
+        return fresh;
     }
 
     bool Renderer::hasDraws()
@@ -789,7 +802,8 @@ void main()
 
         // PS2X_NATIVE_CAPTURE_DIR=<dir>: the native frame as native_<n>.png every PS2X_NATIVE_CAPTURE_INTERVAL seconds
         // (default 5), at the window's resolution, to look at it without the GS frame; with gs_<n>.png, the GS frame of
-        // the same moment (a reference to compare to, when the game still runs on VU1 what the native port draws).
+        // the same moment (a reference to compare to, when the game still runs on VU1 what the native port draws), only
+        // when there is a GS (not with PS2X_GS_RENDERER=none).
         static const char *s_captureDir = std::getenv("PS2X_NATIVE_CAPTURE_DIR");
         if (s_captureDir && *s_captureDir)
         {
@@ -809,7 +823,7 @@ void main()
                 const std::string path = std::string(s_captureDir) + "/native_" + std::to_string(++s_count) + ".png";
                 ExportImage(image, path.c_str());
                 UnloadImage(image);
-                if (m_gsFrame[0] != 0)
+                if (m_gsFrame[0] != 0 && !ps2x::gsOff())
                 {
                     const Texture2D gs{static_cast<unsigned int>(m_gsFrame[0]), m_gsFrame[1], m_gsFrame[2], 1, m_gsFrame[3]};
                     Image gsImage = LoadImageFromTexture(gs);

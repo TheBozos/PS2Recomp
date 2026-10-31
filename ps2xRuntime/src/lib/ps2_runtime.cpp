@@ -3805,14 +3805,28 @@ void PS2Runtime::run()
                 const char *value = std::getenv("PS2X_PRESENT_FPS");
                 return value && *value ? std::atoi(value) : 60;
             }();
-            const int targetFps = m_eeScheduler && m_eeScheduler->nativeFrames()
-                                      ? static_cast<int>(m_framePacer.cap())
-                                      : s_presentFps;
+            // No GS and native frames: the window shows each frame the game publishes once, when it is published (no
+            // timer of its own: two 60 Hz clocks drift and a frame shows twice every few seconds). 100 ms at most, so
+            // the window stays responsive while nothing is published. Not with interpolation (the window then runs
+            // faster than the game on purpose).
+            static const bool s_interpolate = []
+            {
+                const char *value = std::getenv("PS2X_NATIVE_INTERPOLATE");
+                return value && *value == '1';
+            }();
+            const bool followFrames = ps2x::gsOff() && !s_interpolate && m_eeScheduler && m_eeScheduler->nativeFrames() &&
+                                      ps2x::native::Renderer::instance().enabled();
+            const int targetFps = followFrames                                             ? 0
+                                  : m_eeScheduler && m_eeScheduler->nativeFrames() ? static_cast<int>(m_framePacer.cap())
+                                                                                   : s_presentFps;
             if (targetFps != s_targetFps)
             {
                 SetTargetFPS(targetFps);
                 s_targetFps = targetFps;
             }
+            static uint64_t s_shownFrame = 0;
+            if (followFrames)
+                ps2x::native::Renderer::instance().waitForFrame(s_shownFrame, 0.1);
         }
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
