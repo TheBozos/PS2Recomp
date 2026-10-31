@@ -98,10 +98,11 @@ void main()
         };
         std::unordered_map<uint64_t, GpuTexture> textures;
         // The overlay's textures, their alpha from the GS's (0x80 is 1.0) to 255: raylib's own shader draws them.
-        std::unordered_map<const TextureCache::Texture *, GpuTexture> overlayTextures;
+        // By the texture's key when it has one (a picture that changes: one slot, its image replaced), else its address.
+        std::unordered_map<uint64_t, GpuTexture> overlayTextures;
         unsigned int overlayTexture(const std::shared_ptr<const TextureCache::Texture> &source)
         {
-            GpuTexture &slot = overlayTextures[source.get()];
+            GpuTexture &slot = overlayTextures[source->key != 0u ? source->key : reinterpret_cast<uintptr_t>(source.get())];
             if (slot.id == 0 || slot.source != source)
             {
                 if (slot.id != 0)
@@ -335,6 +336,37 @@ void main()
         m_overlayPublished = std::move(overlay);
     }
 
+    void Renderer::setBackdrop(std::shared_ptr<const TextureCache::Texture> picture, const Screen &screen, float x, float y,
+                               float width, float height)
+    {
+        auto frame = std::make_shared<Frame>();
+        frame->screen = screen;
+        frame->time = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        Batch batch;
+        batch.material.textured = true;
+        batch.material.blend = Material::Blend::Opaque;
+        batch.material.depthTest = false;
+        batch.material.depthWrite = false;
+        batch.texture = std::move(picture);
+        batch.first = 0;
+        batch.count = 6;
+        const float xs[2] = {x, x + width}, ys[2] = {y, y + height};
+        Vertex corners[4];
+        for (int i = 0; i < 4; ++i)
+        {
+            corners[i].x = xs[i & 1];
+            corners[i].y = ys[i >> 1];
+            corners[i].u = static_cast<float>(i & 1);
+            corners[i].v = static_cast<float>(i >> 1);
+            corners[i].rgba = 0x80808080u;
+            corners[i].fog = 1.0f;
+        }
+        frame->vertices = {corners[0], corners[1], corners[2], corners[1], corners[3], corners[2]};
+        frame->batches.push_back(batch);
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_backdrop = std::move(frame);
+    }
+
     void Renderer::endFrame()
     {
         auto frame = std::make_shared<Frame>(std::move(m_building));
@@ -426,13 +458,16 @@ void main()
                 m_shown = std::move(next);
             }
         }
-        std::shared_ptr<Frame> overlay;
+        std::shared_ptr<Frame> overlay, backdrop;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             overlay = m_overlayPublished;
+            backdrop = m_backdrop;
         }
+        if (backdrop && std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count() - backdrop->time > 0.2)
+            backdrop = nullptr;
         // The GS frame has the native draws already (drawn into it in the GS stream): only the port's 2D over it.
-        const bool overlayOnly = m_drewIntoGs.load(std::memory_order_relaxed) && overlay && !overlay->batches.empty();
+        const bool overlayOnly = m_drewIntoGs.load(std::memory_order_relaxed) && ((overlay && !overlay->batches.empty()) || backdrop);
         if (!m_enabled || (!overlayOnly && (!m_shown || m_drewIntoGs.load(std::memory_order_relaxed))))
             return false;
         if (overlayOnly)
@@ -446,7 +481,10 @@ void main()
                     return false;
                 }
             }
-            drawOverlay(*overlay, x, y, width, height);
+            if (backdrop)
+                drawOverlay(*backdrop, x, y, width, height);
+            if (overlay)
+                drawOverlay(*overlay, x, y, width, height);
             return true;
         }
         const std::shared_ptr<Frame> frame = m_shown, previous = m_shownPrevious;

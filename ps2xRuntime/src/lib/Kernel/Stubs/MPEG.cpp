@@ -1,3 +1,4 @@
+#include "runtime/native/native_movie.h"
 #include "Common.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
@@ -2715,6 +2716,9 @@ namespace ps2_stubs
         if (haveFrame)
         {
             writeDecodedFrameToGuest(rdram, imageAddr, frame);
+            if (const ps2x::native::MoviePictureHook hook = ps2x::native::moviePictureHook();
+                hook && frame.width > 0 && frame.height > 0 && frame.rgba.size() >= static_cast<size_t>(frame.width) * frame.height * 4u)
+                hook(imageAddr, static_cast<uint32_t>(frame.width), static_cast<uint32_t>(frame.height), frame.rgba.data());
         }
         else if (frameCount == 0u)
         {
