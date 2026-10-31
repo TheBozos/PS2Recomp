@@ -265,8 +265,18 @@ void main()
         rlDisableDepthTest();
         rlDisableBackfaceCulling();
         const auto scale = [](uint32_t c) { return static_cast<unsigned char>(std::min<uint32_t>(255u, (c * 255u + 64u) / 128u)); };
+        uint32_t draws = 0u;
         for (const Batch &batch : overlay.batches)
         {
+            // rlgl flushes by itself when its draw calls (256) or vertices run out, and a flush inside rlSetTexture
+            // resets the mode to quads: the batch's triangles then draw as quads (one glyph stretched to a sliver).
+            // Flush here, before rlBegin, while there is room (a batch takes at most two draw calls).
+            if (++draws >= 100u)
+            {
+                rlDrawRenderBatchActive();
+                draws = 1u;
+            }
+            rlCheckRenderBatchLimit(static_cast<int>(batch.count));
             const Material &m = batch.material;
             BeginBlendMode(m.blend == Material::Blend::Additive || m.blend == Material::Blend::AdditiveByDestination ? BLEND_ADDITIVE
                                                                                                                    : BLEND_ALPHA);
