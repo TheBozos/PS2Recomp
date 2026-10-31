@@ -265,36 +265,52 @@ void main()
         rlDisableDepthTest();
         rlDisableBackfaceCulling();
         const auto scale = [](uint32_t c) { return static_cast<unsigned char>(std::min<uint32_t>(255u, (c * 255u + 64u) / 128u)); };
-        uint32_t draws = 0u;
+        // Everything in rlgl's quad mode (a sprite's two triangles one quad, any other triangle a quad with its last corner
+        // twice), the texture set before
+        // rlBegin (as raylib's own textured draws do). rlgl gives every draw it opens or resets the quad mode: a texture
+        // change opens a new draw in that mode, and a flush (rlgl's 256 draws, its vertex buffer) leaves it. With
+        // triangles, the draw a texture change opened kept the quad mode: glyphs after HUD shapes were drawn as quads,
+        // sheared and stacked down the screen.
         for (const Batch &batch : overlay.batches)
         {
-            // rlgl flushes by itself when its draw calls (256) or vertices run out, and a flush inside rlSetTexture
-            // resets the mode to quads: the batch's triangles then draw as quads (one glyph stretched to a sliver).
-            // Flush here, before rlBegin, while there is room (a batch takes at most two draw calls).
-            if (++draws >= 100u)
-            {
-                rlDrawRenderBatchActive();
-                draws = 1u;
-            }
-            rlCheckRenderBatchLimit(static_cast<int>(batch.count));
             const Material &m = batch.material;
             BeginBlendMode(m.blend == Material::Blend::Additive || m.blend == Material::Blend::AdditiveByDestination ? BLEND_ADDITIVE
                                                                                                                    : BLEND_ALPHA);
-            const unsigned int id = m.textured && batch.texture ? m_gpu->overlayTexture(batch.texture) : rlGetTextureIdDefault();
-            rlBegin(RL_TRIANGLES); // first: a new mode's draw starts with the default texture
-            rlSetTexture(id);
-            for (uint32_t i = batch.first; i < batch.first + batch.count; ++i)
+            rlSetTexture(m.textured && batch.texture ? m_gpu->overlayTexture(batch.texture) : rlGetTextureIdDefault());
+            rlBegin(RL_QUADS);
+            const auto put = [&](const Vertex &v)
             {
-                const Vertex &v = overlay.vertices[i];
                 rlColor4ub(scale(v.rgba & 0xffu), scale((v.rgba >> 8) & 0xffu), scale((v.rgba >> 16) & 0xffu),
                            m.blend == Material::Blend::Opaque ? 255 : scale(v.rgba >> 24));
                 rlTexCoord2f(v.u, v.v);
                 rlVertex2f(x + (v.x - screen.originX) * sx, y + (v.y - screen.originY) * sy);
+            };
+            const auto same = [](const Vertex &a, const Vertex &b)
+            { return a.x == b.x && a.y == b.y && a.u == b.u && a.v == b.v && a.rgba == b.rgba; };
+            const uint32_t end = batch.first + batch.count;
+            for (uint32_t i = batch.first; i + 3u <= end;)
+            {
+                const Vertex *t = &overlay.vertices[i];
+                if (i + 6u <= end && same(t[3], t[1]) && same(t[5], t[2]))
+                {
+                    // A sprite, a glyph, a line: (a, b, c) (b, e, c), the quad a, b, e, c.
+                    put(t[0]);
+                    put(t[1]);
+                    put(t[4]);
+                    put(t[2]);
+                    i += 6u;
+                    continue;
+                }
+                put(t[0]);
+                put(t[1]);
+                put(t[2]);
+                put(t[2]);
+                i += 3u;
             }
             rlEnd();
-            rlSetTexture(0);
             EndBlendMode();
         }
+        rlSetTexture(0);
         rlDrawRenderBatchActive();
     }
 
