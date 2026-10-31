@@ -607,6 +607,14 @@ target_include_directories(ps2_runtime PUBLIC
 )
 
 target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop)
+# The PC display's refresh phase (runtime/display_phase.h): <windows.h> and dwmapi on Windows, compiled on its own
+# (<windows.h> clashes with raylib names inside unity batches).
+set(PS2X_DISPLAY_PHASE_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/display_phase.cpp")
+target_sources(ps2_runtime PRIVATE "${PS2X_DISPLAY_PHASE_SOURCE}")
+set_source_files_properties("${PS2X_DISPLAY_PHASE_SOURCE}" PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+if(WIN32)
+    target_link_libraries(ps2_runtime PUBLIC dwmapi)
+endif()
 target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime
