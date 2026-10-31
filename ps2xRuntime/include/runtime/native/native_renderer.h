@@ -52,6 +52,13 @@ namespace ps2x::native
         bool depthWrite = true;
         bool clampU = false, clampV = false; // CLAMP's WMS / WMT: the texture's edge past 0..1 (else it repeats)
         uint64_t region = 0; // CLAMP, for a REGION_REPEAT window (TextureCache::regionWindow): the texture is that window
+        // The texture is the frame as drawn so far, where the draw's group sits in the stream (a game's own effect on
+        // its frame: DC's depth of field stretches its frame into a work texture and draws it back): 0 none; n, the
+        // frame's frameWidth x frameHeight GS pixels from (0, 0) with the width halved n times (filtered, as the
+        // stretch does; the height kept). U / V span that rectangle. Stream draws into GS targets only (present()
+        // has no such frame: not drawn there); tex0 gives TFX / TCC.
+        uint8_t fromFrame = 0;
+        uint16_t frameWidth = 0, frameHeight = 0;
         bool fog = false;           // PRIM.FGE: the colour goes toward fogColour by 1 - Vertex::fog, after texturing
         uint32_t fogColour = 0;     // FOGCOL, R in the low byte
         // The GS state where the draw's group sits in the stream (a stream draw, beginGroup) gives tex0, texa, blend,

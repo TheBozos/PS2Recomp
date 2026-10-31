@@ -128,6 +128,54 @@ void main()
             std::shared_ptr<const TextureCache::Texture> source;
         };
         std::unordered_map<uint64_t, GpuTexture> textures;
+        // Material::fromFrame: the target as drawn so far, stretched to half its width (level 1), and that to half
+        // again (level 2, ...), each from the one before with bilinear filtering, as a game stretches its frame.
+        static constexpr uint32_t kFrameLevels = 3;
+        GLuint frameFbo[kFrameLevels + 1] = {}, frameTex[kFrameLevels + 1] = {};
+        GLsizei frameW[kFrameLevels + 1] = {}, frameH[kFrameLevels + 1] = {};
+
+        void copyFrame(const GsDrawTarget &target, uint32_t width, uint32_t height, uint32_t levels)
+        {
+            const uint32_t scale = std::max(target.scale, 1u);
+            const GLsizei w = static_cast<GLsizei>(std::min(width, target.width) * scale);
+            const GLsizei h = static_cast<GLsizei>(std::min(height, target.height) * scale);
+            if (w <= 0 || h <= 0)
+                return;
+            GLint unpackBuffer = 0;
+            glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpackBuffer);
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+            glDisable(GL_SCISSOR_TEST);
+            GLuint from = target.framebuffer;
+            GLsizei fromW = w;
+            for (uint32_t n = 1; n <= std::min(levels, kFrameLevels); ++n)
+            {
+                const GLsizei lw = std::max<GLsizei>(w >> n, 1);
+                if (frameTex[n] == 0)
+                {
+                    glGenTextures(1, &frameTex[n]);
+                    glGenFramebuffers(1, &frameFbo[n]);
+                }
+                if (frameW[n] != lw || frameH[n] != h)
+                {
+                    glBindTexture(GL_TEXTURE_2D, frameTex[n]);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, lw, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glBindFramebuffer(GL_FRAMEBUFFER, frameFbo[n]);
+                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, frameTex[n], 0);
+                    frameW[n] = lw;
+                    frameH[n] = h;
+                }
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, from);
+                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, frameFbo[n]);
+                glBlitFramebuffer(0, 0, fromW, h, 0, 0, lw, h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+                from = frameFbo[n];
+                fromW = lw;
+            }
+            glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
+            glEnable(GL_SCISSOR_TEST);
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, static_cast<GLuint>(unpackBuffer));
+        }
 
         bool init()
         {
@@ -452,6 +500,11 @@ void main()
         glGetIntegerv(GL_SAMPLER_BINDING, &sampler);
         glBindSampler(0, 0);
 
+        uint32_t frameLevels = 0; // Material::fromFrame: the deepest level these batches sample
+        for (const StreamBatch &entry : batches)
+            frameLevels = std::max<uint32_t>(frameLevels, entry.batch.material.fromFrame);
+        bool framed = false; // the frame copied for the run of fromFrame batches being drawn
+
         GLint first = 0;
         for (const StreamBatch &entry : batches)
         {
@@ -492,14 +545,16 @@ void main()
             glUniform1f(pass.locTargetZScale, static_cast<float>(target.zScale));
             glUniform4fv(pass.locM, 4, entry.batch.matrix);
             std::shared_ptr<const TextureCache::Texture> texture = entry.batch.texture;
-            if (m.textured && !texture)
+            if (m.fromFrame == 0u)
+                framed = false;
+            if (m.textured && !texture && m.fromFrame == 0u)
                 texture = ps2x::native::textures().texture(m.tex0, m.texa, m.region);
-            const bool textured = m.textured && texture;
+            const bool textured = m.textured && (texture || m.fromFrame != 0u);
             // PS2X_NATIVE_TEXSTATS=1: each texture a port's own draw uses, once: TEX0's format, CLUT and size, and the
             // share of fully transparent texels; over half transparent with TCC set, written out as tex_<tex0>.ppm (RGB)
             // and .pgm (alpha) in the working directory, to see what was decoded.
             static const bool s_texStats = std::getenv("PS2X_NATIVE_TEXSTATS") != nullptr;
-            if (s_texStats && textured && !entry.batch.material.fromGsContext)
+            if (s_texStats && texture && textured && !entry.batch.material.fromGsContext)
             {
                 static std::unordered_map<uint64_t, bool> s_seenTex;
                 if (!s_seenTex[texture->key])
@@ -553,9 +608,17 @@ void main()
             }
             if (textured)
             {
-                glBindTexture(GL_TEXTURE_2D, pass.texture(entry.batch.ownTexture ? (texture->version | 1ull << 63)
-                                                                                 : m.tex0 ^ (m.texa * 0x9e3779b97f4a7c15ull) ^ (m.region * 0xc2b2ae3d27d4eb4full),
-                                                          texture));
+                if (m.fromFrame != 0u)
+                {
+                    if (!framed)
+                        pass.copyFrame(target, m.frameWidth, m.frameHeight, frameLevels);
+                    framed = true;
+                    glBindTexture(GL_TEXTURE_2D, pass.frameTex[std::min<uint32_t>(m.fromFrame, GsPass::kFrameLevels)]);
+                }
+                else
+                    glBindTexture(GL_TEXTURE_2D, pass.texture(entry.batch.ownTexture ? (texture->version | 1ull << 63)
+                                                                                     : m.tex0 ^ (m.texa * 0x9e3779b97f4a7c15ull) ^ (m.region * 0xc2b2ae3d27d4eb4full),
+                                                              texture));
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, m.clampU ? GL_CLAMP_TO_EDGE : GL_REPEAT);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, m.clampV ? GL_CLAMP_TO_EDGE : GL_REPEAT);
             }

@@ -190,7 +190,7 @@ void main()
             batch.texture = std::move(texture);
             batch.ownTexture = true;
         }
-        else if (material.textured && !material.fromGsContext && !(s_atDraw && m_streamDraws))
+        else if (material.textured && !material.fromGsContext && material.fromFrame == 0u && !(s_atDraw && m_streamDraws))
             batch.texture = ps2x::native::textures().texture(material.tex0, batch.material.texa, material.region);
         batch.first = static_cast<uint32_t>(m_building.vertices.size());
         batch.count = count;
@@ -395,7 +395,7 @@ void main()
             const Batch &batch = frame->batches[index];
             const Material &m = batch.material;
             const Rect &clip = clips[index];
-            if (clip.y1 < 0)
+            if (clip.y1 < 0 || m.fromFrame != 0u) // no frame drawn so far here (Material::fromFrame)
                 continue;
             float matrix[16];
             std::memcpy(matrix, batch.matrix, sizeof(matrix));
