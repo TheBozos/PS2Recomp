@@ -165,6 +165,15 @@ namespace ps2x::native
         // Present thread: draws the latest frame into the given window rectangle; false when there is none yet.
         bool present(float x, float y, float width, float height);
         // The GS frame shown with the native one (a GL texture): PS2X_NATIVE_CAPTURE_DIR saves it with each capture.
+        // Game thread: offscreen target n (1..7) kept at width x height pixels from now on instead of the window's
+        // resolution (0, 0: the window's again). A game's work texture at the size the game made it: an effect that
+        // feeds a target back into itself, filtering it each frame (DC's title blur), blurs as much as on the PS2 only
+        // at the PS2's resolution. Batches drawn into it keep the frame's coordinates (scaled to the target).
+        void setTargetSize(uint8_t n, uint16_t width, uint16_t height)
+        {
+            if (n != 0u && n < 8u)
+                m_targetSize[n].store(static_cast<uint32_t>(width) << 16 | height, std::memory_order_relaxed);
+        }
         void setGsFrame(unsigned int textureId, int width, int height, int format)
         {
             m_gsFrame[0] = static_cast<int>(textureId);
@@ -214,6 +223,7 @@ namespace ps2x::native
 
     private:
         std::atomic<uint64_t> m_gsTexa{0};
+        std::atomic<uint32_t> m_targetSize[8]{}; // setTargetSize: width << 16 | height, 0 the window's size
         Renderer();
         ~Renderer();
         struct Gpu;

@@ -517,12 +517,26 @@ void main()
             EndTextureMode();
             return rt;
         };
+        // Each target's size (setTargetSize, or the window's): one of another size is made again.
+        int targetW[8], targetH[8];
+        for (uint8_t n = 0; n < 8u; ++n)
+        {
+            const uint32_t size = m_targetSize[n].load(std::memory_order_relaxed);
+            targetW[n] = size != 0u ? static_cast<int>(size >> 16) : w;
+            targetH[n] = size != 0u ? static_cast<int>(size & 0xFFFFu) : h;
+        }
         for (const Batch &batch : frame->batches)
         {
             const Material &m = batch.material;
             for (const uint8_t n : {m.target, m.source})
-                if (n != 0u && n < 8u && gpu.offscreen[n].id == 0)
-                    gpu.offscreen[n] = created(w, h);
+                if (n != 0u && n < 8u)
+                {
+                    RenderTexture2D &rt = gpu.offscreen[n];
+                    if (rt.id != 0 && (rt.texture.width != targetW[n] || rt.texture.height != targetH[n]))
+                        UnloadRenderTexture(rt), rt = RenderTexture2D{};
+                    if (rt.id == 0)
+                        rt = created(targetW[n], targetH[n]);
+                }
             if (m.fromFrame != 0u && m.source == Material::kPreviousFrame && gpu.previousFrame.id == 0)
                 gpu.previousFrame = created(w, h);
             if (m.fromFrame != 0u && m.source == 0u && gpu.frameCopy.id == 0)
@@ -627,6 +641,7 @@ void main()
             {
                 rlDrawRenderBatchActive();
                 rlEnableFramebuffer(into != 0u ? gpu.offscreen[into].id : gpu.target.id);
+                rlViewport(0, 0, targetW[into], targetH[into]);
                 drawingInto = into;
             }
             if (m.fromFrame == 0u)
@@ -660,6 +675,22 @@ void main()
                 rlEnableDepthMask();
             else
                 rlDisableDepthMask();
+            if (m.textured && m.fromFrame != 0u && m.source == 0u && !frameCopied)
+            {
+                // The frame as drawn so far: copied, its levels made (the game's stretched copies). Before the shader
+                // and the vertex array are bound: flushing raylib's batch unbinds them (the draw that asked for the copy
+                // then drew nothing: DC's title copied an empty frame into its work texture each frame).
+                rlDrawRenderBatchActive();
+                rlBindFramebuffer(RL_READ_FRAMEBUFFER, gpu.target.id);
+                rlBindFramebuffer(RL_DRAW_FRAMEBUFFER, gpu.frameCopy.id);
+                rlBlitFramebuffer(0, 0, w, h, 0, 0, w, h, 0x00004000); // GL_COLOR_BUFFER_BIT
+                rlEnableFramebuffer(drawingInto != 0u ? gpu.offscreen[drawingInto].id : gpu.target.id);
+                int levels = 1;
+                rlGenTextureMipmaps(gpu.frameCopy.texture.id, w, h, gpu.frameCopy.texture.format, &levels);
+                rlTextureParameters(gpu.frameCopy.texture.id, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_MIP_LINEAR);
+                rlTextureParameters(gpu.frameCopy.texture.id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                frameCopied = true;
+            }
             rlEnableShader(gpu.shader);
             rlEnableVertexArray(gpu.vao);
             rlSetUniform(gpu.locScreen, screenRect, RL_SHADER_UNIFORM_VEC4, 1);
@@ -712,20 +743,6 @@ void main()
                     id = gpu.offscreen[m.source].texture.id;
                 else
                 {
-                    if (!frameCopied)
-                    {
-                        // The frame as drawn so far: copied, its levels made (the game's stretched copies).
-                        rlDrawRenderBatchActive();
-                        rlBindFramebuffer(RL_READ_FRAMEBUFFER, gpu.target.id);
-                        rlBindFramebuffer(RL_DRAW_FRAMEBUFFER, gpu.frameCopy.id);
-                        rlBlitFramebuffer(0, 0, w, h, 0, 0, w, h, 0x00004000); // GL_COLOR_BUFFER_BIT
-                        rlEnableFramebuffer(drawingInto != 0u ? gpu.offscreen[drawingInto].id : gpu.target.id);
-                        int levels = 1;
-                        rlGenTextureMipmaps(gpu.frameCopy.texture.id, w, h, gpu.frameCopy.texture.format, &levels);
-                        rlTextureParameters(gpu.frameCopy.texture.id, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_MIP_LINEAR);
-                        rlTextureParameters(gpu.frameCopy.texture.id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
-                        frameCopied = true;
-                    }
                     id = gpu.frameCopy.texture.id;
                     rlTextureParameters(id, RL_TEXTURE_MIPMAP_BIAS_RATIO, static_cast<int>(m.fromFrame) * 100);
                 }
@@ -750,8 +767,12 @@ void main()
             }
             if (clip.x1 > clip.x0)
             {
+                // The clip is in the frame's pixels: scaled to a target of another size.
+                const float sx = static_cast<float>(targetW[drawingInto]) / static_cast<float>(w);
+                const float sy = static_cast<float>(targetH[drawingInto]) / static_cast<float>(h);
                 rlEnableScissorTest();
-                rlScissor(clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0);
+                rlScissor(static_cast<int>(clip.x0 * sx), static_cast<int>(clip.y0 * sy), static_cast<int>((clip.x1 - clip.x0) * sx),
+                          static_cast<int>((clip.y1 - clip.y0) * sy));
                 scissored = true;
             }
             else if (scissored)
@@ -766,6 +787,7 @@ void main()
         {
             rlDrawRenderBatchActive();
             rlEnableFramebuffer(gpu.target.id);
+            rlViewport(0, 0, w, h);
         }
         if (secondsNow() - m_depthWantedAt.load(std::memory_order_relaxed) < 1.0)
         {
