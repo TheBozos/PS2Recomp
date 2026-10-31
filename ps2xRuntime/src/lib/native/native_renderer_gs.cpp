@@ -384,7 +384,7 @@ void main()
         static const bool s_stats = [] { const char *v = std::getenv("PS2X_NATIVE_GS_STATS"); return v && *v == '1'; }();
         struct Stats
         {
-            uint64_t markers = 0, batches = 0, vertices = 0, decodes = 0;
+            uint64_t markers = 0, batches = 0, vertices = 0, decodes = 0, group = 0;
             double seconds = 0.0;
             std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
         };
@@ -404,16 +404,25 @@ void main()
                 if (now - w.since >= std::chrono::seconds(2))
                 {
                     const uint64_t decodes = ps2x::native::textures().decodes();
-                    std::fprintf(stderr, "[native-gs] 2 s: %llu markers, %llu batches, %llu vertices, %.1f ms drawing, %llu texture decodes\n",
+                    uint64_t queued = 0, oldest = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(instance().m_streamMutex);
+                        queued = instance().m_stream.size();
+                        oldest = queued ? instance().m_stream.front().group : 0u;
+                    }
+                    std::fprintf(stderr, "[native-gs] 2 s: %llu markers, %llu batches, %llu vertices, %.1f ms drawing, %llu texture decodes; "
+                                         "marker group %llu, %llu batches queued from group %llu\n",
                                  static_cast<unsigned long long>(w.markers), static_cast<unsigned long long>(w.batches),
                                  static_cast<unsigned long long>(w.vertices), w.seconds * 1000.0,
-                                 static_cast<unsigned long long>(decodes - w.decodes));
+                                 static_cast<unsigned long long>(decodes - w.decodes), static_cast<unsigned long long>(w.group),
+                                 static_cast<unsigned long long>(queued), static_cast<unsigned long long>(oldest));
                     const uint64_t keep = decodes;
                     w = Stats{};
                     w.decodes = keep;
                 }
             }
         } statsScope{s_window, statsStart};
+        s_window.group = group;
         std::vector<StreamBatch> batches;
         {
             std::lock_guard<std::mutex> lock(m_streamMutex);
