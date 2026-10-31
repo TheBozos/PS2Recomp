@@ -101,6 +101,9 @@ namespace ps2x::native
         // Triangles (three vertices each) with an object-to-screen matrix: column c is matrix[4c..4c+3], screen
         // point = M * (x, y, z, 1), then divided by w (as a VU's projection).
         void draw(const Material &material, const float matrix[16], const Vertex *vertices, uint32_t count);
+        // The same with the texture given (a port's own, from its game's data: no TEX0 looked up).
+        void draw(const Material &material, const float matrix[16], const Vertex *vertices, uint32_t count,
+                  std::shared_ptr<const TextureCache::Texture> texture);
         void endFrame();
         // Depth a game reads back from the GS (a visibility test: TMB's lens flares sample the Z buffer, which the
         // native frame is not in). While asked for (wantDepth, again within a second), present() copies the native

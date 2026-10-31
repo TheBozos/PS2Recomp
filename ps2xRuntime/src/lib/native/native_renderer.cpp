@@ -187,6 +187,23 @@ void main()
             m_building.batches.push_back(batch);
     }
 
+    void Renderer::draw(const Material &material, const float matrix[16], const Vertex *vertices, uint32_t count,
+                        std::shared_ptr<const TextureCache::Texture> texture)
+    {
+        Material own = material;
+        own.fromGsContext = false;
+        own.texaFromGs = false;
+        const bool textured = own.textured;
+        own.textured = false; // no TEX0 lookup in draw()
+        const size_t before = m_building.batches.size();
+        draw(own, matrix, vertices, count);
+        if (m_building.batches.size() > before)
+        {
+            m_building.batches.back().material.textured = textured && texture != nullptr;
+            m_building.batches.back().texture = std::move(texture);
+        }
+    }
+
     void Renderer::endFrame()
     {
         auto frame = std::make_shared<Frame>(std::move(m_building));
