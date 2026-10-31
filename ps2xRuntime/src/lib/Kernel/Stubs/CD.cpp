@@ -2,6 +2,8 @@
 #include "CD.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/cd_read_observer.h"
+#include <atomic>
 
 #include <deque>
 
@@ -337,11 +339,15 @@ namespace ps2_stubs
         return seek + sectors * kEeCyclesPerSecond * 1000u / (sectorsPerSecond * permilleOfRate);
     }
 
+    std::atomic<ps2x::CdReadObserver> g_cdReadObserver{nullptr};
+
     void sceCdRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t a0 = getRegU32(ctx, 4); // usually lbn
         const uint32_t a1 = getRegU32(ctx, 5); // usually sector count
         const uint32_t a2 = getRegU32(ctx, 6); // usually destination buffer
+        if (const ps2x::CdReadObserver observer = g_cdReadObserver.load(std::memory_order_acquire))
+            observer(a0, a1, a2);
 
         struct CdReadArgs
         {
@@ -1178,4 +1184,9 @@ namespace ps2_stubs
         }
         setReturnS32(ctx, 1);
     }
+}
+
+void ps2x::setCdReadObserver(CdReadObserver observer)
+{
+    ps2_stubs::g_cdReadObserver.store(observer, std::memory_order_release);
 }
