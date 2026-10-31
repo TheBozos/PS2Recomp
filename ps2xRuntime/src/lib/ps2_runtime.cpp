@@ -1,5 +1,6 @@
 #include "runtime/native/native_renderer.h"
 #include "runtime/native/native_vu0_hle.h"
+#include "runtime/ps2_store_patch.h"
 
 #include "raylib.h"
 #include "rlgl.h"
@@ -3368,6 +3369,8 @@ void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value)
 {
     ps2TraceGuestWrite(rdram, vaddr, 4u, value, 0u, "WRITE32", ctx);
+    if (const ps2x::StorePatch patch = ps2x::storePatch(); patch && ctx && patch(ctx->pc, vaddr, value))
+        return;
     try
     {
         m_memory.write32(vaddr, value);
