@@ -71,6 +71,9 @@ namespace ps2x::native
         // heat haze sampling the frame through TEX0 = the frame buffer); u, v in the target's GS pixels. Stream draws
         // only (the GS pass): the frame is not in GS memory for the texture cache to decode.
         bool sampleTarget = false;
+        // TEX1's MMAG / MMIN nearest: texels sampled as they are, not filtered (a game's 1:1 2D: filtering mixed the
+        // colour of the transparent texels around a glyph into its edges).
+        bool nearest = false;
         uint32_t fogColour = 0;     // FOGCOL, R in the low byte
         // The GS state where the draw's group sits in the stream (a stream draw, beginGroup) gives tex0, texa, blend,
         // the alpha and depth tests, clampU / clampV and fogColour, for games whose meshes take their material from

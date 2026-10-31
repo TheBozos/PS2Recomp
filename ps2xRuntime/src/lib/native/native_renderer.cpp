@@ -739,9 +739,12 @@ void main()
                 const unsigned int id = gpu.texture(batch.ownTexture ? (texture->version | 1ull << 63)
                                                                      : m.tex0 ^ (m.texa * 0x9e3779b97f4a7c15ull) ^ (m.region * 0xc2b2ae3d27d4eb4full),
                                                     texture);
-                // Wrap per draw (rlTextureParameters binds and unbinds the texture: before enabling it).
+                // Wrap and filter per draw (rlTextureParameters binds and unbinds the texture: before enabling it).
                 rlTextureParameters(id, RL_TEXTURE_WRAP_S, m.clampU ? RL_TEXTURE_WRAP_CLAMP : RL_TEXTURE_WRAP_REPEAT);
                 rlTextureParameters(id, RL_TEXTURE_WRAP_T, m.clampV ? RL_TEXTURE_WRAP_CLAMP : RL_TEXTURE_WRAP_REPEAT);
+                const int filter = m.nearest ? RL_TEXTURE_FILTER_NEAREST : RL_TEXTURE_FILTER_LINEAR;
+                rlTextureParameters(id, RL_TEXTURE_MAG_FILTER, filter);
+                rlTextureParameters(id, RL_TEXTURE_MIN_FILTER, filter);
                 rlActiveTextureSlot(0);
                 rlEnableTexture(id);
             }
