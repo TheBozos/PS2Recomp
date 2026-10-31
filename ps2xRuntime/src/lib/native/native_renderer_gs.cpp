@@ -33,6 +33,7 @@ uniform vec2 uOffset;
 uniform vec2 uTargetSize;
 uniform float uGsZScale;     // GS Z per unit of the matrix's z / w
 uniform float uTargetZScale; // the target's depth per GS Z (1/2^24 for Z24)
+uniform vec2 uUvScale;       // 1, or 1 / the target's size (Material::sampleTarget: u, v in its pixels)
 out vec2 vUv;
 out vec4 vCol;
 out float vFog;
@@ -47,7 +48,7 @@ void main()
     float gz = c.z / c.w * uGsZScale;
     gz -= 16777216.0 * floor(gz / 16777216.0);
     gl_Position = vec4(ndc * c.w, (2.0 * gz * uTargetZScale - 1.0) * c.w, c.w);
-    vUv = aUv;
+    vUv = aUv * uUvScale;
     vCol = aCol;
     vFog = aFog;
 }
@@ -119,7 +120,9 @@ void main()
     {
         GLuint program = 0, vao = 0, vbo = 0;
         GLint locM = -1, locOffset = -1, locTargetSize = -1, locGsZScale = -1, locTargetZScale = -1, locTex = -1, locTextured = -1;
-        GLint locTfx = -1, locTcc = -1;
+        GLint locTfx = -1, locTcc = -1, locUvScale = -1;
+        GLuint targetCopy = 0;                     // Material::sampleTarget: the target's colour, copied per batch
+        GLsizei targetCopyWidth = 0, targetCopyHeight = 0;
         GLint locAlphaTest = -1, locAlphaRef = -1, locFog = -1, locFogColour = -1;
         bool failed = false;
         struct GpuTexture
@@ -200,6 +203,7 @@ void main()
             locTex = glGetUniformLocation(program, "uTex");
             locTextured = glGetUniformLocation(program, "uTextured");
             locTfx = glGetUniformLocation(program, "uTfx");
+            locUvScale = glGetUniformLocation(program, "uUvScale");
             locTcc = glGetUniformLocation(program, "uTcc");
             locAlphaTest = glGetUniformLocation(program, "uAlphaTest");
             locAlphaRef = glGetUniformLocation(program, "uAlphaRef");
@@ -374,8 +378,55 @@ void main()
         return it != m_stream.end() && it->group == group;
     }
 
+    void Renderer::readProbes()
+    {
+        std::vector<uint64_t> keys;
+        {
+            std::lock_guard<std::mutex> lock(m_probeMutex);
+            for (const auto &entry : m_probeWanted)
+                keys.push_back(entry.first);
+            m_probeWanted.clear();
+        }
+        const ProbeTarget &t = m_probeTarget;
+        if (keys.empty() || t.framebuffer == 0u || t.zScale <= 0.0)
+            return;
+        GLint readFramebuffer = 0;
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFramebuffer);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, t.framebuffer);
+        std::vector<std::pair<uint64_t, uint32_t>> results;
+        for (const uint64_t key : keys)
+        {
+            const int x = static_cast<int>(key >> 16) - static_cast<int>(t.xOffset / 16u), y = static_cast<int>(key & 0xffffu) - static_cast<int>(t.yOffset / 16u);
+            if (x < 0 || y < 0 || x >= static_cast<int>(t.width) || y >= static_cast<int>(t.height))
+                continue;
+            float depth = 0.0f;
+            glReadPixels(x * static_cast<int>(t.scale), y * static_cast<int>(t.scale), 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+            results.emplace_back(key, static_cast<uint32_t>(std::min(4294967295.0, static_cast<double>(depth) / t.zScale)));
+        }
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(readFramebuffer));
+        std::lock_guard<std::mutex> lock(m_probeMutex);
+        for (const auto &[key, z] : results)
+            m_probeResults[key] = z;
+        if (m_probeResults.size() > 4096u)
+            m_probeResults.clear();
+    }
+
     void Renderer::drawGroups(uint64_t group, const GsDrawTarget &target)
     {
+        // A group past a published frame's last: that frame is drawn, its probes read from the target it ended in.
+        {
+            bool frameDone = false;
+            {
+                std::lock_guard<std::mutex> lock(m_probeMutex);
+                while (!m_frameLastGroups.empty() && group > m_frameLastGroups.front())
+                {
+                    m_frameLastGroups.pop_front();
+                    frameDone = true;
+                }
+            }
+            if (frameDone)
+                readProbes();
+        }
         // PS2X_NATIVE_GS_STATS=1: every 2 s, the markers drawn, their batches and vertices, the time spent drawing
         // them on the GS thread and the textures the cache decoded meanwhile.
         static const bool s_stats = [] { const char *v = std::getenv("PS2X_NATIVE_GS_STATS"); return v && *v == '1'; }();
@@ -469,6 +520,7 @@ void main()
         s_window.vertices += vertices.size();
         glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
         const uint32_t scale = std::max(target.scale, 1u);
+        m_probeTarget = {target.framebuffer, target.width, target.height, scale, target.xOffset, target.yOffset, target.zScale};
         glViewport(0, 0, static_cast<GLsizei>(target.width * scale), static_cast<GLsizei>(target.height * scale));
         glEnable(GL_SCISSOR_TEST);
         const uint32_t x0 = std::min(target.scissorX0, target.width), y0 = std::min(target.scissorY0, target.height);
@@ -606,23 +658,48 @@ void main()
                     }
                 }
             }
-            if (textured)
+            if (m.sampleTarget)
             {
-                if (m.fromFrame != 0u)
+                // The target as it is now, copied (a texture cannot be sampled while drawn into), u, v in its pixels.
+                const GLsizei w = static_cast<GLsizei>(target.width * scale), h = static_cast<GLsizei>(target.height * scale);
+                if (!pass.targetCopy || pass.targetCopyWidth != w || pass.targetCopyHeight != h)
+                {
+                    if (!pass.targetCopy)
+                        glGenTextures(1, &pass.targetCopy);
+                    glBindTexture(GL_TEXTURE_2D, pass.targetCopy);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    pass.targetCopyWidth = w;
+                    pass.targetCopyHeight = h;
+                }
+                glBindTexture(GL_TEXTURE_2D, pass.targetCopy);
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, target.framebuffer);
+                glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w, h);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glUniform2f(pass.locUvScale, 1.0f / static_cast<float>(target.width), 1.0f / static_cast<float>(target.height));
+            }
+            else
+            {
+                glUniform2f(pass.locUvScale, 1.0f, 1.0f);
+                if (textured && m.fromFrame != 0u)
                 {
                     if (!framed)
                         pass.copyFrame(target, m.frameWidth, m.frameHeight, frameLevels);
                     framed = true;
                     glBindTexture(GL_TEXTURE_2D, pass.frameTex[std::min<uint32_t>(m.fromFrame, GsPass::kFrameLevels)]);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, m.clampU ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, m.clampV ? GL_CLAMP_TO_EDGE : GL_REPEAT);
                 }
-                else
-                    glBindTexture(GL_TEXTURE_2D, pass.texture(entry.batch.ownTexture ? (texture->version | 1ull << 63)
-                                                                                     : m.tex0 ^ (m.texa * 0x9e3779b97f4a7c15ull) ^ (m.region * 0xc2b2ae3d27d4eb4full),
-                                                              texture));
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, m.clampU ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, m.clampV ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+                else if (textured)
+                {
+                    glBindTexture(GL_TEXTURE_2D, pass.texture(m.tex0 ^ (m.texa * 0x9e3779b97f4a7c15ull) ^ (m.region * 0xc2b2ae3d27d4eb4full), texture));
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, m.clampU ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, m.clampV ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+                }
             }
-            glUniform1i(pass.locTextured, textured ? 1 : 0);
+            glUniform1i(pass.locTextured, textured || m.sampleTarget ? 1 : 0);
             glUniform1i(pass.locTfx, static_cast<GLint>((m.tex0 >> 35) & 3u));
             glUniform1i(pass.locTcc, static_cast<GLint>((m.tex0 >> 34) & 1u));
             glUniform1i(pass.locAlphaTest, m.alphaTest ? 1 : 0);
