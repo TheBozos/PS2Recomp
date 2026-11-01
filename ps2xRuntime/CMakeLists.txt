@@ -410,7 +410,26 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_vif1_interpreter.cpp
     src/lib/vu/ps2_vu1_core.cpp
     src/lib/games_database.cpp
+    src/lib/ps2_app.cpp
 )
+
+# The runner as a PC game (include/ps2_app.h), for a port that names itself: the window title, the per-user folder
+# (%APPDATA%\<PS2X_APP_FOLDER>, $XDG_DATA_HOME/<PS2X_APP_XDG_FOLDER>) for the memory cards, settings, log and crash
+# reports, and the game data looked for with no argument (<exe>/<PS2X_APP_DATA_FOLDER>/<PS2X_APP_BOOT_ELF>). Empty
+# PS2X_APP_FOLDER: the runner as before.
+set(PS2X_APP_TITLE "" CACHE STRING "Window title of the runner (empty: PS2-Recomp | <game> | <ELF>)")
+set(PS2X_APP_FOLDER "" CACHE STRING "Per-user folder name under %APPDATA% (empty: no user folder, files next to the ELF)")
+set(PS2X_APP_XDG_FOLDER "" CACHE STRING "Per-user folder name under $XDG_DATA_HOME (empty: PS2X_APP_FOLDER)")
+set(PS2X_APP_BOOT_ELF "" CACHE STRING "Boot ELF looked for when the runner gets no argument")
+set(PS2X_APP_DATA_FOLDER "game" CACHE STRING "Folder next to the runner (or in the user folder) holding the game data")
+set(_ps2x_app_definitions)
+foreach(_ps2x_app_var PS2X_APP_TITLE PS2X_APP_FOLDER PS2X_APP_XDG_FOLDER PS2X_APP_BOOT_ELF PS2X_APP_DATA_FOLDER)
+    if(NOT "${${_ps2x_app_var}}" STREQUAL "")
+        list(APPEND _ps2x_app_definitions "${_ps2x_app_var}=\"${${_ps2x_app_var}}\"")
+    endif()
+endforeach()
+set_source_files_properties(src/lib/ps2_app.cpp PROPERTIES
+    SKIP_UNITY_BUILD_INCLUSION ON SKIP_PRECOMPILE_HEADERS ON COMPILE_DEFINITIONS "${_ps2x_app_definitions}")
 
 # The runtime (ps2_runtime_macros.h, GS/VU paths) uses SSE4.1/AVX2 intrinsics. MSVC gets
 # /arch:AVX2 from EnableFastReleaseMode, but GCC/Clang need the target flag in every config
