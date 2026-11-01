@@ -12,6 +12,7 @@
 
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
 #include "runtime/ps2_input_bindings.h"
+#include "runtime/ps2_debug_ui.h"
 #include "runtime/ps2_video_settings.h"
 #include "imgui.h"
 #include "rlImGui.h"
@@ -2197,6 +2198,12 @@ void PS2DebugPanel::initialize()
         {
             m_visible = false;
         }
+        // PS2X_SETTINGS_OPEN=<tab>: the settings window open on that tab from the start (Controls, Video, a port's).
+        if (const char *tab = std::getenv("PS2X_SETTINGS_OPEN"); tab && *tab)
+        {
+            m_controlsVisible = true;
+            m_openTab = tab;
+        }
     }
 #endif
 }
@@ -2223,18 +2230,34 @@ void PS2DebugPanel::drawSettingsWindow()
     }
     if (ImGui::BeginTabBar("settings-tabs"))
     {
-        if (ImGui::BeginTabItem("Controls"))
+        // PS2X_SETTINGS_OPEN's tab, selected once.
+        const auto flags = [this](const char *name)
+        {
+            if (m_openTab.empty() || m_openTab != name)
+                return ImGuiTabItemFlags_None;
+            m_openTab.clear();
+            return ImGuiTabItemFlags_SetSelected;
+        };
+        if (ImGui::BeginTabItem("Controls", nullptr, flags("Controls")))
         {
             drawControlsTab();
             ImGui::EndTabItem();
         }
         else
             m_bindingAction = -1;
-        if (ImGui::BeginTabItem("Video"))
+        if (ImGui::BeginTabItem("Video", nullptr, flags("Video")))
         {
             drawVideoTab();
             ImGui::EndTabItem();
         }
+        // The port's own tabs (ps2x::debugui::registerTab).
+        for (const ps2x::debugui::Tab &tab : ps2x::debugui::tabs())
+            if (ImGui::BeginTabItem(tab.name.c_str(), nullptr, flags(tab.name.c_str())))
+            {
+                if (tab.draw)
+                    tab.draw();
+                ImGui::EndTabItem();
+            }
         ImGui::EndTabBar();
     }
     ImGui::End();
