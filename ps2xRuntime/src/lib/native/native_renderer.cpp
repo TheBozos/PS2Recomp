@@ -731,7 +731,18 @@ void main()
                 continue;
             }
             const Material &m = batch.material;
-            const Rect &clip = clips[index];
+            Rect clip = clips[index];
+            if (m.scissor[2] >= m.scissor[0])
+            {
+                // The material's own scissor (GS window pixels), in the target's pixels, bottom-up.
+                const float sx = static_cast<float>(w) / screen.width, sy = static_cast<float>(h) / screen.height;
+                clip.x0 = std::clamp(static_cast<int>(std::lround((m.scissor[0] - screen.originX) * sx)), 0, w);
+                clip.x1 = std::clamp(static_cast<int>(std::lround((m.scissor[2] + 1.0f - screen.originX) * sx)), 0, w);
+                clip.y0 = std::clamp(static_cast<int>(std::lround(h - (m.scissor[3] + 1.0f - screen.originY) * sy)), 0, h);
+                clip.y1 = std::clamp(static_cast<int>(std::lround(h - (m.scissor[1] - screen.originY) * sy)), 0, h);
+                if (clip.x1 <= clip.x0 || clip.y1 <= clip.y0)
+                    continue;
+            }
             if (clip.y1 < 0)
                 continue;
             float matrix[16];

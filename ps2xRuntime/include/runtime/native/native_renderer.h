@@ -63,6 +63,8 @@ namespace ps2x::native
         uint64_t clamp = 0;
         // FBA: the alpha written gets its high bit set (0x80 added below it), as the GS's FBA register does.
         bool fba = false;
+        // A scissor of the draw's own in GS window coordinates (x0, y0, x1, y1, the last pixels included); x1 < x0: none.
+        float scissor[4] = {0.0f, 0.0f, -1.0f, -1.0f};
         bool fog = false;           // PRIM.FGE: the colour goes toward fogColour by 1 - Vertex::fog, after texturing
         uint32_t fogColour = 0;     // FOGCOL, R in the low byte
         // The GS state where the draw's group sits in the stream (a stream draw, beginGroup) gives tex0, texa, blend,
