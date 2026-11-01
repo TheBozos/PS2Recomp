@@ -41,7 +41,12 @@ namespace
     {
         std::unordered_map<uint32_t, uint32_t> params, switches, addresses, coreAttributes; // the rest, kept as set
         uint32_t transferAddress[2] = {};
-        uint32_t transCallback[2] = {}, irqCallback = 0;
+        struct Callback
+        {
+            uint32_t function = 0, argument = 0, gp = 0;
+        };
+        Callback transCallback[2], transHandler[2]; // per DMA channel
+        uint32_t irqCallback = 0;
         uint32_t effectEnd[2] = {0x1DFFFFu, 0x1FFFFFu}; // sceSdInit's effect end addresses
         struct Effect
         {
@@ -320,6 +325,19 @@ namespace
         ret(e, written);
     }
 
+    // A transfer's end, as libsd's DMA interrupt reports it: the channel's handler (sceSdSetTransIntrHandler:
+    // handler(channel, its argument)), else its callback (sceSdSetTransCallback: callback(0)), shortly after the call
+    // returns, as an interrupt handler (a driver waiting on a semaphore the callback signals goes on).
+    void transferDone(uint32_t channel)
+    {
+        constexpr uint32_t kDelay = 2000u; // IOP cycles
+        const State::Callback &handler = g_state.transHandler[channel], &callback = g_state.transCallback[channel];
+        if (handler.function != 0u)
+            ps2x::iop::native::queueInterruptCall(handler.function, channel, handler.argument, handler.gp, kDelay);
+        else if (callback.function != 0u)
+            ps2x::iop::native::queueInterruptCall(callback.function, 0u, 0u, callback.gp, kDelay);
+    }
+
     // sceSdVoiceTrans(channel, mode, iop address, sound memory address, size): mode 0 writes, 1 reads, 2 stops (bits
     // 3+ choose DMA or I/O: the same here). Done when it returns.
     void sdVoiceTrans(Env &e)
@@ -339,15 +357,23 @@ namespace
             for (uint32_t i = 0; i < size; ++i)
                 e.w8(iop + i, data[i]);
         }
+        if (mode != 2u)
+            transferDone(arg(e, 0) & 1u);
         ret(e, mode == 2u ? 0u : size);
     }
     void sdVoiceTransStatus(Env &e)
     {
         ret(e, 1u); // done
     }
-    // Block transfers (the sound data input, a PCM stream into the mix) are not rendered yet: accepted, done.
+    // Block transfers (the sound data input, a PCM stream into the mix) are not rendered yet: accepted; a one-shot
+    // transfer ends at once (its callback runs), a looping one (mode bit 4) never reports its halves.
     void sdBlockTrans(Env &e)
     {
+        if ((arg(e, 1) & 3u) != 2u && (arg(e, 1) & 0x10u) == 0u)
+            transferDone(arg(e, 0) & 1u);
+        static int s_logged = 0;
+        if (s_logged++ < 20)
+            std::fprintf(stderr, "[audio] sceSdBlockTrans(%x, %x, %08x, %x, %x)\n", arg(e, 0), arg(e, 1), arg(e, 2), arg(e, 3), arg(e, 4));
         ret(e, 0u);
     }
     void sdBlockTransStatus(Env &e)
@@ -356,10 +382,18 @@ namespace
     }
     void sdSetTransCallback(Env &e)
     {
-        const uint32_t channel = arg(e, 0) & 1u, previous = g_state.transCallback[channel];
-        g_state.transCallback[channel] = arg(e, 1);
-        if (arg(e, 1) != 0u)
-            std::fprintf(stderr, "[audio] libsd transfer callback %08x on channel %u: not called (transfers end at once)\n", arg(e, 1), channel);
+        const uint32_t channel = arg(e, 0) & 1u, previous = g_state.transCallback[channel].function;
+        g_state.transCallback[channel] = State::Callback{arg(e, 1), 0u, e.cpu.gpr[28]};
+        if (logging())
+            std::fprintf(stderr, "[audio] sceSdSetTransCallback(%u, %08x)\n", channel, arg(e, 1));
+        ret(e, previous);
+    }
+    void sdSetTransIntrHandler(Env &e)
+    {
+        const uint32_t channel = arg(e, 0) & 1u, previous = g_state.transHandler[channel].function;
+        g_state.transHandler[channel] = State::Callback{arg(e, 1), arg(e, 2), e.cpu.gpr[28]};
+        if (logging())
+            std::fprintf(stderr, "[audio] sceSdSetTransIntrHandler(%u, %08x, %08x)\n", channel, arg(e, 1), arg(e, 2));
         ret(e, previous);
     }
     void sdSetIrqCallback(Env &e)
@@ -449,7 +483,7 @@ namespace
         overrideExport("libsd", 23u, &sdSetEffectAttr);
         overrideExport("libsd", 24u, &sdGetEffectAttr);
         overrideExport("libsd", 25u, &sdClearEffectWorkArea);
-        overrideExport("libsd", 26u, &sdReturnZero); // sceSdSetTransIntrHandler
+        overrideExport("libsd", 26u, &sdSetTransIntrHandler);
         overrideExport("libsd", 27u, &sdReturnZero); // sceSdSetSpu2IntrHandler
         return true;
     }();
