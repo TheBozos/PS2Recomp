@@ -1,6 +1,7 @@
 #include "iop_kernel.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <iterator>
 
 #include "iop_memory.h"
