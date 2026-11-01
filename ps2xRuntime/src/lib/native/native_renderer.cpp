@@ -580,9 +580,9 @@ void main()
             {
                 const uint64_t group = frame->batches[i].group;
                 Clip clip = m_clips[group % kClips];
-                if (group == 0u || clip.group != group)
+                const float *own = frame->batches[i].clip; // the port's (setClip): first, and the only one presenting alone
+                if (own[2] > own[0] || m_presentsAlone || group == 0u || clip.group != group)
                 {
-                    const float *own = frame->batches[i].clip; // the port's (setClip)
                     if (own[2] <= own[0])
                         continue;
                     clip.x0 = own[0];

@@ -139,7 +139,7 @@ namespace ps2x::native
         void setPresentsAlone(bool on) { m_presentsAlone = on; }
         // The rectangle the next draws are clipped to, in GS primitive coordinates, until set again (a game's view in a
         // split screen: where the GS scissor would have cut them); clearClip: none. A group's GS scissor, when the GS
-        // reached its marker, takes precedence.
+        // reached its marker, is used only for draws without one.
         void setClip(float x0, float y0, float x1, float y1)
         {
             m_clip[0] = x0;
