@@ -17,6 +17,7 @@ namespace ps2_vif1_command_stats
     namespace
     {
         std::atomic<uint64_t> g_commands[0x80]{};
+        std::atomic<uint64_t> g_bytes[0x80]{};
     }
 
     void noteCommand(uint8_t opcode)
@@ -27,6 +28,17 @@ namespace ps2_vif1_command_stats
     uint64_t commands(uint8_t opcode)
     {
         return g_commands[opcode & 0x7Fu].load(std::memory_order_relaxed);
+    }
+
+    void noteBytes(uint8_t opcode, uint64_t bytes)
+    {
+        if (bytes != 0u)
+            g_bytes[opcode & 0x7Fu].fetch_add(bytes, std::memory_order_relaxed);
+    }
+
+    uint64_t bytes(uint8_t opcode)
+    {
+        return g_bytes[opcode & 0x7Fu].load(std::memory_order_relaxed);
     }
 }
 
@@ -627,9 +639,31 @@ uint32_t PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
     ps2x::native::packetStats().vif1Bytes.fetch_add(sizeBytes, std::memory_order_relaxed);
 
     uint32_t pos = 0;
+    struct Charge
+    {
+        const uint32_t &pos;
+        const uint32_t size;
+        uint8_t opcode = 0xFFu;
+        uint32_t from = 0;
+        void to(uint8_t next, uint32_t start)
+        {
+            flush();
+            opcode = next;
+            from = start;
+        }
+        void flush()
+        {
+            if (opcode != 0xFFu)
+                ps2_vif1_command_stats::noteBytes(opcode, std::min(pos, size) - std::min(from, size));
+            opcode = 0xFFu;
+        }
+        ~Charge() { flush(); }
+    } charge{pos, sizeBytes};
 
     while (pos + 4 <= sizeBytes)
     {
+        if (m_vif1Direct.qwLeft != 0u || m_vif1PendingPath2ImageQwc != 0u)
+            charge.to(VIF_DIRECT, pos);
         if (m_vif1Direct.qwLeft != 0u)
         {
             const uint32_t availableQw = (sizeBytes - pos) / 16u;
@@ -671,6 +705,7 @@ uint32_t PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
         uint8_t opcode = (cmd >> 24) & 0x7F;
         ps2_vif1_command_stats::noteCommand(opcode);
+        charge.to((opcode & 0x60u) == 0x60u ? 0x60u : opcode, pos - 4u);
         uint16_t imm = cmd & 0xFFFF;
         uint8_t num = (cmd >> 16) & 0xFF;
         const bool irq = (cmd & 0x80000000u) != 0u;
