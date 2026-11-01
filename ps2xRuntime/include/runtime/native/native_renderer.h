@@ -47,6 +47,7 @@ namespace ps2x::native
             Additive, // Cs * As + Cd
             AdditiveByDestination, // Cs * Ad + Cd, Ad the target's alpha (0x80 is 1.0)
             DestinationBySource,   // Cd * As + Cs (ALPHA 0x09: a picture kept where the source is opaque, the source added)
+            AlphaOnly,             // Cd kept, As written (ALPHA (0 - 0) x FIX + Cd: only the alpha the GS writes changes)
         } blend = Blend::Alpha;
         uint8_t alphaRef = 0;   // texels at or below are discarded when alphaTest
         bool alphaTest = false;

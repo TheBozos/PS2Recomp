@@ -687,6 +687,12 @@ void main()
             // array (even with nothing to draw), so they are bound after it.
             if (m.blend == Material::Blend::Opaque)
                 rlDisableColorBlend();
+            else if (m.blend == Material::Blend::AlphaOnly)
+            {
+                rlEnableColorBlend();
+                rlSetBlendFactorsSeparate(kGlZero, kGlOne, kGlOne, kGlZero, kGlFuncAdd, kGlFuncAdd);
+                rlSetBlendMode(RL_BLEND_CUSTOM_SEPARATE);
+            }
             else if (m.blend == Material::Blend::DestinationBySource)
             {
                 // Cd * As + Cs; the alpha written is the source's, as the GS writes it.
