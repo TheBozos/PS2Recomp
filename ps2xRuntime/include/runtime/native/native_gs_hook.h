@@ -38,6 +38,13 @@ namespace ps2x::native
     inline std::atomic<GsDrawHook> g_gsDrawHook{nullptr};
     inline void setGsDrawHook(GsDrawHook hook) { g_gsDrawHook.store(hook, std::memory_order_release); }
     inline GsDrawHook gsDrawHook() { return g_gsDrawHook.load(std::memory_order_acquire); }
+
+    // A port whose native renderer draws and presents everything: the GS front end draws nothing. What the game sends
+    // it only raises the events the CPU waits on (SIGNAL, FINISH, LABEL, at the time the GS would have reached them);
+    // nothing is queued, drawn, uploaded or presented.
+    inline std::atomic<bool> g_gsHeadless{false};
+    inline void setGsHeadless(bool on) { g_gsHeadless.store(on, std::memory_order_release); }
+    inline bool gsHeadless() { return g_gsHeadless.load(std::memory_order_acquire); }
 }
 
 #endif

@@ -1,3 +1,4 @@
+#include "runtime/native/native_gs_hook.h"
 #include "runtime/native/native_renderer.h"
 #include "runtime/native/native_vu0_hle.h"
 #include "runtime/ps2_store_patch.h"
@@ -3815,7 +3816,8 @@ void PS2Runtime::run()
         if (IsKeyPressed(KEY_F10)) // F10: start the GS recording (PS2X_GS_RECORD with PS2X_GS_RECORD_AT=key)
             ps2GsRequestRecording();
         uint32_t presentGlTexture = 0u;
-        UploadFrame(frameTex, this, presentWidth, presentHeight, presentGlTexture);
+        if (!ps2x::native::gsHeadless()) // headless, nothing to present from the GS front end
+            UploadFrame(frameTex, this, presentWidth, presentHeight, presentGlTexture);
         Texture2D shownTex = frameTex;
         if (presentGlTexture != 0u) // the GS renderer's own texture (GS native back end): drawn as it is
         {

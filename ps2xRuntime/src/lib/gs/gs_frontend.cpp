@@ -1,3 +1,4 @@
+#include "runtime/native/native_gs_hook.h"
 #include "runtime/native/native_texture_cache.h"
 #include "runtime/native/native_renderer.h"
 #include "ThreadNaming.h"
@@ -683,6 +684,12 @@ void GS::submitGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
     if (!data || sizeBytes < 16u)
         return;
+    if (ps2x::native::gsHeadless()) // only the events the CPU waits on (ps2x::native::setGsHeadless)
+    {
+        postQueuedCpuEvents(data, sizeBytes);
+        noteQueuedDrawing();
+        return;
+    }
     if (ps2x::native::uploadsAtSubmit()) // the native textures: the game's own uploads
         ps2x::native::textures().scanGifPacket(data, sizeBytes);
     if (!shouldQueue())
@@ -828,6 +835,8 @@ void GS::traceQueuedCommand(const QueuedCommand &command)
 
 void GS::queueNativeDraw(uint64_t group, int context)
 {
+    if (ps2x::native::gsHeadless())
+        return;
     const int index = context != 0 ? 1 : 0;
     // Draws every native group up to the cell's value: a marker still at the queue's tail (nothing queued after it,
     // not taken by the GS thread yet) takes the new group instead of a second marker following it.
@@ -1854,6 +1863,8 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
                            const uint8_t *data,
                            uint32_t sizeBytes)
 {
+    if (ps2x::native::gsHeadless())
+        return;
     if (data && sizeBytes != 0u && (trxdir & 3u) == 0u && ps2x::native::uploadsAtSubmit())
         ps2x::native::textures().upload(bitbltbuf, trxpos, trxreg, data, sizeBytes);
     if (!shouldQueue())
