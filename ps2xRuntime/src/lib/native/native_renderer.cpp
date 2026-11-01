@@ -513,6 +513,12 @@ void main()
             const Batch &batch = frame->batches[index];
             if (batch.post >= 0)
             {
+                // PS2X_NATIVE_POST_LOG=1: now and then, where the passes sit among the frame's batches.
+                static const bool s_postLog = std::getenv("PS2X_NATIVE_POST_LOG") != nullptr;
+                static uint32_t s_postLogs = 0;
+                if (s_postLog && ++s_postLogs % 300u == 1u)
+                    std::fprintf(stderr, "[native] post pass %d at batch %zu of %zu (frame passes %zu)\n", batch.post, index,
+                                 frame->batches.size(), frame->posts.size());
                 // A postEffect here: leave the frame's drawing state, run it, take the state back.
                 rlDisableScissorTest();
                 scissored = false;
