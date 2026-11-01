@@ -551,7 +551,7 @@ void main()
         if (m_presentsAlone)
         {
             const uint32_t c = m_clearColour.load(std::memory_order_relaxed);
-            ClearBackground(Color{static_cast<unsigned char>(c), static_cast<unsigned char>(c >> 8), static_cast<unsigned char>(c >> 16), 255});
+            ClearBackground(Color{static_cast<unsigned char>(c), static_cast<unsigned char>(c >> 8), static_cast<unsigned char>(c >> 16), 0}); // alpha 0: under it, circuit 2 shows (menus)
         }
         else
             ClearBackground(BLANK);
