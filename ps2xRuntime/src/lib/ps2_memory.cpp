@@ -2,6 +2,7 @@
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/native/native_vif1.h"
+#include "runtime/native/native_gs_hook.h"
 #include "ps2_log.h"
 #include <atomic>
 #include <cstdlib>
@@ -285,6 +286,24 @@ namespace
     {
         const uint32_t distance = (target - count) & 0xFFFFu;
         return distance == 0u ? 0x10000ull : static_cast<uint64_t>(distance);
+    }
+
+    // The channel's number (D_STAT bit) from its register base.
+    inline uint32_t dmaChannelIndex(uint32_t channelBase)
+    {
+        switch (channelBase)
+        {
+        case 0x10008000u: return 0u;
+        case 0x10009000u: return 1u;
+        case 0x1000A000u: return 2u;
+        case 0x1000B000u: return 3u;
+        case 0x1000B400u: return 4u;
+        case 0x1000C000u: return 5u;
+        case 0x1000C400u: return 6u;
+        case 0x1000C800u: return 7u;
+        case 0x1000D000u: return 8u;
+        default: return 9u;
+        }
     }
 
     struct DmaTagView
@@ -1647,6 +1666,18 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             const uint32_t madr = m_ioRegisters[channelBase + 0x10];
             const uint32_t qwc = m_ioRegisters[channelBase + 0x20] & 0xFFFFu;
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+            ps2x::native::packetStats().kicks[dmaChannelIndex(channelBase)].fetch_add(1, std::memory_order_relaxed);
+
+            // A port that draws nothing from the GS packets (ps2x::native::setGsDmaSkipped): a transfer to VIF1 or the
+            // GIF, either direction, ends at once with nothing read, its chain not followed (no DMA tag, VIFcode or GIF
+            // tag looked at): QWC 0, STR cleared, D_STAT's channel bit, the channel's DMAC handlers (after the store).
+            if (ps2x::native::gsDmaSkipped() && (channelBase == kVif1Channel || channelBase == kGifChannel))
+            {
+                ps2x::native::packetStats().unread[dmaChannelIndex(channelBase)].fetch_add(1, std::memory_order_relaxed);
+                m_ioRegisters[channelBase + 0x20u] = 0u;
+                completeDmacChannel(channelBase, channelBase == kGifChannel ? 2u : 1u);
+                return true;
+            }
 
             if (tryProcessScratchpadDma(channelBase, value))
             {
@@ -1875,6 +1906,8 @@ std::vector<uint8_t> PS2Memory::pullIpuInput(size_t minBytes)
 std::vector<uint8_t> PS2Memory::readDmaSourceChain(uint32_t channelBase, uint32_t chcr, std::vector<DmaSegment> *segments,
                                                    uint32_t pendingQwc, bool pendingEnds)
 {
+    if (channelBase == kVif1Channel || channelBase == kGifChannel)
+        ps2x::native::packetStats().chainWalks.fetch_add(1, std::memory_order_relaxed);
     uint32_t tagAddr = m_ioRegisters[channelBase + 0x30];
     uint32_t asr0 = m_ioRegisters[channelBase + 0x40];
     uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
@@ -2821,6 +2854,7 @@ void PS2Memory::submitHostGifTransfer(const uint8_t *data, uint32_t size)
     if (!data || size < 16u)
         return;
     noteGifEvent('S', 0x101u, 0u, size / 16u);
+    ps2x::native::packetStats().hostGif.fetch_add(1, std::memory_order_relaxed);
     PendingTransfer pt;
     pt.chainData.assign(data, data + (size & ~15u));
     m_pendingGifTransfers.push_back(std::move(pt));
@@ -2877,6 +2911,7 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
 
     if (pathId == GifPathId::Path3)
     {
+        ps2x::native::packetStats().path3.fetch_add(1, std::memory_order_relaxed);
         waitForVif1(); // after the queued PATH1/PATH2 packets (and their MSKPATH3)
         if (m_path3Masked)
         {

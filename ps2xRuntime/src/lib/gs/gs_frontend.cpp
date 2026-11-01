@@ -361,6 +361,7 @@ uint64_t GS::gsEventDelay()
 
 void GS::postQueuedCpuEvents(const uint8_t *data, uint32_t sizeBytes)
 {
+    ps2x::native::packetStats().eventScans.fetch_add(1, std::memory_order_relaxed);
     uint32_t offset = 0;
     while (offset + 16u <= sizeBytes)
     {
@@ -396,13 +397,16 @@ void GS::postQueuedCpuEvents(const uint8_t *data, uint32_t sizeBytes)
                         switch (address)
                         {
                         case GS_REG_SIGNAL:
+                            ps2x::native::packetStats().signals.fetch_add(1, std::memory_order_relaxed);
                             postCpuEvent(GsCpuEvent::Signal, lo, gsEventDelay());
                             break;
                         case GS_REG_FINISH:
+                            ps2x::native::packetStats().finishes.fetch_add(1, std::memory_order_relaxed);
                             postCpuEvent(GsCpuEvent::Finish, lo, gsEventDelay());
                             waitForGsFrames();
                             break;
                         case GS_REG_LABEL:
+                            ps2x::native::packetStats().labels.fetch_add(1, std::memory_order_relaxed);
                             postCpuEvent(GsCpuEvent::Label, lo, gsEventDelay());
                             break;
                         default:
@@ -684,6 +688,8 @@ void GS::submitGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
     if (!data || sizeBytes < 16u)
         return;
+    ps2x::native::packetStats().gifPackets.fetch_add(1, std::memory_order_relaxed);
+    ps2x::native::packetStats().gifBytes.fetch_add(sizeBytes, std::memory_order_relaxed);
     if (ps2x::native::gsHeadless()) // only the events the CPU waits on (ps2x::native::setGsHeadless)
     {
         postQueuedCpuEvents(data, sizeBytes);

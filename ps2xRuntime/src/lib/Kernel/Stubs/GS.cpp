@@ -4,6 +4,7 @@
 #include "runtime/gs/ps2_gs_common.h"
 #include "runtime/gs/ps2_gs_psmct16.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/native/native_gs_hook.h"
 
 namespace ps2_stubs
 {
@@ -547,6 +548,13 @@ namespace ps2_stubs
         uint32_t imgAddr = getRegU32(ctx, 4);
         uint32_t srcAddr = getRegU32(ctx, 5);
 
+        // Nothing sent to the GS (ps2x::native::setGsDmaSkipped): the port's native textures come from the game's assets.
+        if (ps2x::native::gsDmaSkipped())
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
         GsImageMem img{};
         if (!runtime || !runtime->syncCoreSubsystems() || !readGsImage(rdram, imgAddr, img, false))
         {
@@ -634,7 +642,23 @@ namespace ps2_stubs
         uint32_t dstAddr = getRegU32(ctx, 5);
 
         GsImageMem img{};
-        if (!runtime || !runtime->syncCoreSubsystems() || !readGsImage(rdram, imgAddr, img, true))
+        if (!runtime || !readGsImage(rdram, imgAddr, img, true))
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        // Nothing sent to the GS (ps2x::native::setGsDmaSkipped), no GS memory to read back: the image reads as zeros
+        // (a port with readbacks it needs answers them from its own renderer, as TMB's lens flares do).
+        if (ps2x::native::gsDmaSkipped())
+        {
+            const uint32_t bytes = bytesForPixels(img.psm, static_cast<uint32_t>(img.width)) * static_cast<uint32_t>(img.height);
+            const uint32_t at = dstAddr & PS2_RAM_MASK;
+            if (uint8_t *dst = getMemPtr(rdram, dstAddr))
+                std::memset(dst, 0, std::min<uint32_t>(bytes, PS2_RAM_SIZE - std::min<uint32_t>(at, PS2_RAM_SIZE)));
+            setReturnS32(ctx, 0);
+            return;
+        }
+        if (!runtime->syncCoreSubsystems())
         {
             setReturnS32(ctx, -1);
             return;
@@ -747,6 +771,11 @@ namespace ps2_stubs
         if (!runtime || !tag)
         {
             setReturnS32(ctx, -1);
+            return;
+        }
+        if (ps2x::native::gsDmaSkipped()) // nothing sent to the GS (ps2x::native::setGsDmaSkipped)
+        {
+            setReturnS32(ctx, 0);
             return;
         }
         uint64_t tagLo = 0;

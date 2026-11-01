@@ -2639,6 +2639,7 @@ void PS2Runtime::pollGsInterrupt(uint8_t *rdram)
     m_gsIrqLine = line;
     if (raise)
     {
+        ps2x::native::packetStats().gsIrqs.fetch_add(1, std::memory_order_relaxed);
         eeScheduler().dispatchIrq(false, 0u);
     }
 }
