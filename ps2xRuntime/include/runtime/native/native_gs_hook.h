@@ -112,6 +112,7 @@ namespace ps2x::native
         std::atomic<uint64_t> hostGif{0};                  // libgraph HLE packets (sceGsExecLoadImage, sceGsPutDrawEnv...)
         std::atomic<uint64_t> kicks[10]{};                 // DMA channel starts
         std::atomic<uint64_t> unread[10]{};                // ... completed without reading their data (setGsDmaSkipped, setVif0Skipped)
+        std::atomic<uint64_t> ipuAccesses{0};              // IPU registers (0x10002000) and FIFOs (0x10007000) read or written
     };
     inline PacketStats g_packetStats;
     inline PacketStats &packetStats() { return g_packetStats; }

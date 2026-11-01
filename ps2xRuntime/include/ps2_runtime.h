@@ -214,6 +214,10 @@ public:
     using PresentationOverride = std::function<bool(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height)>;
     void setPresentationOverride(PresentationOverride presentationOverride);
     bool presentOverride(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height);
+    // With PS2X_CAPTURE_WINDOW_DIR: the window at the next present as <dir>/<name>.png (a port capturing a given
+    // picture of a movie, say, to compare two ways of showing it). From any thread; a later request replaces one not
+    // yet taken.
+    void requestWindowCapture(std::string name);
 
     void drainCompletedDmacHandlers(uint8_t *rdram);
     // Raise INTC cause 0 (GS) for unmasked CSR SIGNAL/FINISH rising edges recorded by the GS.
@@ -419,6 +423,8 @@ private:
     bool m_gsIrqLine = false;
     std::mutex m_presentationOverrideMutex;
     PresentationOverride m_presentationOverride;
+    std::mutex m_windowCaptureMutex;
+    std::string m_windowCaptureName;
 
 public:
     std::atomic<uint32_t> m_debugPc{0};

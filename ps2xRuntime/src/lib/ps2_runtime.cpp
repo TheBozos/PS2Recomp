@@ -3358,6 +3358,12 @@ void PS2Runtime::setPresentationOverride(PresentationOverride presentationOverri
     m_presentationOverride = std::move(presentationOverride);
 }
 
+void PS2Runtime::requestWindowCapture(std::string name)
+{
+    std::lock_guard<std::mutex> lock(m_windowCaptureMutex);
+    m_windowCaptureName = std::move(name);
+}
+
 bool PS2Runtime::presentOverride(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height)
 {
     std::lock_guard<std::mutex> lock(m_presentationOverrideMutex);
@@ -4068,6 +4074,19 @@ void PS2Runtime::run()
                 else
                     std::snprintf(path, sizeof(path), "%s/window_%06d.png", s_windowCaptureDir, static_cast<int>(elapsed * 10.0));
                 ExportImage(image, path);
+                UnloadImage(image);
+            }
+            std::string requested;
+            {
+                std::lock_guard<std::mutex> lock(m_windowCaptureMutex);
+                requested.swap(m_windowCaptureName);
+            }
+            if (!requested.empty())
+            {
+                rlDrawRenderBatchActive();
+                Image image = LoadImageFromScreen();
+                const std::string path = std::string(s_windowCaptureDir) + "/" + requested + ".png";
+                ExportImage(image, path.c_str());
                 UnloadImage(image);
             }
             // F9 starts and stops a burst: the window every tenth of a second as burst_<milliseconds>.png (turning the
