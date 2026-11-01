@@ -1,3 +1,4 @@
+#include "runtime/native/native_movie.h"
 #include "runtime/gs/gs_native_backend.h"
 
 #include "runtime/gs/gs_cpu_backend.h"
@@ -3081,7 +3082,44 @@ bool GSNativeBackend::presentOnGpu(const GSPresentationRequest &request, Present
     } bindings;
     CircuitSource top, bottom;
     const bool haveTop = en1 && circuitSource(1, request.dispfb1, request.display1, fieldMode, top);
-    const bool haveBottom = en2 && !slbg && circuitSource(2, request.dispfb2, request.display2, fieldMode, bottom);
+    bool haveBottom = false;
+    // Circuit 2 from the port's own picture (ps2x::native::setDisplayPicture) when it set one, else GS memory.
+    if (en2 && !slbg)
+    {
+        const ps2x::native::DisplayPicture picture = ps2x::native::displayPicture();
+        if (picture.rgba && picture.width != 0u && picture.height != 0u)
+        {
+            if (m_displayPictureTexture == 0u)
+                glGenTextures(1, &m_displayPictureTexture);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, m_displayPictureTexture);
+            if (picture.version != m_displayPictureVersion)
+            {
+                GLint unpackBuffer = 0, rowLength = 0, alignment = 4;
+                glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpackBuffer);
+                glGetIntegerv(GL_UNPACK_ROW_LENGTH, &rowLength);
+                glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
+                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, static_cast<GLsizei>(picture.width), static_cast<GLsizei>(picture.height), 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, picture.rgba->data());
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, static_cast<GLuint>(unpackBuffer));
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, rowLength);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
+                m_displayPictureVersion = picture.version;
+            }
+            bottom.texture = m_displayPictureTexture;
+            bottom.width = static_cast<int>(picture.width);
+            bottom.height = static_cast<int>(fieldMode ? (picture.height + 1u) / 2u : picture.height);
+            bottom.scale = 1;
+            haveBottom = true;
+        }
+        else
+            haveBottom = circuitSource(2, request.dispfb2, request.display2, fieldMode, bottom);
+    }
     if (!haveTop && !haveBottom)
         return false;
     if (m_presentProgram == 0u)

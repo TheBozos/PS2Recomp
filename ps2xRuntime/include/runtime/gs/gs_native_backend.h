@@ -267,6 +267,8 @@ private:
         bool opaque = false; // CT24: no alpha (0x80)
     };
     bool circuitSource(int circuit, uint64_t dispfb, uint64_t display, bool fieldMode, CircuitSource &out);
+    uint32_t m_displayPictureTexture = 0; // circuit 2 from the port's picture (ps2x::native::setDisplayPicture)
+    uint64_t m_displayPictureVersion = 0;
     // The internal scale (PS2X_GS_SCALE=<n>, 1 to 4, default 1): render targets are n times the GS's size each way,
     // draws land on them with their viewport and scissor scaled, and whatever goes back to GS memory or the CPU
     // (resolves, read backs, a Z buffer read as a texture) is read from a 1x copy (readFramebufferAt1x).
