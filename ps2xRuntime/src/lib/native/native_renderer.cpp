@@ -548,7 +548,13 @@ void main()
         rlDisableVertexArray();
 
         BeginTextureMode(gpu.target);
-        ClearBackground(BLANK);
+        if (m_presentsAlone)
+        {
+            const uint32_t c = m_clearColour.load(std::memory_order_relaxed);
+            ClearBackground(Color{static_cast<unsigned char>(c), static_cast<unsigned char>(c >> 8), static_cast<unsigned char>(c >> 16), 255});
+        }
+        else
+            ClearBackground(BLANK);
         rlDrawRenderBatchActive();
         const Screen &screen = frame->screen;
         const float screenRect[4] = {screen.originX, screen.originY, screen.width, screen.height};

@@ -148,6 +148,8 @@ namespace ps2x::native
             m_clip[3] = y1;
         }
         void clearClip() { setClip(0, 0, 0, 0); }
+        // What the frame starts from presenting alone (the game's clear: a background or fog colour, R in the low byte).
+        void setClearColour(uint32_t rgb) { m_clearColour.store(rgb, std::memory_order_relaxed); }
         bool presentsAlone() const { return m_enabled && m_presentsAlone; }
         // A group has batches waiting (its GS marker is worth queueing): the VIF1 interpreter reaches a program after
         // the native port has drawn it (at the transfer's start), so a group without batches by then has none.
@@ -233,6 +235,7 @@ namespace ps2x::native
         std::shared_ptr<Frame> m_overlayPublished; // under m_mutex
         bool m_presentsAlone = false;
         float m_clip[4] = {0, 0, 0, 0};
+        std::atomic<uint32_t> m_clearColour{0};
         std::shared_ptr<Frame> m_backdrop;         // under m_mutex: one textured batch, its screen, its time
         std::mutex m_mutex;
         std::shared_ptr<Frame> m_published;
