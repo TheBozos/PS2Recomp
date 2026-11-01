@@ -9,6 +9,7 @@
 
 #include "ps2_runtime.h"
 #include "ps2_app.h"
+#include "ps2_coverage.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ps2_input_bindings.h"
 #include "runtime/ps2_video_settings.h"
@@ -2131,6 +2132,7 @@ const char *describeGuestBranchKind(PS2Runtime::GuestBranchKind kind)
 PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 {
     pushDispatchPc(address);
+    ps2_coverage::note(address);
 
     const uint8_t *rdram = m_memory.getRDRAM();
     if (RecompiledFunction *entry = functionTableEntry(rdram, address); entry != nullptr && *entry != nullptr)
@@ -3770,6 +3772,7 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
 void PS2Runtime::run()
 {
     m_stopRequested.store(false, std::memory_order_relaxed);
+    ps2_coverage::startFromEnvironment();
     ps2_stubs::resetSifState();
     resetIop();
     ps2_stubs::resetAudioStubState();
@@ -4056,6 +4059,7 @@ void PS2Runtime::run()
     }
 
     requestStop();
+    ps2_coverage::write();
     // A game thread parked in a wait nothing will end any more (JC2) kept the process alive after its window closed,
     // still running and capturing: give it a few seconds to stop, then end the process.
     if (windowClosed)

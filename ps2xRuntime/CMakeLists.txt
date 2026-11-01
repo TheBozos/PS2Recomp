@@ -410,6 +410,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_debug_ui.cpp
     src/lib/ps2_rom_device.cpp
     src/lib/ps2_vfs.cpp
+    src/lib/ps2_coverage.cpp
     src/lib/ps2_recomp_abi.cpp
     src/lib/ps2_runtime.cpp
     src/lib/ps2_vif1_interpreter.cpp
