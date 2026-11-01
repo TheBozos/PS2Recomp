@@ -334,8 +334,16 @@ namespace ps2_input
         return static_cast<bool>(file);
     }
 
+    bool hostInputAllowed()
+    {
+        static const bool s_background = [] { const char *v = std::getenv("PS2X_INPUT_BACKGROUND"); return v && v[0] == '1'; }();
+        return s_background || !IsWindowReady() || IsWindowFocused();
+    }
+
     PadState padState(int player, int autoGamepad)
     {
+        if (!hostInputAllowed())
+            return PadState{}; // released, sticks centred
         std::lock_guard<std::mutex> lock(g_mutex);
         ensureLoaded();
         const Profile &profile = g_config.players[player != 0 ? 1 : 0];
