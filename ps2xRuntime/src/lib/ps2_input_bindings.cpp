@@ -5,6 +5,11 @@
 
 #include <algorithm>
 #include <atomic>
+
+#if defined(_WIN32)
+// user32's, declared here: <windows.h> clashes with raylib's names (CloseWindow, Rectangle, ...).
+extern "C" __declspec(dllimport) void *__stdcall GetForegroundWindow(void);
+#endif
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -337,7 +342,15 @@ namespace ps2_input
     bool hostInputAllowed()
     {
         static const bool s_background = [] { const char *v = std::getenv("PS2X_INPUT_BACKGROUND"); return v && v[0] == '1'; }();
-        return s_background || !IsWindowReady() || IsWindowFocused();
+        if (s_background || !IsWindowReady())
+            return true;
+#if defined(_WIN32)
+        // The system's foreground window, not raylib's flag: a window that never had the focus (opened minimized or
+        // behind another program) gets no focus-lost event, and raylib then takes it for focused.
+        return GetForegroundWindow() == GetWindowHandle();
+#else
+        return IsWindowFocused();
+#endif
     }
 
     PadState padState(int player, int autoGamepad)
