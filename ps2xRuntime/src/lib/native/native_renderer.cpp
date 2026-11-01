@@ -498,10 +498,25 @@ void main()
             const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
             if (!next && published && (!m_shown || now - m_shown->time > 0.1))
                 next = published;
+            // PS2X_NATIVE_STATS=1: every 5 s, the presents and the new frames among them (what the player sees move),
+            // and how many were shown by the 100 ms fallback.
+            static const bool s_rate = [] { const char *v = std::getenv("PS2X_NATIVE_STATS"); return v && *v == '1'; }();
+            static uint64_t s_presents = 0, s_new = 0, s_late = 0;
+            static double s_since = now;
+            ++s_presents;
             if (next && next != m_shown && (!m_shown || next->time > m_shown->time))
             {
+                ++s_new;
+                s_late += (next == published && !reached(published) && !reached(before)) ? 1u : 0u;
                 m_shownPrevious = std::move(m_shown);
                 m_shown = std::move(next);
+            }
+            if (s_rate && now - s_since >= 5.0)
+            {
+                std::fprintf(stderr, "[native] %.1f presents/s, %.1f new frames/s (%.1f by the 100 ms fallback)\n", s_presents / (now - s_since),
+                             s_new / (now - s_since), s_late / (now - s_since));
+                s_presents = s_new = s_late = 0;
+                s_since = now;
             }
         }
         std::shared_ptr<Frame> overlay, backdrop;
