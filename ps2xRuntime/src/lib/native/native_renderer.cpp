@@ -169,8 +169,67 @@ void main()
 
         // A postEffect over the target (w x h), called between texture modes on the target: shrink, brighten and blur
         // horizontally, blur vertically, then mix back over the target at the far depth (or everywhere).
+        // A postEffect's levels: full-target quads blended into it (its alpha kept): + (1 - high), - (1 - high + low),
+        // then x gain (Cd x (gain - 1) + Cd, or Cd x gain below 1; twice above 2), the same steps as a GS would.
+        void levelsPass(const Renderer::PostEffect &e, int w, int h)
+        {
+            constexpr int kZero = 0, kOne = 1, kSrcColour = 0x0300, kDstColour = 0x0306, kAdd = 0x8006, kReverseSubtract = 0x800B;
+            BeginTextureMode(target);
+            rlDrawRenderBatchActive();
+            rlDisableDepthTest();
+            rlDisableDepthMask();
+            rlEnableColorBlend();
+            const auto quad = [&](const float rgb[3], int src, int dst, int equation) {
+                rlSetBlendFactorsSeparate(src, dst, kZero, kOne, equation, kAdd);
+                rlSetBlendMode(RL_BLEND_CUSTOM_SEPARATE);
+                rlSetTexture(0);
+                rlBegin(RL_QUADS);
+                rlColor4ub(static_cast<unsigned char>(std::clamp(rgb[0], 0.0f, 1.0f) * 255.0f + 0.5f),
+                           static_cast<unsigned char>(std::clamp(rgb[1], 0.0f, 1.0f) * 255.0f + 0.5f),
+                           static_cast<unsigned char>(std::clamp(rgb[2], 0.0f, 1.0f) * 255.0f + 0.5f), 255);
+                rlVertex2f(0.0f, 0.0f);
+                rlVertex2f(0.0f, static_cast<float>(h));
+                rlVertex2f(static_cast<float>(w), static_cast<float>(h));
+                rlVertex2f(static_cast<float>(w), 0.0f);
+                rlEnd();
+                rlDrawRenderBatchActive();
+            };
+            const float lift[3] = {1.0f - e.high[0], 1.0f - e.high[1], 1.0f - e.high[2]};
+            const float drop[3] = {lift[0] + e.low[0], lift[1] + e.low[1], lift[2] + e.low[2]};
+            if (lift[0] > 0.0f || lift[1] > 0.0f || lift[2] > 0.0f)
+                quad(lift, kOne, kOne, kAdd);
+            if (drop[0] > 0.0f || drop[1] > 0.0f || drop[2] > 0.0f)
+                quad(drop, kOne, kOne, kReverseSubtract);
+            float g[3] = {e.gain[0], e.gain[1], e.gain[2]};
+            for (int step = 0; step < 3 && (g[0] != 1.0f || g[1] != 1.0f || g[2] != 1.0f); ++step)
+            {
+                if (g[0] < 1.0f && g[1] < 1.0f && g[2] < 1.0f)
+                {
+                    quad(g, kZero, kSrcColour, kAdd); // Cd x g
+                    break;
+                }
+                // Cd x (1 + f), f = g - 1 up to 1 a step (each channel at least 1 here; one below 1 stays as it is).
+                float f[3];
+                for (int c = 0; c < 3; ++c)
+                {
+                    const float scale = std::max(g[c], 1.0f);
+                    f[c] = std::min(scale, 2.0f) - 1.0f;
+                    g[c] = scale / (1.0f + f[c]);
+                }
+                quad(f, kDstColour, kOne, kAdd);
+            }
+            rlSetBlendMode(RL_BLEND_ALPHA);
+            rlEnableDepthMask();
+            rlEnableDepthTest();
+        }
+
         void postPass(const Renderer::PostEffect &e, int w, int h)
         {
+            if (e.levels)
+            {
+                levelsPass(e, w, h);
+                return;
+            }
             const int pw = std::max(1, e.width), ph = std::max(1, e.height);
             if (blur.id == 0)
             {
