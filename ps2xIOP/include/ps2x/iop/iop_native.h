@@ -90,6 +90,12 @@ namespace ps2x::iop::native
         Function function;
     };
 
+    // A native replacement of one function a module exports: when a module whose export table names library loads,
+    // its export number index runs function instead (recompiled or interpreted module alike). The function gets the
+    // call as the guest makes it (a0-a3 in cpu.gpr[4..7], the rest on the stack at sp + 0x10) and returns with
+    // cpu.gpr[2] the result and cpu.pc = cpu.gpr[31]. For drivers taken over at their API (libsd: native audio).
+    void overrideExport(const char *library, uint32_t index, Function function);
+
     // Generated code: one per module, at namespace scope (static initialization).
     struct Registration
     {
