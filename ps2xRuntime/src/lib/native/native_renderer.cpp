@@ -496,9 +496,10 @@ void main()
         }
         if (backdrop && std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count() - backdrop->time > 0.2)
             backdrop = nullptr;
-        // The GS frame has the native draws already (drawn into it in the GS stream): only the port's 2D over it. The
-        // same when the native renderer presents its own frame but has none yet (a movie, a level's loading bar).
-        const bool overlayOnly = (m_drewIntoGs.load(std::memory_order_relaxed) || (!m_streamDraws && !m_shown)) &&
+        // The GS frame has the native draws already (drawn into it in the GS stream, or to be once the game draws any):
+        // only the port's 2D over it. The same when the native renderer presents its own frame but has none yet (a movie,
+        // a level's loading bar).
+        const bool overlayOnly = (m_drewIntoGs.load(std::memory_order_relaxed) || m_streamDraws || !m_shown) &&
                                  ((overlay && !overlay->batches.empty()) || backdrop);
         if (!m_enabled || (!overlayOnly && (!m_shown || m_drewIntoGs.load(std::memory_order_relaxed))))
             return false;
