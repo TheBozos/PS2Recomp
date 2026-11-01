@@ -729,6 +729,8 @@ uint32_t PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         {
             vif1_regs.mark = imm;
             vif1_regs.stat |= (1u << 6); // MRK
+            if (const uint64_t group = ps2x::native::vif1MarkGroup(imm); group != 0u && m_vif1MarkCallback)
+                m_vif1MarkCallback(group);
             continue;
         }
         else if (opcode == VIF_FLUSHE || opcode == VIF_FLUSH || opcode == VIF_FLUSHA)

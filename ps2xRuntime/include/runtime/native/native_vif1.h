@@ -66,6 +66,15 @@ namespace ps2x::native
     void setMscntGroups(bool on);
     bool mscntGroups();
 
+    // A port that builds its draws on the EE (from the game's own variables at its per-object hooks) while other parts of
+    // the frame still reach the GS front end leaves a VIF MARK in the game's VIF1 list where its draws belong. Asked on
+    // the VIF1 thread at each MARK with its value: the group its draws there are in (Renderer::beginGroup, numbered in
+    // the stream's order, with no other group numbering in use), or 0 for a MARK that is not the port's.
+    using Vif1MarkGate = uint64_t (*)(uint16_t mark);
+
+    void setVif1MarkGate(Vif1MarkGate gate);
+    uint64_t vif1MarkGroup(uint16_t mark);
+
     // VIF1's own registers (the VIF1 thread's, read without a lock): STMASK / STROW / STCOL / STMOD a game set in a
     // transfer the adapter did not see (at boot) are there. Null before the runtime registers them.
     void setVif1Registers(const VIFRegisters *registers);
