@@ -55,6 +55,7 @@ public:
         target.clamp = context.clamp;
         target.fogcol = context.fogcol;
         target.zmask = context.zbuf.zmask;
+        target.fbmsk = context.frame.fbmsk;
     }
 
     // A native port's triangles (Renderer::drawGs) at their marker: drawn into `target`'s render target, with the

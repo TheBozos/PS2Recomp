@@ -6,6 +6,7 @@
 #include "ThreadNaming.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/native/native_vif1.h"
+#include "runtime/native/native_gs_hook.h"
 #include "runtime/vif1_command_stats.h"
 #include <atomic>
 #include <chrono>
@@ -436,6 +437,7 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
 {
     if (sizeBytes == 0u)
         return;
+    ps2x::native::packetStats().vif0Runs.fetch_add(1, std::memory_order_relaxed);
 
     uint32_t pos = 0;
     while (pos + 4 <= sizeBytes)
@@ -621,6 +623,8 @@ uint32_t PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 {
     if (sizeBytes == 0u)
         return 0u;
+    ps2x::native::packetStats().vif1Runs.fetch_add(1, std::memory_order_relaxed);
+    ps2x::native::packetStats().vif1Bytes.fetch_add(sizeBytes, std::memory_order_relaxed);
 
     uint32_t pos = 0;
 

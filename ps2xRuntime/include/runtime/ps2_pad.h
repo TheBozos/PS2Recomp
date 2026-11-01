@@ -14,6 +14,11 @@ public:
     // Port 0 always (gamepad 0, else the keyboard); port 1 while a second gamepad is plugged in, or with
     // PS2X_PAD2_SCRIPT (the same format as PS2X_PAD_SCRIPT, for player 2).
     bool connected(int port) const;
+    // With a multitap (setMultitap, by a port that answers its game's multitap library) port 0's slots 0 to 3 are
+    // players 1 to 4: player N while the Nth gamepad is plugged in or with PS2X_PADN_SCRIPT; port 1 is then empty.
+    bool connected(int port, int slot) const;
+    void setMultitap(bool on);
+    bool multitap() const;
 };
 
 // Buttons a PS2X_PAD_SCRIPT string holds down at a time (seconds since process start), as a mask of

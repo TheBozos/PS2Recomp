@@ -1,3 +1,5 @@
+#include <cstdio>
+#include <cstdlib>
 #include "iop_timrman.h"
 
 #include "../core/iop_cpu.h"
@@ -123,7 +125,8 @@ namespace ps2x::iop::detail
         timer.counterBase = static_cast<uint32_t>(current);
         timer.counterBaseCycle = currentCycle;
 
-        if (timer.compareCallback.function != 0u)
+        // Mode bit 4: the compare raises the timer's interrupt (serviceDue: to the handler intrman holds for it).
+        if (timer.compareCallback.function != 0u || (timer.liveMode & 0x10u) != 0u)
         {
             const uint64_t modulus = timer.width == 16u ? (1ull << 16u) : (1ull << 32u);
             const uint64_t compare = timer.width == 16u ? (timer.compare & 0xFFFFu) : timer.compare;
@@ -161,6 +164,11 @@ namespace ps2x::iop::detail
         const uint32_t a3 = cpu.gpr[7];
         const auto setV0 = [&](uint32_t value) { cpu.gpr[2] = value; };
 
+        // PS2X_IOP_TIMER_LOG=1 (diagnosis): each timrman call (ordinal, a0..a3), the first 60.
+        static const bool s_log = [] { const char *v = std::getenv("PS2X_IOP_TIMER_LOG"); return v && *v == '1'; }();
+        static int s_logged = 0;
+        if (s_log && s_logged++ < 60)
+            std::fprintf(stderr, "[timrman] %u (%x %x %x %x)\n", ordinal, a0, a1, a2, a3);
         switch (ordinal)
         {
         case 3: // GetTimersTable
@@ -239,7 +247,19 @@ namespace ps2x::iop::detail
             setV0(0u);
             return true;
         }
-        case 8: // GetTimerStatus
+        case 8: // GetTimerStatus: the mode and the reached bits, which the read clears (EzMIDI's interrupt handler
+                // checks bit 11 before waking its thread)
+        {
+            Timer *timer = timerFromId(a0);
+            if (!timer)
+            {
+                setV0(errorValue(kIllegalTimerId));
+                return true;
+            }
+            setV0(timer->liveMode | timer->reached);
+            timer->reached = 0u;
+            return true;
+        }
         case 17: // GetTimerMode
         {
             const Timer *timer = timerFromId(a0);
@@ -438,6 +458,22 @@ namespace ps2x::iop::detail
             const Callback callback = compareDue ? timer.compareCallback : timer.overflowCallback;
             timer.compareCycle = UINT64_MAX;
             timer.overflowCycle = UINT64_MAX;
+            timer.reached |= compareDue ? 0x800u : 0x1000u;
+            if (compareDue && callback.function == 0u && (timer.liveMode & 0x10u) != 0u)
+            {
+                // The timer's interrupt, to the handler registered with intrman; the counter restarts at the compare
+                // when the mode says so (bit 3), and the timer runs on.
+                const bool dispatched = m_interruptSink && m_interruptSink(timer.irq);
+                static int s_irqLogged = 0;
+                if (std::getenv("PS2X_IOP_TIMER_LOG") && s_irqLogged++ < 20)
+                    std::fprintf(stderr, "[timrman] interrupt %u at the compare: %s\n", timer.irq, dispatched ? "handled" : "no handler enabled");
+                if (!timer.running)
+                    continue;
+                timer.counterBase = (timer.liveMode & 0x08u) != 0u ? 0u : counterValue(timer, currentCycle);
+                timer.counterBaseCycle = currentCycle;
+                schedule(timer, currentCycle);
+                continue;
+            }
             const uint32_t result = callback.function != 0u
                                         ? executor.executeGuestFunctionWithBudget(callback.function,
                                                                                   callback.common,

@@ -2,6 +2,9 @@
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/native/native_vif1.h"
+#include "runtime/native/native_display.h"
+#include "runtime/native/native_gs_hook.h"
+#include "runtime/native/native_vu0_hle.h"
 #include "ps2_log.h"
 #include <atomic>
 #include <cstdlib>
@@ -108,6 +111,7 @@ namespace
 
     constexpr uint32_t kGsCsrRegOffset = 0x1000u;
     constexpr uint32_t kGsCsrReset = 1u << 9;
+    constexpr uint32_t kVif0Channel = 0x10008000u;
     constexpr uint32_t kVif1Channel = 0x10009000u;
     constexpr uint32_t kVif1Stat = 0x10003C00u;
     constexpr uint32_t kVif1StatFdr = 1u << 23;
@@ -189,6 +193,47 @@ namespace
                 ps2NotifyGsCsrEdge();
             }
         }
+    }
+
+    // The guest's accesses to the GS privileged registers (0x12000000-0x12001fff), counted by register: with the GS
+    // front end (gs: sites) and without one (display: sites), where a read of CSR gets the native display's
+    // (runtime/native/native_display.h: FIELD from the vblank count, FIFO empty), any other read 0, and a write is
+    // dropped (no GS to program: the display mode, the interrupt mask and the acknowledgements have no reader).
+    void countGsPrivAccess(uint32_t regOff, bool write)
+    {
+        const bool absent = ps2x::native::gsFrontEndAbsent();
+#define PS2X_PRIV_SITE(reg)                                                                         \
+    do                                                                                             \
+    {                                                                                              \
+        if (absent)                                                                                \
+        {                                                                                          \
+            if (write)                                                                             \
+                PS2X_GS_TOUCH("display: guest write to GS " reg " (dropped)");                     \
+            else                                                                                   \
+                PS2X_GS_TOUCH("display: guest read of GS " reg);                                   \
+        }                                                                                          \
+        else if (write)                                                                            \
+            PS2X_GS_TOUCH("gs: guest write to GS " reg);                                           \
+        else                                                                                       \
+            PS2X_GS_TOUCH("gs: guest read of GS " reg);                                            \
+    } while (0)
+        switch (regOff)
+        {
+        case 0x0000: PS2X_PRIV_SITE("PMODE"); break;
+        case 0x0010: PS2X_PRIV_SITE("SMODE1"); break;
+        case 0x0020: PS2X_PRIV_SITE("SMODE2"); break;
+        case 0x0070: PS2X_PRIV_SITE("DISPFB1"); break;
+        case 0x0080: PS2X_PRIV_SITE("DISPLAY1"); break;
+        case 0x0090: PS2X_PRIV_SITE("DISPFB2"); break;
+        case 0x00a0: PS2X_PRIV_SITE("DISPLAY2"); break;
+        case 0x00e0: PS2X_PRIV_SITE("BGCOLOR"); break;
+        case 0x1000: PS2X_PRIV_SITE("CSR"); break;
+        case 0x1010: PS2X_PRIV_SITE("IMR"); break;
+        case 0x1040: PS2X_PRIV_SITE("BUSDIR"); break;
+        case 0x1080: PS2X_PRIV_SITE("SIGLBLID"); break;
+        default: PS2X_PRIV_SITE("privileged register (other)"); break;
+        }
+#undef PS2X_PRIV_SITE
     }
 
     // CSR.FIFO (bits 14-15, read-only) reads as empty once the GS has drawn everything sent to it: the
@@ -285,6 +330,24 @@ namespace
     {
         const uint32_t distance = (target - count) & 0xFFFFu;
         return distance == 0u ? 0x10000ull : static_cast<uint64_t>(distance);
+    }
+
+    // The channel's number (D_STAT bit) from its register base.
+    inline uint32_t dmaChannelIndex(uint32_t channelBase)
+    {
+        switch (channelBase)
+        {
+        case 0x10008000u: return 0u;
+        case 0x10009000u: return 1u;
+        case 0x1000A000u: return 2u;
+        case 0x1000B000u: return 3u;
+        case 0x1000B400u: return 4u;
+        case 0x1000C000u: return 5u;
+        case 0x1000C400u: return 6u;
+        case 0x1000C800u: return 7u;
+        case 0x1000D000u: return 8u;
+        default: return 9u;
+        }
     }
 
     struct DmaTagView
@@ -488,14 +551,22 @@ bool PS2Memory::initialize(size_t ramSize)
         // memset zero-fills std::atomic<uint64_t>::csr's bytes, which is not itself
         // a guaranteed-valid atomic store; make the zero-initialization explicit.
         gs_regs.csr.store(0);
-        gs_regs.dispfb1 = (0ULL << 0) | (10ULL << 9) | (0ULL << 15) | (0ULL << 32) | (0ULL << 43);
-        gs_regs.display1 = (0ULL << 0) | (0ULL << 12) | (0ULL << 23) | (0ULL << 27) | (639ULL << 32) | (447ULL << 44);
-        gs_regs.dispfb2 = gs_regs.dispfb1;
-        gs_regs.display2 = gs_regs.display1;
+        if (!ps2x::native::gsFrontEndAbsent()) // no GS front end: the block stays zero, nothing reads or writes it
+        {
+            gs_regs.dispfb1 = (0ULL << 0) | (10ULL << 9) | (0ULL << 15) | (0ULL << 32) | (0ULL << 43);
+            gs_regs.display1 = (0ULL << 0) | (0ULL << 12) | (0ULL << 23) | (0ULL << 27) | (639ULL << 32) | (447ULL << 44);
+            gs_regs.dispfb2 = gs_regs.dispfb1;
+            gs_regs.display2 = gs_regs.display1;
+        }
 
-        // Allocate GS VRAM (4MB)
-        m_gsVRAM = new uint8_t[PS2_GS_VRAM_SIZE];
-        std::memset(m_gsVRAM, 0, PS2_GS_VRAM_SIZE);
+        // Allocate GS VRAM (4MB), unless the port has no GS front end (ps2x::native::setGsFrontEndAbsent): then no GS
+        // memory exists (getGSVRAM() is null).
+        if (!ps2x::native::gsFrontEndAbsent())
+        {
+            PS2X_GS_TOUCH("gs: GS VRAM allocated (4 MB, PS2Memory::initialize)");
+            m_gsVRAM = new uint8_t[PS2_GS_VRAM_SIZE];
+            std::memset(m_gsVRAM, 0, PS2_GS_VRAM_SIZE);
+        }
 
         m_vu0Code = new uint8_t[PS2_VU0_CODE_SIZE];
         m_vu0Data = new uint8_t[PS2_VU0_DATA_SIZE];
@@ -958,6 +1029,9 @@ uint32_t PS2Memory::read32(uint32_t address)
     {
         uint32_t off = address & 7;
         const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+        countGsPrivAccess(regOff, false);
+        if (ps2x::native::gsFrontEndAbsent())
+            return regOff == kGsCsrRegOffset ? static_cast<uint32_t>(ps2x::native::displayCsr() >> (off * 8)) : 0u;
         if (!(regOff == kGsCsrRegOffset && gsLag())) // CSR is live state: with the GS lag it does not wait
             waitForVif1();
         if (regOff == kGsCsrRegOffset)
@@ -1007,6 +1081,9 @@ uint64_t PS2Memory::read64(uint32_t address)
     if (isGsPrivReg(address))
     {
         const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+        countGsPrivAccess(regOff, false);
+        if (ps2x::native::gsFrontEndAbsent())
+            return regOff == kGsCsrRegOffset ? ps2x::native::displayCsr() : 0u;
         if (!(regOff == kGsCsrRegOffset && gsLag()))
             waitForVif1();
         if (regOff == kGsCsrRegOffset)
@@ -1178,6 +1255,9 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
     {
         uint32_t off = address & 7;
         const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+        countGsPrivAccess(regOff, true);
+        if (ps2x::native::gsFrontEndAbsent())
+            return;
         if (gsLag() && !onVif1Worker())
         {
             // CSR (interrupt acknowledgements, the FIELD bit the EE just read) applies now, the display registers
@@ -1265,6 +1345,9 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
     if (isGsPrivReg(address))
     {
         const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+        countGsPrivAccess(regOff, true);
+        if (ps2x::native::gsFrontEndAbsent())
+            return;
         if (gsLag() && !onVif1Worker())
         {
             if (regOff != kGsCsrRegOffset) // as in write32
@@ -1464,6 +1547,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
     if (isGsPrivReg(address))
     {
+        countGsPrivAccess((address - PS2_GS_PRIV_REG_BASE) & ~0x7u, true);
+        if (ps2x::native::gsFrontEndAbsent())
+            return true;
         waitForVif1();
         // NB: unreachable from write8/16/32/64 today since those all funnel IO
         // register writes through addresses in PS2_IO_BASE's range, which is
@@ -1647,6 +1733,35 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             const uint32_t madr = m_ioRegisters[channelBase + 0x10];
             const uint32_t qwc = m_ioRegisters[channelBase + 0x20] & 0xFFFFu;
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
+            ps2x::native::packetStats().kicks[dmaChannelIndex(channelBase)].fetch_add(1, std::memory_order_relaxed);
+
+            // A port that draws nothing from the GS packets (ps2x::native::setGsDmaSkipped): a transfer to VIF1 or the
+            // GIF, either direction, ends at once with nothing read, its chain not followed (no DMA tag, VIFcode or GIF
+            // tag looked at): QWC 0, STR cleared, D_STAT's channel bit, the channel's DMAC handlers (after the store).
+            if (ps2x::native::gsDmaSkipped() && (channelBase == kVif1Channel || channelBase == kGifChannel))
+            {
+                ps2x::native::packetStats().unread[dmaChannelIndex(channelBase)].fetch_add(1, std::memory_order_relaxed);
+                m_ioRegisters[channelBase + 0x20u] = 0u;
+                completeDmacChannel(channelBase, channelBase == kGifChannel ? 2u : 1u);
+                return true;
+            }
+
+            // VIF0: the port is told of each kick (ps2x::native::setVif0Kick), the registers the game wrote, before the
+            // transfer. With ps2x::native::setVif0Skipped the transfer ends at once unread, as VIF1's and the GIF's above:
+            // no DMA tag, VIFcode, MPG or UNPACK read; the port writes VU0's data itself from the kick.
+            if (channelBase == kVif0Channel)
+            {
+                const bool unread = ps2x::native::vif0Skipped();
+                if (const ps2x::native::Vif0Kick kick = ps2x::native::vif0Kick())
+                    kick(m_rdram, m_vu0Data, value, madr, m_ioRegisters[channelBase + 0x30u], qwc, unread);
+                if (unread)
+                {
+                    ps2x::native::packetStats().unread[0].fetch_add(1, std::memory_order_relaxed);
+                    m_ioRegisters[channelBase + 0x20u] = 0u;
+                    completeDmacChannel(channelBase, 0u);
+                    return true;
+                }
+            }
 
             if (tryProcessScratchpadDma(channelBase, value))
             {
@@ -1875,6 +1990,8 @@ std::vector<uint8_t> PS2Memory::pullIpuInput(size_t minBytes)
 std::vector<uint8_t> PS2Memory::readDmaSourceChain(uint32_t channelBase, uint32_t chcr, std::vector<DmaSegment> *segments,
                                                    uint32_t pendingQwc, bool pendingEnds)
 {
+    if (channelBase == kVif1Channel || channelBase == kGifChannel)
+        ps2x::native::packetStats().chainWalks.fetch_add(1, std::memory_order_relaxed);
     uint32_t tagAddr = m_ioRegisters[channelBase + 0x30];
     uint32_t asr0 = m_ioRegisters[channelBase + 0x40];
     uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
@@ -2821,6 +2938,7 @@ void PS2Memory::submitHostGifTransfer(const uint8_t *data, uint32_t size)
     if (!data || size < 16u)
         return;
     noteGifEvent('S', 0x101u, 0u, size / 16u);
+    ps2x::native::packetStats().hostGif.fetch_add(1, std::memory_order_relaxed);
     PendingTransfer pt;
     pt.chainData.assign(data, data + (size & ~15u));
     m_pendingGifTransfers.push_back(std::move(pt));
@@ -2877,6 +2995,7 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
 
     if (pathId == GifPathId::Path3)
     {
+        ps2x::native::packetStats().path3.fetch_add(1, std::memory_order_relaxed);
         waitForVif1(); // after the queued PATH1/PATH2 packets (and their MSKPATH3)
         if (m_path3Masked)
         {
@@ -3255,6 +3374,11 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
 
     if (isGsPrivReg(address))
     {
+        countGsPrivAccess((address - PS2_GS_PRIV_REG_BASE) & ~0x7u, false);
+        if (ps2x::native::gsFrontEndAbsent())
+            return ((address - PS2_GS_PRIV_REG_BASE) & ~0x7u) == kGsCsrRegOffset
+                       ? static_cast<uint32_t>(ps2x::native::displayCsr() >> ((address & 7u) * 8u))
+                       : 0u;
         waitForVif1();
         // NB: unreachable from read8/16/32/64 today, same reasoning as the write
         // path above; kept correct for direct callers.

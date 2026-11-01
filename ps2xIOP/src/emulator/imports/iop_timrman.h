@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 
 namespace ps2x::iop::detail
 {
@@ -17,6 +18,9 @@ namespace ps2x::iop::detail
         [[nodiscard]] bool dispatchImport(uint16_t ordinal, IopCpuState &cpu, uint64_t currentCycle);
         void serviceDue(uint64_t currentCycle, IopGuestExecutor &executor);
         [[nodiscard]] uint64_t nextEventCycle(uint64_t fallback) const noexcept;
+        // A timer's own interrupt (its mode's compare interrupt, bit 4) for a module that registered a handler for it
+        // with intrman (GetHardTimerIntrCode, RegisterIntrHandler) rather than with SetTimerHandler: EzMIDI's tick.
+        void setInterruptSink(std::function<bool(int irq)> sink) { m_interruptSink = std::move(sink); }
 
     private:
         struct Callback
@@ -39,6 +43,7 @@ namespace ps2x::iop::detail
             uint32_t prescale = 1u;
             uint32_t setupMode = 0u;
             uint32_t liveMode = 0u;
+            uint32_t reached = 0u; // status bits 11 (compare reached) and 12 (overflow), cleared when read
             uint32_t counterBase = 0u;
             uint32_t compare = 0u;
             uint64_t counterBaseCycle = 0u;
@@ -61,6 +66,7 @@ namespace ps2x::iop::detail
         static void stop(Timer &timer, uint64_t currentCycle) noexcept;
 
         std::array<Timer, 6> m_timers{};
+        std::function<bool(int irq)> m_interruptSink;
         uint32_t m_holdMode = 0u;
         bool m_servicing = false;
     };

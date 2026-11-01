@@ -1,4 +1,8 @@
+#include "runtime/native/native_display.h"
+#include "runtime/native/native_gs_hook.h"
 #include "runtime/native/native_renderer.h"
+#include "runtime/native/native_vu0_hle.h"
+#include "runtime/ps2_store_patch.h"
 
 #include "raylib.h"
 #include "rlgl.h"
@@ -33,6 +37,7 @@
 #include <stdexcept>
 #include <fstream>
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <cstring>
 #include <limits>
@@ -43,6 +48,9 @@
 #include <thread>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
+#include <bit>
+#include <mutex>
 #include <sstream>
 #include <string_view>
 
@@ -823,6 +831,13 @@ PS2Runtime::PS2Runtime()
 
     m_eeScheduler = std::make_unique<EeScheduler>(*this);
     g_gsCsrEdgeRuntime.store(this, std::memory_order_release);
+    // The GS front end (and the CPU raster backend its constructor makes), unless the port has none: its native
+    // renderer then presents alone and runtime/native/native_display.h answers what the game asks of the display.
+    if (!ps2x::native::gsFrontEndAbsent())
+    {
+        PS2X_GS_TOUCH("gs: GS front end constructed (PS2Runtime)");
+        m_gs = std::make_unique<GS>();
+    }
 
     // Assign rather than memset: R5900Context's constructor zeroes itself and
     // then applies the COP0 reset values, which a memset here would discard.
@@ -867,6 +882,13 @@ void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
     m_debugUiDrawCallback = drawCallback;
     m_debugUiShutdownCallback = shutdownCallback;
     m_debugUiUserData = userData;
+}
+
+void PS2Runtime::gsAbsentFault()
+{
+    std::fprintf(stderr, "[gs] fatal: the GS front end was reached, but this port has none (ps2x::native::setGsFrontEndAbsent)\n");
+    std::fflush(nullptr);
+    std::abort();
 }
 
 PS2Runtime::~PS2Runtime()
@@ -1321,12 +1343,13 @@ static void dumpRuntimeState(std::ostream &out, PS2Memory &memory, PS2Runtime &r
         text << '\n';
     }
     {
-        const GS::LagStats lag = runtime.gs().takeLagStats();
+        const GS::LagStats lag = runtime.hasGs() ? runtime.gs().takeLagStats() : GS::LagStats{};
         const auto [drainNanoseconds, drains] = GSCpuBackend::TakeDrainStats();
         text << "[state] gs frames=" << lag.frames << " ee waited " << lag.waitNanoseconds / 1000000u << " ms for the GS thread, "
              << drains << " raster drains took " << drainNanoseconds / 1000000u << " ms, drawing estimate "
-             << runtime.gsForPresentation().estimatedDrawCycles() << " cycles, display flips="
-             << runtime.gsForPresentation().displayFlips() << " game frames=" << runtime.gameFrames();
+             << (runtime.hasGs() ? runtime.gsForPresentation().estimatedDrawCycles() : 0u) << " cycles, display flips="
+             << (runtime.hasGs() ? runtime.gsForPresentation().displayFlips() : ps2x::native::displayFrames())
+             << " game frames=" << runtime.gameFrames();
         if (memory.vif1Threaded())
         {
             static uint64_t lastVif1WaitNs = 0;
@@ -1347,10 +1370,13 @@ static void dumpRuntimeState(std::ostream &out, PS2Memory &memory, PS2Runtime &r
     text << std::dec << '\n';
     const GSRegisters &gs = memory.gs();
     text << "[state] dma=" << memory.dmaStartCount() << " gif=" << memory.gifCopyCount()
-         << " gsw=" << memory.gsWriteCount() << " vif=" << memory.vifWriteCount() << std::hex
-         << " pmode=0x" << gs.pmode << " dispfb1=0x" << gs.dispfb1 << " display1=0x" << gs.display1
-         << " dispfb2=0x" << gs.dispfb2 << " display2=0x" << gs.display2 << " bgcolor=0x" << gs.bgcolor
-         << std::dec << '\n';
+         << " gsw=" << memory.gsWriteCount() << " vif=" << memory.vifWriteCount() << std::hex;
+    if (runtime.hasGs())
+        text << " pmode=0x" << gs.pmode << " dispfb1=0x" << gs.dispfb1 << " display1=0x" << gs.display1
+             << " dispfb2=0x" << gs.dispfb2 << " display2=0x" << gs.display2 << " bgcolor=0x" << gs.bgcolor;
+    else
+        text << " no GS front end, display frames=" << std::dec << ps2x::native::displayFrames();
+    text << std::dec << '\n';
     for (const EeThreadSnapshot &thread : ee.threads)
     {
         text << "[state]   thread " << thread.id << ' ' << kStatus[static_cast<size_t>(thread.status)]
@@ -1440,7 +1466,9 @@ bool PS2Runtime::syncCoreSubsystems()
 {
     uint8_t *const rdram = m_memory.getRDRAM();
     uint8_t *const gsVram = m_memory.getGSVRAM();
-    if (!rdram || !gsVram)
+    // Without a GS front end there is no GS memory either (PS2Memory::initialize): nothing of the GS to bind.
+    const bool gsAbsent = !m_gs;
+    if (!rdram || (!gsVram && !gsAbsent))
     {
         return false;
     }
@@ -1450,13 +1478,20 @@ bool PS2Runtime::syncCoreSubsystems()
         return true;
     }
 
-    m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
-    m_gs.enableAsync();
-    m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
-                                    { m_gs.submitGIFPacket(data, size); });
+    if (!gsAbsent)
+    {
+        PS2X_GS_TOUCH("gs: GS front end initialised, its thread started (syncCoreSubsystems)");
+        m_gs->init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
+        m_gs->enableAsync();
+        m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
+                                        { m_gs->submitGIFPacket(data, size); });
+        m_memory.setLocalToHostReader([this](uint8_t *dst, uint32_t maxBytes)
+                                      { return m_gs->consumeLocalToHostBytes(dst, maxBytes); });
+    }
+    else // a GIF packet that still reached the arbiter (a VU1 XGKICK, PATH3) has no GS to go to: dropped, counted
+        m_gifArbiter.setProcessPacketFn([](const uint8_t *, uint32_t)
+                                        { PS2X_GS_TOUCH("gs: absent, GIF packet dropped at the GIF arbiter"); });
     m_memory.setGifArbiter(&m_gifArbiter);
-    m_memory.setLocalToHostReader([this](uint8_t *dst, uint32_t maxBytes)
-                                  { return m_gs.consumeLocalToHostBytes(dst, maxBytes); });
     // VIF1 MSCAL/MSCNT waits for the microprogram to end (E bit) on the real hardware: run it to
     // completion. A cap of 65536 cycles cut long batches (VP2 transforms hundreds of vertices per
     // call) in the middle, leaving VU memory half written and the next program working on it.
@@ -1466,8 +1501,8 @@ bool PS2Runtime::syncCoreSubsystems()
     m_memory.setVu1SkipCallback([this](uint32_t)
                                 {
                                     static uint64_t s_group = 0;
-                                    if (ps2x::native::Renderer::instance().hasGroup(++s_group))
-                                        m_gs.queueNativeDraw(s_group, 0); // (a setup's group has none: its strips follow)
+                                    if (ps2x::native::Renderer::instance().hasGroup(++s_group) && m_gs)
+                                        m_gs->queueNativeDraw(s_group, 0); // (a setup's group has none: its strips follow)
                                 });
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  {
@@ -1483,6 +1518,11 @@ bool PS2Runtime::syncCoreSubsystems()
                                      m_vu1.state().dBitEnabled = (vu0Fbrst & (1u << 10)) != 0u;
                                      m_vu1.state().tBitEnabled = (vu0Fbrst & (1u << 11)) != 0u;
                                      g_vu1MscalCount.fetch_add(1u, std::memory_order_relaxed);
+                                     if (!m_gs) // VU1 runs nothing without a GS for its output (the port skips every program)
+                                     {
+                                         PS2X_GS_TOUCH("gs: absent, VU1 microprogram not run");
+                                         return;
+                                     }
                                      g_gsDumpVu1ProgramPc.store(startPC, std::memory_order_relaxed);
                                      // The port's native version of this microprogram, if it has one (VU1 then does
                                      // not run): runtime/native/native_vu1_hle.h.
@@ -1498,7 +1538,7 @@ bool PS2Runtime::syncCoreSubsystems()
                                          run.user = &m_memory;
                                          run.kick = [](void *user, const uint8_t *packet, uint32_t bytes)
                                          { static_cast<PS2Memory *>(user)->submitGifPacket(GifPathId::Path1, packet, bytes); };
-                                         run.nativeUser = &m_gs;
+                                         run.nativeUser = m_gs.get();
                                          run.nativeDraw = [](void *user, uint64_t group, int context)
                                          { static_cast<GS *>(user)->queueNativeDraw(group, context); };
                                          if (hle(run))
@@ -1511,7 +1551,7 @@ bool PS2Runtime::syncCoreSubsystems()
                                      Vu1Recorder::instance().run(m_vu1, m_memory, false, startPC, top, itop, kVu1ProgramCycleLimit, [&]
                                                                  { m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                                                  m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                                                                                 m_gs, &m_memory, startPC, top, itop, kVu1ProgramCycleLimit); });
+                                                                                 *m_gs, &m_memory, startPC, top, itop, kVu1ProgramCycleLimit); });
                                      g_gsDumpVu1ProgramPc.store(~0u, std::memory_order_relaxed);
                                      g_vu1Cycles.fetch_add(m_vu1.state().cycles - cyclesBefore, std::memory_order_relaxed);
                                      if (onWorker && m_memory.gsLag())
@@ -1543,12 +1583,17 @@ bool PS2Runtime::syncCoreSubsystems()
                                      const uint32_t vu0Fbrst = onWorker ? m_memory.vif1JobVu0Fbrst() : cpuContext->vu0_fbrst;
                                      m_vu1.state().dBitEnabled = (vu0Fbrst & (1u << 10)) != 0u;
                                      m_vu1.state().tBitEnabled = (vu0Fbrst & (1u << 11)) != 0u;
+                                     if (!m_gs)
+                                     {
+                                         PS2X_GS_TOUCH("gs: absent, VU1 microprogram resume not run");
+                                         return;
+                                     }
                                      g_gsDumpVu1ProgramPc.store(0x10000u | m_vu1.state().pc, std::memory_order_relaxed);
                                      const uint64_t cyclesBefore = m_vu1.state().cycles;
                                      Vu1Recorder::instance().run(m_vu1, m_memory, true, m_vu1.state().pc, top, itop, kVu1ProgramCycleLimit, [&]
                                                                  { m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                                                 m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                                                                                m_gs, &m_memory, top, itop, kVu1ProgramCycleLimit); });
+                                                                                *m_gs, &m_memory, top, itop, kVu1ProgramCycleLimit); });
                                      g_gsDumpVu1ProgramPc.store(~0u, std::memory_order_relaxed);
                                      g_vu1Cycles.fetch_add(m_vu1.state().cycles - cyclesBefore, std::memory_order_relaxed);
                                      if (onWorker && m_memory.gsLag())
@@ -1558,7 +1603,8 @@ bool PS2Runtime::syncCoreSubsystems()
                                              (cpuContext->vu0_vpu_stat & ~0x0600u) |
                                              (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
                                              (m_vu1.state().stoppedByT ? 0x0400u : 0u); });
-    m_memory.setPresentedFramesProvider([this]() { return gsForPresentation().queuedLatchesDone(); });
+    if (!gsAbsent)
+        m_memory.setPresentedFramesProvider([this]() { return gsForPresentation().queuedLatchesDone(); });
     m_memory.setVu0FbrstProvider([this]()
                                  {
                                      const R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
@@ -1583,11 +1629,14 @@ bool PS2Runtime::useNativeGsRenderer()
 #if defined(PS2X_HAVE_NATIVE_GS)
     if (m_nativeGsRenderer)
         return true;
+    if (!m_gs)
+        return false;
+    PS2X_GS_TOUCH("gs: GS native raster backend created (its own GL context)");
     if (GLFWwindow *shared = GSNativeBackend::createSharedContext())
     {
         // The front end then feeds the shared texture cache every upload (native/native_texture_cache.h).
         ps2x::native::setUploadsWanted(true);
-        m_gs.setRasterBackend(std::make_unique<GSNativeBackend>(shared));
+        m_gs->setRasterBackend(std::make_unique<GSNativeBackend>(shared));
         m_nativeGsRenderer = true;
     }
     return m_nativeGsRenderer;
@@ -1638,7 +1687,7 @@ bool PS2Runtime::initialize(const char *title)
         SetTargetFPS(60);
 #if defined(PS2X_HAVE_NATIVE_GS)
         // The native renderer draws on a context shared with the window's (created here, on the main thread).
-        if (const char *renderer = std::getenv("PS2X_GS_RENDERER"); renderer && std::string_view(renderer) == "native")
+        if (const char *renderer = std::getenv("PS2X_GS_RENDERER"); m_gs && renderer && std::string_view(renderer) == "native")
             useNativeGsRenderer();
 #endif
         if (m_debugUiInitCallback)
@@ -2445,6 +2494,131 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
         return;
     }
 
+    // The port's native version of this microprogram (runtime/native/native_vu0_hle.h).
+    if (const ps2x::native::Vu0Hle hle = ps2x::native::vu0Hle())
+    {
+        static const bool s_hleCheck = []
+        {
+            const char *value = std::getenv("PS2X_VU0_HLE_CHECK");
+            return value && value[0] == '1';
+        }();
+        if (!s_hleCheck)
+        {
+            if (hle(ctx, vu0Code, vu0Data, startPC))
+                return;
+        }
+        else
+        {
+            const R5900Context saved = *ctx;
+            std::vector<uint8_t> dataSaved(vu0Data, vu0Data + PS2_VU0_DATA_SIZE);
+            if (hle(ctx, vu0Code, vu0Data, startPC))
+            {
+                const R5900Context native = *ctx;
+                std::vector<uint8_t> dataNative(vu0Data, vu0Data + PS2_VU0_DATA_SIZE);
+                *ctx = saved;
+                std::memcpy(vu0Data, dataSaved.data(), PS2_VU0_DATA_SIZE);
+                ctx->vu0_itop = m_memory.vif0_regs.itops;
+                m_vu0.reset();
+                copyVu0ContextToState(ctx, m_vu0.state());
+                m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE, vu0Data, PS2_VU0_DATA_SIZE, gsChecked(), &m_memory, startPC, 0u,
+                              ctx->vu0_itop, 4096, true);
+                copyVu0StateToContext(m_vu0.state(), ctx);
+                // Per program: calls, those differing by more than 1e-4 relative, those not bit-exact (any bit of a
+                // register or of data memory), and the worst relative difference of each register (and of data memory).
+                struct Report
+                {
+                    uint64_t calls = 0, differing = 0, inexact = 0;
+                    float worst = 0.0f;
+                    char what[160] = {};
+                    char firstInexact[160] = {};
+                };
+                static std::unordered_map<uint32_t, Report> s_reports;
+                static uint64_t s_calls = 0;
+                Report &report = s_reports[startPC];
+                ++report.calls;
+                float worst = 0.0f;
+                bool anyBit = false;
+                char what[160] = {};
+                const auto note = [&](float a, float b, const char *name, int index, int lane)
+                {
+                    if (std::memcmp(&a, &b, 4) == 0)
+                        return;
+                    if (!anyBit && report.inexact == 0u)
+                        std::snprintf(report.firstInexact, sizeof(report.firstInexact), "%s%d.%c native %#x interpreter %#x",
+                                      name, index, "xyzw"[lane], std::bit_cast<uint32_t>(a), std::bit_cast<uint32_t>(b));
+                    anyBit = true;
+                    const float scale = std::max({std::fabs(a), std::fabs(b), 1e-3f});
+                    const float d = std::isfinite(a) && std::isfinite(b) ? std::fabs(a - b) / scale : 1e9f;
+                    if (d > worst)
+                    {
+                        worst = d;
+                        std::snprintf(what, sizeof(what), "%s%d.%c native %g interpreter %g", name, index, "xyzw"[lane], a, b);
+                    }
+                };
+                for (int r = 1; r < 32; ++r)
+                {
+                    alignas(16) float a[4], b[4];
+                    _mm_store_ps(a, native.vu0_vf[r]);
+                    _mm_store_ps(b, ctx->vu0_vf[r]);
+                    for (int l = 0; l < 4; ++l)
+                        note(a[l], b[l], "vf", r, l);
+                }
+                for (int r = 1; r < 16; ++r)
+                    anyBit = anyBit || native.vi[r] != ctx->vi[r];
+                for (int r = 1; r < 16; ++r)
+                    if (native.vi[r] != ctx->vi[r] && worst < 1e9f)
+                    {
+                        worst = 1e9f;
+                        std::snprintf(what, sizeof(what), "vi%d native %#x interpreter %#x", r, native.vi[r], ctx->vi[r]);
+                    }
+                for (uint32_t at = 0; at + 4u <= PS2_VU0_DATA_SIZE; at += 4u)
+                {
+                    float a, b;
+                    std::memcpy(&a, dataNative.data() + at, 4);
+                    std::memcpy(&b, vu0Data + at, 4);
+                    note(a, b, "data@", static_cast<int>(at / 16u), static_cast<int>((at / 4u) & 3u));
+                }
+                report.inexact += anyBit ? 1u : 0u;
+                if (worst > 1e-4f)
+                {
+                    ++report.differing;
+                    if (worst > report.worst)
+                    {
+                        report.worst = worst;
+                        std::memcpy(report.what, what, sizeof(what));
+                        std::fprintf(stderr, "[vu0:hle] pc %#x call %llu: worst so far %s\n", startPC,
+                                     static_cast<unsigned long long>(report.calls), what);
+                    }
+                }
+                if (++s_calls % 50000u == 0u)
+                    for (const auto &[pc, r] : s_reports)
+                        std::fprintf(stderr, "[vu0:hle] pc %#x: %llu calls, %llu differ (worst %s), %llu not bit-exact (first: %s)\n", pc,
+                                     static_cast<unsigned long long>(r.calls), static_cast<unsigned long long>(r.differing),
+                                     r.differing ? r.what : "-", static_cast<unsigned long long>(r.inexact),
+                                     r.inexact ? r.firstInexact : "-");
+                return;
+            }
+        }
+    }
+
+    // VIF0 unread (ps2x::native::setVif0Skipped): VU0's code memory was never filled, nothing to interpret.
+    if (ps2x::native::vif0Skipped())
+    {
+        ps2x::native::packetStats().vu0NotRun.fetch_add(1, std::memory_order_relaxed);
+        static std::mutex s_reportedMutex;
+        static std::unordered_set<uint32_t> s_reported;
+        std::lock_guard<std::mutex> lock(s_reportedMutex);
+        if (s_reported.insert(startPC).second)
+            std::fprintf(stderr, "[vu0] microprogram at pc %#x not run: no native version, and VIF0 unread (no code)\n", startPC);
+        return;
+    }
+    if (!m_gs) // VU0's interpreter takes the GS (for VU1's XGKICK): none here, the program is not run
+    {
+        PS2X_GS_TOUCH("gs: absent, VU0 interpreter run skipped");
+        return;
+    }
+    ps2x::native::packetStats().vu0Interpreter.fetch_add(1, std::memory_order_relaxed);
+
     // PS2X_VU0_CHECK=1: every microprogram also runs through the interpreter from the same state; a difference
     // with the compiled run is reported and the interpreter's result kept.
     static const bool s_check = []
@@ -2469,7 +2643,7 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     }
     m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
                   vu0Data, PS2_VU0_DATA_SIZE,
-                  m_gs, &m_memory,
+                  *m_gs, &m_memory,
                   startPC, 0u, ctx->vu0_itop, 4096, true);
     if (s_check)
     {
@@ -2479,7 +2653,7 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
         m_vu0.reset();
         m_vu0.state() = before;
         m_vu0.setCompiledCodeDisabled(true);
-        m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE, vu0Data, PS2_VU0_DATA_SIZE, m_gs, &m_memory, startPC, 0u,
+        m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE, vu0Data, PS2_VU0_DATA_SIZE, *m_gs, &m_memory, startPC, 0u,
                       ctx->vu0_itop, 4096, true);
         m_vu0.setCompiledCodeDisabled(false);
         const VU1State &reference = m_vu0.state();
@@ -2556,6 +2730,8 @@ void PS2Runtime::drainCompletedDmacHandlers(uint8_t *rdram)
 void PS2Runtime::pollGsInterrupt(uint8_t *rdram)
 {
     (void)rdram;
+    if (!m_gs) // no GS: no SIGNAL / FINISH, no GS interrupt
+        return;
     // Edges are recorded by the GS when CSR SIGNAL (bit0) / FINISH (bit1) go 0->1;
     // IMR bit8 SIGMSK / bit9 FINISHMSK (1 = masked) suppress the interrupt.
     // The GS interrupt line is high while an unmasked event bit is set: unmasking a pending event
@@ -2570,6 +2746,7 @@ void PS2Runtime::pollGsInterrupt(uint8_t *rdram)
     m_gsIrqLine = line;
     if (raise)
     {
+        ps2x::native::packetStats().gsIrqs.fetch_add(1, std::memory_order_relaxed);
         eeScheduler().dispatchIrq(false, 0u);
     }
 }
@@ -3301,6 +3478,8 @@ void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value)
 {
     ps2TraceGuestWrite(rdram, vaddr, 4u, value, 0u, "WRITE32", ctx);
+    if (const ps2x::StorePatch patch = ps2x::storePatch(); patch && ctx && patch(ctx->pc, vaddr, value))
+        return;
     try
     {
         m_memory.write32(vaddr, value);
@@ -3361,12 +3540,12 @@ void PS2Runtime::kickGifDmaChainFromMMIO(uint8_t *rdram,
     ps2TraceGuestWrite(rdram, GIF_TADR, 4u, tadr, 0u, "WRITE32", ctx);
     m_memory.writeIORegister(GIF_TADR, tadr);
     ps2TraceGuestWrite(rdram, GIF_CHCR, 4u, chcr, 0u, "WRITE32", ctx);
-    if (m_memory.tryProcessNativeGifImageUploadChain(m_gs, tadr, chcr))
+    if (m_gs && m_memory.tryProcessNativeGifImageUploadChain(*m_gs, tadr, chcr))
     {
         drainCompletedDmacHandlers(rdram);
         return;
     }
-    if (m_memory.tryProcessNativeGifPackedChain(m_gs, tadr, chcr))
+    if (m_gs && m_memory.tryProcessNativeGifPackedChain(*m_gs, tadr, chcr))
     {
         drainCompletedDmacHandlers(rdram);
         return;
@@ -3461,7 +3640,7 @@ bool ps2GsFifoEmpty()
     // CSR's FIFO bit as it is now: through gs() every CSR read would first drain the queued VIF1 transfers, so a game
     // polling CSR for FINISH (VP2) waited for the whole frame on each poll, against the GS lag's design.
     PS2Runtime *runtime = g_gsCsrEdgeRuntime.load(std::memory_order_acquire);
-    return !runtime || runtime->gsForPresentation().fifoEmpty();
+    return !runtime || !runtime->hasGs() || runtime->gsForPresentation().fifoEmpty();
 }
 
 bool ps2ScheduleGsInterruptCheck(uint64_t delayCycles)
@@ -3745,7 +3924,12 @@ void PS2Runtime::run()
         if (IsKeyPressed(KEY_F10)) // F10: start the GS recording (PS2X_GS_RECORD with PS2X_GS_RECORD_AT=key)
             ps2GsRequestRecording();
         uint32_t presentGlTexture = 0u;
-        UploadFrame(frameTex, this, presentWidth, presentHeight, presentGlTexture);
+        // Headless or absent, nothing to present from the GS front end.
+        if (m_gs && !ps2x::native::gsHeadless())
+        {
+            PS2X_GS_TOUCH("gs: presentation, GS frame uploaded (UploadFrame)");
+            UploadFrame(frameTex, this, presentWidth, presentHeight, presentGlTexture);
+        }
         Texture2D shownTex = frameTex;
         if (presentGlTexture != 0u) // the GS renderer's own texture (GS native back end): drawn as it is
         {
@@ -3787,20 +3971,25 @@ void PS2Runtime::run()
             const char *value = std::getenv("PS2X_NATIVE_VIEW");
             return value && std::string_view(value) == "only";
         }();
-        if (!(s_nativeOnly && ps2x::native::Renderer::instance().enabled() && ps2x::native::Renderer::instance().hasDraws()))
+        if (!ps2x::native::Renderer::instance().presentsAlone() &&
+            !(s_nativeOnly && ps2x::native::Renderer::instance().enabled() && ps2x::native::Renderer::instance().hasDraws()))
             DrawTexturePro(shownTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
         // raylib batches its draws: sent now, before the native renderer's own GL calls change the state they need
         // (without the debug window, nothing else sent them before the end of the frame, and the window was black).
         rlDrawRenderBatchActive();
-        ps2x::native::Renderer::instance().setGsFrame(shownTex.id, shownTex.width, shownTex.height, shownTex.format);
+        if (m_gs)
+            ps2x::native::Renderer::instance().setGsFrame(shownTex.id, shownTex.width, shownTex.height, shownTex.format);
         ps2x::native::Renderer::instance().present(dstRect.x, dstRect.y, dstRect.width, dstRect.height);
-        DrawFpsOverlay(gameFrames(), gsForPresentation().displayFlips(), eeScheduler().currentCycle(), screenWidth, screenHeight);
+        // The frames shown: the GS front end's display flips, or (none) the frames the game ended (native display).
+        DrawFpsOverlay(gameFrames(), m_gs ? gsForPresentation().displayFlips() : ps2x::native::displayFrames(),
+                       eeScheduler().currentCycle(), screenWidth, screenHeight);
         if (m_debugUiInitialized && m_debugUiDrawCallback)
         {
             m_debugUiDrawCallback(*this, m_debugUiUserData);
         }
         // PS2X_CAPTURE_WINDOW_DIR=<folder>: the window as shown (whatever the GS renderer, native 3D included) as
-        // window_<tenths of seconds>.png every PS2X_CAPTURE_INTERVAL seconds (default 5).
+        // window_<tenths of seconds>.png every PS2X_CAPTURE_INTERVAL seconds (default 5), from PS2X_CAPTURE_START seconds
+        // on (default: the first interval); under a tenth of a second apart, window_<milliseconds>.png (a flicker's frames).
         static const char *s_windowCaptureDir = std::getenv("PS2X_CAPTURE_WINDOW_DIR");
         if (s_windowCaptureDir && *s_windowCaptureDir)
         {
@@ -3811,7 +4000,12 @@ void PS2Runtime::run()
                 return parsed > 0.0 ? parsed : 5.0;
             }();
             static const double s_start = GetTime();
-            static double s_next = s_interval;
+            static double s_next = []
+            {
+                const char *value = std::getenv("PS2X_CAPTURE_START");
+                const double start = value ? std::atof(value) : 0.0;
+                return start > 0.0 ? start : s_interval;
+            }();
             const double elapsed = GetTime() - s_start;
             if (elapsed >= s_next)
             {
@@ -3819,7 +4013,30 @@ void PS2Runtime::run()
                 rlDrawRenderBatchActive(); // the frame's queued draws, so the capture has them
                 Image image = LoadImageFromScreen();
                 char path[1024];
-                std::snprintf(path, sizeof(path), "%s/window_%06d.png", s_windowCaptureDir, static_cast<int>(elapsed * 10.0));
+                if (s_interval < 0.1)
+                    std::snprintf(path, sizeof(path), "%s/window_%08d.png", s_windowCaptureDir, static_cast<int>(elapsed * 1000.0));
+                else
+                    std::snprintf(path, sizeof(path), "%s/window_%06d.png", s_windowCaptureDir, static_cast<int>(elapsed * 10.0));
+                ExportImage(image, path);
+                UnloadImage(image);
+            }
+            // F9 starts and stops a burst: the window every tenth of a second as burst_<milliseconds>.png (turning the
+            // camera around a spot, say).
+            static bool s_burst = false;
+            static double s_burstNext = 0.0;
+            if (IsKeyPressed(KEY_F9))
+            {
+                s_burst = !s_burst;
+                s_burstNext = elapsed;
+                std::fprintf(stderr, "[run] capture burst %s at %.1f s\n", s_burst ? "started" : "stopped", elapsed);
+            }
+            if (s_burst && elapsed >= s_burstNext)
+            {
+                s_burstNext = elapsed + 0.1;
+                rlDrawRenderBatchActive();
+                Image image = LoadImageFromScreen();
+                char path[1024];
+                std::snprintf(path, sizeof(path), "%s/burst_%08d.png", s_windowCaptureDir, static_cast<int>(elapsed * 1000.0));
                 ExportImage(image, path);
                 UnloadImage(image);
             }

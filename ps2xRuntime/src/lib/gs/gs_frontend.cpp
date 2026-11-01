@@ -1,6 +1,9 @@
+#include "runtime/native/native_display.h"
+#include "runtime/native/native_gs_hook.h"
 #include "runtime/native/native_texture_cache.h"
 #include "runtime/native/native_renderer.h"
 #include "ThreadNaming.h"
+#include <unordered_map>
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_parallel.h"
@@ -148,6 +151,7 @@ namespace
 GS::GS()
     : m_backend(std::make_unique<GSCpuBackend>())
 {
+    PS2X_GS_TOUCH("gs: GS::GS (with a CPU raster backend)");
     reset();
 }
 
@@ -164,6 +168,7 @@ GS::~GS()
 
 bool GS::fifoEmpty() const
 {
+    PS2X_GS_TOUCH("gs: GS::fifoEmpty");
     std::lock_guard<std::mutex> lock(m_queueMutex);
     return m_queue.empty() && !m_workerBusy;
 }
@@ -259,6 +264,7 @@ void GS::waitForGsFrames()
 
 GS::LagStats GS::takeLagStats()
 {
+    PS2X_GS_TOUCH("gs: GS::takeLagStats");
     std::lock_guard<std::mutex> lock(m_queueMutex);
     return std::exchange(m_lagStats, LagStats{});
 }
@@ -327,6 +333,7 @@ uint64_t GS::gsEventDelay()
 
 void GS::postQueuedCpuEvents(const uint8_t *data, uint32_t sizeBytes)
 {
+    ps2x::native::packetStats().eventScans.fetch_add(1, std::memory_order_relaxed);
     uint32_t offset = 0;
     while (offset + 16u <= sizeBytes)
     {
@@ -362,13 +369,16 @@ void GS::postQueuedCpuEvents(const uint8_t *data, uint32_t sizeBytes)
                         switch (address)
                         {
                         case GS_REG_SIGNAL:
+                            ps2x::native::packetStats().signals.fetch_add(1, std::memory_order_relaxed);
                             postCpuEvent(GsCpuEvent::Signal, lo, gsEventDelay());
                             break;
                         case GS_REG_FINISH:
+                            ps2x::native::packetStats().finishes.fetch_add(1, std::memory_order_relaxed);
                             postCpuEvent(GsCpuEvent::Finish, lo, gsEventDelay());
                             waitForGsFrames();
                             break;
                         case GS_REG_LABEL:
+                            ps2x::native::packetStats().labels.fetch_add(1, std::memory_order_relaxed);
                             postCpuEvent(GsCpuEvent::Label, lo, gsEventDelay());
                             break;
                         default:
@@ -560,8 +570,9 @@ void GS::workerLoop()
             {
                 const GSTransferSnapshot transfer = m_backend->GetTransferSnapshot();
                 // No image transfer in flight: none set up, or the last one complete (a game uploading every frame
-                // never goes back to "none").
-                if (transfer.direction == 3u || transfer.totalPixels == 0u || transfer.copiedPixels >= transfer.totalPixels)
+                // never goes back to "none"), or a readback (VRAM unchanged: TMB's flares read the Z buffer back).
+                if (transfer.direction == 3u || transfer.direction == 1u || transfer.totalPixels == 0u ||
+                    transfer.copiedPixels >= transfer.totalPixels)
                 {
                     GsTraceHeader header;
                     m_backend->SnapshotVram(header.vram);
@@ -586,6 +597,14 @@ void GS::workerLoop()
         }
         if (queueTraceActive())
             traceQueuedCommand(command);
+        // The native textures in stream order (setUploadsInStreamOrder): the uploads as the GS reaches them.
+        if (!m_isShadow && ps2x::native::uploadsInStreamOrder() && size != 0u)
+        {
+            if (command.kind == QueuedCommand::Kind::GifPacket || command.kind == QueuedCommand::Kind::NativePackedGifPacket)
+                ps2x::native::textures().scanGifPacket(data, size);
+            else if (command.kind == QueuedCommand::Kind::NativeImageUpload && (command.registers[3] & 3u) == 0u)
+                ps2x::native::textures().upload(command.registers[0], command.registers[1], command.registers[2], data, size);
+        }
         if (m_parallel)
             processWithParallel(command);
         else
@@ -650,12 +669,23 @@ void GS::workerLoop()
 
 void GS::submitGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    PS2X_GS_TOUCH("gs: GS::submitGIFPacket");
     if (!data || sizeBytes < 16u)
         return;
-    if (ps2x::native::uploadsWanted()) // the native textures: the game's own uploads
+    ps2x::native::packetStats().gifPackets.fetch_add(1, std::memory_order_relaxed);
+    ps2x::native::packetStats().gifBytes.fetch_add(sizeBytes, std::memory_order_relaxed);
+    if (ps2x::native::gsHeadless()) // only the events the CPU waits on (ps2x::native::setGsHeadless)
+    {
+        postQueuedCpuEvents(data, sizeBytes);
+        noteQueuedDrawing();
+        return;
+    }
+    if (ps2x::native::uploadsAtSubmit()) // the native textures: the game's own uploads
         ps2x::native::textures().scanGifPacket(data, sizeBytes);
     if (!shouldQueue())
     {
+        if (ps2x::native::uploadsInStreamOrder())
+            ps2x::native::textures().scanGifPacket(data, sizeBytes);
         processGIFPacket(data, sizeBytes);
         return;
     }
@@ -795,6 +825,9 @@ void GS::traceQueuedCommand(const QueuedCommand &command)
 
 void GS::queueNativeDraw(uint64_t group, int context)
 {
+    PS2X_GS_TOUCH("gs: GS::queueNativeDraw");
+    if (ps2x::native::gsHeadless())
+        return;
     const int index = context != 0 ? 1 : 0;
     // Draws every native group up to the cell's value: a marker still at the queue's tail (nothing queued after it,
     // not taken by the GS thread yet) takes the new group instead of a second marker following it.
@@ -899,6 +932,7 @@ void GS::compareShadowVram()
 
 void GS::enableAsync()
 {
+    PS2X_GS_TOUCH("gs: GS::enableAsync");
     // Called by the runtime after init(). Library users (tests, tools) keep the synchronous GS, whose
     // VRAM is current as soon as a packet call returns.
 #if defined(PS2X_HAVE_PARALLEL_GS)
@@ -932,6 +966,7 @@ void GS::enableAsync()
 
 bool GS::requestParallelRenderer()
 {
+    PS2X_GS_TOUCH("gs: GS::requestParallelRenderer");
 #if defined(PS2X_HAVE_PARALLEL_GS)
     std::lock_guard<std::mutex> lock(m_queueMutex);
     if (m_parallelRequested)
@@ -957,12 +992,14 @@ void GS::waitForIdle()
 
 void GS::setDrawRates(GsDrawEstimate::Rates rates)
 {
+    PS2X_GS_TOUCH("gs: GS::setDrawRates");
     m_drawRates = rates;
     m_drawEstimate.setRates(gsDrawRates(m_drawRates));
 }
 
 void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
 {
+    PS2X_GS_TOUCH("gs: GS::init");
     waitForIdle();
     m_drawEstimate = GsDrawEstimate{};
     m_drawEstimate.setRates(gsDrawRates(m_drawRates));
@@ -1092,6 +1129,7 @@ const uint8_t *GS::lockDisplaySnapshot(uint32_t &outSize)
 
 GSDebugSnapshot GS::getDebugSnapshot() const
 {
+    PS2X_GS_TOUCH("gs: GS::getDebugSnapshot");
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
 
     GSDebugSnapshot snapshot{};
@@ -1411,6 +1449,7 @@ GSPresentationRequest GS::buildPresentationRequestUnlocked() const
 
 void GS::latchHostPresentationFrame()
 {
+    PS2X_GS_TOUCH("gs: GS::latchHostPresentationFrame");
     // paraLLEl-GS, and a backend whose GPU context lives on the GS thread (GSNativeBackend), present on the GS
     // thread, after what is queued before it.
     if ((m_parallelRequested || (m_backend && m_backend->PresentsOnDrawThread())) && shouldQueue())
@@ -1423,6 +1462,7 @@ void GS::latchHostPresentationFrame()
 
 void GS::queueHostPresentationLatch()
 {
+    PS2X_GS_TOUCH("gs: GS::queueHostPresentationLatch");
     if (!shouldQueue())
     {
         latchHostPresentationFrame();
@@ -1486,7 +1526,11 @@ void GS::latchHostPresentationFrame(const GSPresentationRequest *displayRegister
         uint64_t &display = second ? request.display2 : request.display1;
         dispfb = static_cast<uint64_t>(m_progressiveSource.fbp) | static_cast<uint64_t>(m_progressiveSource.fbw) << 9 |
                  static_cast<uint64_t>(m_progressiveSource.psm) << 15;
-        display = (display & ~(0x7FFull << 44 | 0x3ull << 27)) | static_cast<uint64_t>(m_progressiveHeight - 1u) << 44;
+        // Its own width (VP2's field picture is 512 wide, stretched to 640 by the copy; the window scales it to 4:3).
+        const uint64_t magh = (display >> 23 & 0xFu) + 1u;
+        const uint64_t width = static_cast<uint64_t>(std::max<uint32_t>(m_progressiveSource.fbw, 1u)) * 64u;
+        display = (display & ~(0x7FFull << 44 | 0x3ull << 27 | 0xFFFull << 32)) |
+                  static_cast<uint64_t>(m_progressiveHeight - 1u) << 44 | ((width * magh - 1u) & 0xFFFu) << 32;
         request.smode2 &= ~0x2ull; // frame mode: each line of the picture once
     }
     {
@@ -1541,6 +1585,7 @@ void GS::storePresentationFrame(PresentationFrame &&frame)
 
 bool GS::latchedHostPresentationTexture(uint32_t &texture, uint32_t &width, uint32_t &height) const
 {
+    PS2X_GS_TOUCH("gs: GS::latchedHostPresentationTexture");
     std::lock_guard<std::mutex> lock(m_presentationMutex);
     if (!m_hasHostPresentationFrame || m_hostPresentationTexture == 0u)
         return false;
@@ -1619,6 +1664,7 @@ extern std::atomic<uint32_t> g_gsDumpGifPath;
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    PS2X_GS_TOUCH("gs: GS::processGIFPacket");
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16 || !m_backend)
         return;
@@ -1742,10 +1788,15 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 
 bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
-    if (data && sizeBytes >= 16u && ps2x::native::uploadsWanted())
+    PS2X_GS_TOUCH("gs: GS::processNativePackedGIFPacket");
+    if (data && sizeBytes >= 16u && ps2x::native::uploadsAtSubmit())
         ps2x::native::textures().scanGifPacket(data, sizeBytes);
     if (!shouldQueue())
+    {
+        if (data && sizeBytes >= 16u && ps2x::native::uploadsInStreamOrder())
+            ps2x::native::textures().scanGifPacket(data, sizeBytes);
         return processNativePackedGIFPacketNow(data, sizeBytes);
+    }
     // Validation only looks at the packet, so the EE can still fall back when it fails.
     if (!data || sizeBytes < 16u || !m_backend || !validatePackedGifPacket(data, sizeBytes))
         return false;
@@ -1815,10 +1866,14 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
                            const uint8_t *data,
                            uint32_t sizeBytes)
 {
-    if (data && sizeBytes != 0u && (trxdir & 3u) == 0u && ps2x::native::uploadsWanted())
+    if (ps2x::native::gsHeadless())
+        return;
+    if (data && sizeBytes != 0u && (trxdir & 3u) == 0u && ps2x::native::uploadsAtSubmit())
         ps2x::native::textures().upload(bitbltbuf, trxpos, trxreg, data, sizeBytes);
     if (!shouldQueue())
     {
+        if (data && sizeBytes != 0u && (trxdir & 3u) == 0u && ps2x::native::uploadsInStreamOrder())
+            ps2x::native::textures().upload(bitbltbuf, trxpos, trxreg, data, sizeBytes);
         uploadImageNativeNow(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
         return;
     }
@@ -2118,6 +2173,7 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
 
 void GS::writeRegister(uint8_t regAddr, uint64_t value)
 {
+    PS2X_GS_TOUCH("gs: GS::writeRegister");
     // paraLLEl-GS: in queue order, without waiting (0x59-0x5f mirror display registers, no drawing state).
     if (m_parallelRequested && shouldQueue() && (regAddr < 0x59u || regAddr > 0x5fu) && regAddr != GS_REG_SIGNAL &&
         regAddr != GS_REG_FINISH && regAddr != GS_REG_LABEL)
@@ -2447,6 +2503,18 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
     case GS_REG_TRXDIR:
     {
         m_trxdir = static_cast<uint32_t>(value & 0x3);
+        // PS2X_LOG_GS_WRITERS=1: each transfer (TRXDIR 0 upload, 1 readback, 2 GS-to-GS copy), once per BITBLTBUF.
+        if (static const bool logWriters = std::getenv("PS2X_LOG_GS_WRITERS") != nullptr; logWriters && m_trxdir != 3u)
+        {
+            static std::unordered_map<uint64_t, uint32_t> s_seen;
+            const uint64_t bitbltbuf = static_cast<uint64_t>(m_bitbltbuf.sbp) | static_cast<uint64_t>(m_bitbltbuf.sbw) << 16 |
+                                       static_cast<uint64_t>(m_bitbltbuf.spsm) << 24 | static_cast<uint64_t>(m_bitbltbuf.dbp) << 32 |
+                                       static_cast<uint64_t>(m_bitbltbuf.dbw) << 48 | static_cast<uint64_t>(m_bitbltbuf.dpsm) << 56;
+            if (s_seen[bitbltbuf ^ m_trxdir]++ == 0u)
+                std::fprintf(stderr, "[gs:writers] trxdir %u sbp %u sbw %u spsm 0x%x -> dbp %u dbw %u dpsm 0x%x, %ux%u\n", m_trxdir,
+                             m_bitbltbuf.sbp, m_bitbltbuf.sbw, m_bitbltbuf.spsm, m_bitbltbuf.dbp, m_bitbltbuf.dbw, m_bitbltbuf.dpsm,
+                             m_trxreg.rrw, m_trxreg.rrh);
+        }
 
         if (m_backend)
         {
@@ -2510,6 +2578,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         m_texa.ta0 = static_cast<uint8_t>(value & 0xFFu);
         m_texa.aem = ((value >> 15) & 0x1u) != 0u;
         m_texa.ta1 = static_cast<uint8_t>((value >> 32) & 0xFFu);
+        ps2x::native::Renderer::instance().setGsTexa(value & 0xFF000080FFull); // TA0, AEM, TA1
         PS2_IF_AGRESSIVE_LOGS({
             const uint32_t texaIndex = s_debugTexaWriteCount.fetch_add(1u, std::memory_order_relaxed);
             if (texaIndex < 24u)
@@ -2668,6 +2737,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
 bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
 {
+    PS2X_GS_TOUCH("gs: GS::clearFramebufferContext");
     // The clear packet the caller sends next draws it (sceGsSwapDBuffDc).
     if (m_parallelRequested)
         return true;
@@ -2680,6 +2750,7 @@ bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
 
 bool GS::clearActiveFramebuffer(uint32_t rgba)
 {
+    PS2X_GS_TOUCH("gs: GS::clearActiveFramebuffer");
     if (m_parallelRequested)
         return true;
     waitForIdle(); // the EE needs every earlier packet applied first
@@ -2691,6 +2762,7 @@ bool GS::clearActiveFramebuffer(uint32_t rgba)
 
 uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 {
+    PS2X_GS_TOUCH("gs: GS::consumeLocalToHostBytes");
     if (m_parallelRequested)
     {
         uint32_t copied = 0u;
@@ -2721,6 +2793,7 @@ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 
 void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
 {
+    PS2X_GS_TOUCH("gs: GS::setRasterBackend");
     if (!backend)
         backend = std::make_unique<GSCpuBackend>();
 
@@ -2806,7 +2879,7 @@ void GS::updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch)
         // A field made from a full-height picture (setPresentProgressiveSource): VP2 copies its 640x448 picture into
         // a 640x256 buffer per field, starting a line lower for the second one.
         if (m_presentProgressive && (m_privRegs->smode2 & 0x3u) == 0x3u && state.prim.type == GS_PRIM_SPRITE &&
-            state.prim.tme && state.prim.fst && batch.vertexCount >= 2u && ctx.tex0.tbw == ctx.frame.fbw &&
+            state.prim.tme && state.prim.fst && batch.vertexCount >= 2u && ctx.tex0.tbw >= 4u &&
             (ctx.tex0.psm | 1u) == (ctx.frame.psm | 1u) && (ctx.tex0.tbp0 & 31u) == 0u &&
             ctx.tex0.tbp0 / 32u != ctx.frame.fbp &&
             std::find(m_shownDisplayFbps.begin(), m_shownDisplayFbps.end(), ctx.frame.fbp) != m_shownDisplayFbps.end())
