@@ -194,13 +194,13 @@ void main()
                 rlEnd();
                 rlDrawRenderBatchActive();
             };
-            const float lift[3] = {1.0f - e.high[0], 1.0f - e.high[1], 1.0f - e.high[2]};
-            const float drop[3] = {lift[0] + e.low[0], lift[1] + e.low[1], lift[2] + e.low[2]};
+            const float lift[3] = {1.0f - e.levelHigh[0], 1.0f - e.levelHigh[1], 1.0f - e.levelHigh[2]};
+            const float drop[3] = {lift[0] + e.levelLow[0], lift[1] + e.levelLow[1], lift[2] + e.levelLow[2]};
             if (lift[0] > 0.0f || lift[1] > 0.0f || lift[2] > 0.0f)
                 quad(lift, kOne, kOne, kAdd);
             if (drop[0] > 0.0f || drop[1] > 0.0f || drop[2] > 0.0f)
                 quad(drop, kOne, kOne, kReverseSubtract);
-            float g[3] = {e.gain[0], e.gain[1], e.gain[2]};
+            float g[3] = {e.levelGain[0], e.levelGain[1], e.levelGain[2]};
             for (int step = 0; step < 3 && (g[0] != 1.0f || g[1] != 1.0f || g[2] != 1.0f); ++step)
             {
                 if (g[0] < 1.0f && g[1] < 1.0f && g[2] < 1.0f)

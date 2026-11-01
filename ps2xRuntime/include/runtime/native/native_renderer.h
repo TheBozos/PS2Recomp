@@ -118,10 +118,10 @@ namespace ps2x::native
             int width = 128, height = 89;
             float gain = 1.0f, sigma = 0.0f, alpha = 1.0f;
             float depthFrom = 1.0f;
-            // levels instead of the blur: every pixel's RGB becomes clamp(gain x max(0, min(F, high) - low)) per
-            // channel (0..1 values; a game's brightness / tone pass over its finished frame).
+            // levels instead of the blur: every pixel's RGB becomes clamp(levelGain x max(0, min(F, levelHigh) -
+            // levelLow)) per channel (0..1 values; a game's brightness / tone pass over its finished frame).
             bool levels = false;
-            float gain[3] = {1.0f, 1.0f, 1.0f}, high[3] = {1.0f, 1.0f, 1.0f}, low[3] = {0.0f, 0.0f, 0.0f};
+            float levelGain[3] = {1.0f, 1.0f, 1.0f}, levelHigh[3] = {1.0f, 1.0f, 1.0f}, levelLow[3] = {0.0f, 0.0f, 0.0f};
         };
         // at: the batch it goes before (batchCount() when that point was reached; past the end: at the end).
         void postEffect(const PostEffect &effect, size_t at = SIZE_MAX);
