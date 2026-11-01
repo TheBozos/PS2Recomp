@@ -553,7 +553,8 @@ namespace ps2_stubs
         float dot = 0.0f;
         if (readVuVec4f(rdram, lhsAddr, lhs) && readVuVec4f(rdram, rhsAddr, rhs))
         {
-            dot = (lhs[0] * rhs[0]) + (lhs[1] * rhs[1]) + (lhs[2] * rhs[2]) + (lhs[3] * rhs[3]);
+            // libvu0: vmul.xyz, then x + y + z (w is not part of it).
+            dot = (lhs[0] * rhs[0]) + (lhs[1] * rhs[1]) + (lhs[2] * rhs[2]);
         }
 
         if (ctx)
@@ -733,11 +734,13 @@ namespace ps2_stubs
         float src[4]{}, out[4]{};
         if (readVuVec4f(rdram, srcAddr, src))
         {
-            const float len = std::sqrt((src[0] * src[0]) + (src[1] * src[1]) + (src[2] * src[2]) + (src[3] * src[3]));
-            if (len > 1.0e-6f)
+            // libvu0: the length of xyz, Q = 1 / length (the VU's largest float for 0, so a zero vector stays zero),
+            // xyz scaled by Q, w = 0.
+            const float len = std::sqrt((src[0] * src[0]) + (src[1] * src[1]) + (src[2] * src[2]));
+            if (len > 0.0f)
             {
                 const float invLen = 1.0f / len;
-                for (int i = 0; i < 4; ++i)
+                for (int i = 0; i < 3; ++i)
                 {
                     out[i] = src[i] * invLen;
                 }
@@ -931,16 +934,9 @@ namespace ps2_stubs
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t srcAddr = getRegU32(ctx, 5);
         float src[4]{}, out[4]{};
-        float scale = ctx ? ctx->f[12] : 0.0f;
-        if (scale == 0.0f)
-        {
-            uint32_t raw = getRegU32(ctx, 6);
-            std::memcpy(&scale, &raw, sizeof(scale));
-            if (scale == 0.0f)
-            {
-                scale = static_cast<float>(getRegU32(ctx, 6));
-            }
-        }
+        // libvu0: the scale is $f12 (mfc1), even when it is 0 (a2 is not an argument: reading it made a zero scale
+        // whatever a2 held, and Dark Cloud's cloth flew off with a zero wind).
+        const float scale = ctx ? ctx->f[12] : 0.0f;
 
         if (readVuVec4f(rdram, srcAddr, src))
         {
