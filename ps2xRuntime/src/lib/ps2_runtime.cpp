@@ -1593,6 +1593,10 @@ bool PS2Runtime::initialize(const char *title)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
         SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+        // PS2X_WINDOW_NO_FOCUS=1: the window opens without taking the focus (a scripted test beside a game someone
+        // plays: taking the focus would leave that game without its pad, the host input going to the focused window).
+        if (const char *noFocus = std::getenv("PS2X_WINDOW_NO_FOCUS"); noFocus && noFocus[0] == '1')
+            SetConfigFlags(FLAG_WINDOW_UNFOCUSED);
         // PS2X_WINDOW_SIZE=<width>x<height>: the window's size when it opens (it can be resized after).
         int windowWidth = HOST_WINDOW_WIDTH, windowHeight = HOST_WINDOW_HEIGHT;
         if (const char *size = std::getenv("PS2X_WINDOW_SIZE"); size && *size)
