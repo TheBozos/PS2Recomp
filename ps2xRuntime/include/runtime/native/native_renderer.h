@@ -109,9 +109,11 @@ namespace ps2x::native
         // frame being built's.
         void publishOverlay(const Screen &screen);
         // A picture under the overlay (a movie frame), at (x, y, width, height) in the screen's GS coordinates; shown while
-        // set again within a fifth of a second.
+        // set again within a fifth of a second, or, held, until clearBackdrop or the next one (a picture the game left in
+        // its display buffers and draws its menus over: a movie's last frame).
         void setBackdrop(std::shared_ptr<const TextureCache::Texture> picture, const Screen &screen, float x, float y, float width,
-                         float height);
+                         float height, bool held = false);
+        void clearBackdrop();
         // The GS's TEXA as the game last wrote it (GS front end): a draw whose material sets no TEXA of its own (texa
         // 0, not fromGsContext) decodes its texture with it, as the GS would (16- and 24-bit texels take their alpha
         // from it; a game may write TEXA once, outside the stream a port reads).

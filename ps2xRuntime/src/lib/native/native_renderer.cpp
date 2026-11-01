@@ -337,11 +337,11 @@ void main()
     }
 
     void Renderer::setBackdrop(std::shared_ptr<const TextureCache::Texture> picture, const Screen &screen, float x, float y,
-                               float width, float height)
+                               float width, float height, bool held)
     {
         auto frame = std::make_shared<Frame>();
         frame->screen = screen;
-        frame->time = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        frame->time = held ? 1e300 : std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
         Batch batch;
         batch.material.textured = true;
         batch.material.blend = Material::Blend::Opaque;
@@ -365,6 +365,12 @@ void main()
         frame->batches.push_back(batch);
         std::lock_guard<std::mutex> lock(m_mutex);
         m_backdrop = std::move(frame);
+    }
+
+    void Renderer::clearBackdrop()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_backdrop.reset();
     }
 
     void Renderer::endFrame()
