@@ -168,6 +168,11 @@ namespace ps2x::native
         // GS thread, at a group's marker: hands the GS renderer the drawGs batches of the groups up to `group`.
         using GsVisitor = void (*)(void *user, const GsMaterial &material, const GsVertex *triangles, uint32_t count);
         void takeGsBatches(uint64_t group, GsVisitor visit, void *user);
+        // Triangles drawn where the GS stream reaches the port's GIF chain marker for `key` (setGifChainMarkGate), with
+        // the drawing state they carry; GS thread, at that marker: hands the GS renderer the key's batches (false: none).
+        // Batches whose marker the GS never reaches are dropped once 65536 newer keys were drawn.
+        void drawGsKeyed(uint64_t key, const GsMaterial &material, const GsVertex *triangles, uint32_t count);
+        bool takeGsKeyed(uint64_t key, GsVisitor visit, void *user);
         // Frames faster than the game's (PS2X_NATIVE_INTERPOLATE=1): the native port keys each object's batches by
         // something stable from one game frame to the next (its own data, not its place in the stream); present()
         // then draws a key found in the previous frame too with its matrix between the two, by how far the window's
@@ -268,6 +273,8 @@ namespace ps2x::native
             std::vector<GsVertex> vertices;
         };
         std::deque<GsBatch> m_gsStream; // drawGs's batches waiting for their group's marker (m_streamMutex)
+        std::unordered_map<uint64_t, std::vector<GsBatch>> m_gsKeyed; // drawGsKeyed's, by key (m_streamMutex)
+        std::deque<uint64_t> m_gsKeyedOrder;
         GsPass *m_gsPass = nullptr;       // its GL objects live in the GS thread's context: kept to the end
         std::atomic<bool> m_drewIntoGs{false};
         // Without GL targets (present() draws the frame over the GS one): each group's GS scissor, in primitive

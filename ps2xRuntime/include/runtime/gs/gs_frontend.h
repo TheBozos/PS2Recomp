@@ -184,6 +184,8 @@ public:
     // in the order of the PATH1 packets around it, that calls the hook on the GS thread with context 0 or 1's
     // render target. Does not wait.
     void queueNativeDraw(uint64_t group, int context);
+    // A port's GIF chain marker reached in PATH3 order (ps2x::native::setGifChainMarkGate): its keyed batches drawn here.
+    void queueKeyedDraw(uint64_t key);
     // latchHostPresentationFrame() once the GS has drawn what is queued before it, with the display registers
     // as they are now (the caller's position in the GS's stream); on the GS thread if it has one.
     void queueHostPresentationLatch();

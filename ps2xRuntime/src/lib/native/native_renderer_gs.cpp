@@ -345,6 +345,23 @@ void main()
             visit(user, batch.material, batch.vertices.data(), static_cast<uint32_t>(batch.vertices.size()));
     }
 
+    bool Renderer::takeGsKeyed(uint64_t key, GsVisitor visit, void *user)
+    {
+        std::vector<GsBatch> taken;
+        {
+            std::lock_guard<std::mutex> lock(m_streamMutex);
+            const auto it = m_gsKeyed.find(key);
+            if (it == m_gsKeyed.end())
+                return false;
+            taken = std::move(it->second);
+            m_gsKeyed.erase(it);
+        }
+        m_drewIntoGs.store(true, std::memory_order_relaxed);
+        for (const GsBatch &batch : taken)
+            visit(user, batch.material, batch.vertices.data(), static_cast<uint32_t>(batch.vertices.size()));
+        return true;
+    }
+
     bool Renderer::hasGroup(uint64_t group)
     {
         std::lock_guard<std::mutex> lock(m_streamMutex);

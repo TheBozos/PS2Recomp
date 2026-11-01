@@ -888,6 +888,28 @@ void GS::queueNativeDraw(uint64_t group, int context)
     m_markerGroup = cell;
 }
 
+void GS::queueKeyedDraw(uint64_t key)
+{
+    PS2X_GS_TOUCH("gs: GS::queueKeyedDraw");
+    if (ps2x::native::gsHeadless())
+        return;
+    auto draw = [this, key]() {
+        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        if (!m_backend || m_parallel)
+            return;
+        ps2x::native::Renderer::instance().takeGsKeyed(key, &GS::submitGsBatch, this);
+    };
+    if (!shouldQueue())
+    {
+        draw();
+        return;
+    }
+    QueuedCommand command;
+    command.kind = QueuedCommand::Kind::Call;
+    command.call = std::move(draw);
+    enqueue(std::move(command));
+}
+
 void GS::runOnWorker(std::function<void()> work)
 {
     if (!shouldQueue())

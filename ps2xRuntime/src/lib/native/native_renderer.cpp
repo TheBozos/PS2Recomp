@@ -262,6 +262,27 @@ void main()
             m_gsStream.pop_front();
     }
 
+    void Renderer::drawGsKeyed(uint64_t key, const GsMaterial &material, const GsVertex *triangles, uint32_t count)
+    {
+        if (count < 3u || !m_streamDraws)
+            return;
+        GsBatch batch;
+        batch.group = key;
+        batch.material = material;
+        batch.vertices.assign(triangles, triangles + count - count % 3u);
+        std::lock_guard<std::mutex> lock(m_streamMutex);
+        auto [it, added] = m_gsKeyed.try_emplace(key);
+        it->second.push_back(std::move(batch));
+        if (!added)
+            return;
+        m_gsKeyedOrder.push_back(key);
+        while (m_gsKeyedOrder.size() > 65536u)
+        {
+            m_gsKeyed.erase(m_gsKeyedOrder.front());
+            m_gsKeyedOrder.pop_front();
+        }
+    }
+
     void Renderer::drawOverlay(const Material &material, const Vertex *vertices, uint32_t count,
                                std::shared_ptr<const TextureCache::Texture> texture)
     {
