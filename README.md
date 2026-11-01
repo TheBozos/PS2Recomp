@@ -60,6 +60,9 @@ cmake -S . -B out/build
 cmake --build out/build --config Debug
 ```
 
+To check from Linux that the tree still builds for Windows (llvm-mingw, libc++) and passes its tests under Wine:
+`tools/windows_cross/build.sh --tests` ([docs/windows_cross.md](docs/windows_cross.md)).
+
 ### Usage
 
 Preferred workflow for retail or stripped games:
