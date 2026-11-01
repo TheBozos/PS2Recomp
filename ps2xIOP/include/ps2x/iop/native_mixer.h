@@ -6,8 +6,11 @@
 // sound chip here: no registers, no DMA, no interrupts, no chip timing. What a driver sets is a voice's playback
 // state, what it reads back (a voice's envelope, which voices reached their end) is that state as it plays.
 //
-// Not done yet: reverb (the effect sends and the effect area are kept, nothing is rendered from them), noise,
-// pitch modulation, and the sound data input (streamed PCM into the mixer).
+// Reverb: each group's effect send through libsd's reverb presets (room ... pipe, echo and delay with their delay
+// time and feedback), the reverb's delay lines in sound memory below the effect end address as the drivers place
+// them, at 24 kHz as on the console, mixed back at the group's effect volume.
+//
+// Not done yet: noise, pitch modulation, and the sound data input (streamed PCM into the mixer).
 
 #include <cstddef>
 #include <cstdint>
@@ -62,6 +65,14 @@ namespace ps2x::audio
         uint16_t masterVolume(int group, int side) const;
         uint16_t effectVolume(int group, int side) const;
 
+        // A group's reverb: mode 0 (off) .. 9 (pipe) as libsd numbers them; delay and feedback (0..127) for the echo
+        // and delay modes; end, the effect area's last byte in sound memory (the area is the mode's size below it).
+        void setEffect(int group, int mode, uint32_t delay, uint32_t feedback, uint32_t end);
+        void setEffectEnable(int group, bool enable);
+        // Zeroes the area mode's reverb uses below end.
+        void clearEffectArea(int mode, uint32_t end);
+        static uint32_t effectAreaBytes(int mode);
+
         // The PC's audio device: frames stereo 16-bit samples.
         void render(int16_t *out, size_t frames);
 
@@ -96,17 +107,29 @@ namespace ps2x::audio
             int16_t samples[31] = {};  // 3 of the previous block, then the 28 of this one
             int32_t history[2] = {};
         };
+        struct Reverb
+        {
+            int mode = 0;
+            bool enabled = false;
+            uint16_t settings[32] = {}; // the preset's: dAPF1, dAPF2, vIIR ... mRAPF2, vLIN, vRIN (offsets in 8 bytes)
+            uint32_t start = 0, size = 0;  // the delay lines: first sample (16-bit units) and how many
+            uint32_t position = 0;
+            bool phase = false;            // the reverb steps every other output sample
+            int32_t input[2] = {}, out[2] = {}, previous[2] = {};
+        };
         struct Group
         {
             Voice voices[kVoices];
             uint32_t ended = 0;
             uint32_t dry[2] = {}, wet[2] = {};
             Volume master[2], effect[2];
+            Reverb reverb;
         };
 
         void decode(Voice &voice);
         void stepEnvelope(Voice &voice);
         int32_t sample(Group &group, int index, Voice &voice);
+        void stepReverb(Reverb &reverb, const int32_t send[2], int32_t out[2]);
 
         mutable std::mutex m_mutex;
         std::vector<uint8_t> m_memory = std::vector<uint8_t>(kSoundMemory, 0u);

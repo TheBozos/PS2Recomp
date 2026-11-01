@@ -33,13 +33,20 @@ namespace
     constexpr uint32_t kKon = 0x1500u, kKoff = 0x1600u, kEndX = 0x1700u, kVMixL = 0x1800u, kVMixEL = 0x1900u, kVMixR = 0x1A00u,
                        kVMixER = 0x1B00u;
     // Addresses.
-    constexpr uint32_t kTsa = 0x1E00u, kSsa = 0x2040u, kLsax = 0x2140u, kNax = 0x2240u;
+    constexpr uint32_t kEea = 0x1D00u, kTsa = 0x1E00u, kSsa = 0x2040u, kLsax = 0x2140u, kNax = 0x2240u;
+    // Core attributes.
+    constexpr uint32_t kEffectEnable = 0x2u;
 
     struct State
     {
         std::unordered_map<uint32_t, uint32_t> params, switches, addresses, coreAttributes; // the rest, kept as set
         uint32_t transferAddress[2] = {};
         uint32_t transCallback[2] = {}, irqCallback = 0;
+        uint32_t effectEnd[2] = {0x1DFFFFu, 0x1FFFFFu}; // sceSdInit's effect end addresses
+        struct Effect
+        {
+            uint32_t mode = 0, delay = 0, feedback = 0;
+        } effect[2];
     } g_state;
 
     uint32_t arg(Env &e, int n)
@@ -180,6 +187,8 @@ namespace
         }
         if ((entry & 0xFF00u) == kTsa)
             g_state.transferAddress[core] = value;
+        if ((entry & 0xFF00u) == kEea)
+            g_state.effectEnd[core] = value | 0x1FFFFu;
         g_state.addresses[entry & 0xFF01u] = value;
     }
 
@@ -193,8 +202,18 @@ namespace
         case kNax: return mixer().position(core, voice);
         default: break;
         }
+        if ((entry & 0xFF00u) == kEea)
+            return g_state.effectEnd[core];
         const auto it = g_state.addresses.find(entry & 0xFF01u);
         return it == g_state.addresses.end() ? 0u : it->second;
+    }
+
+    void setCoreAttr(uint32_t entry, uint32_t value)
+    {
+        logCall("core attribute", entry, value);
+        if ((entry & ~1u) == kEffectEnable)
+            mixer().setEffectEnable(coreOf(entry), value != 0u);
+        g_state.coreAttributes[entry] = value;
     }
 
     // The hooks: libsd's calling convention.
@@ -237,7 +256,7 @@ namespace
     }
     void sdSetCoreAttr(Env &e)
     {
-        g_state.coreAttributes[arg(e, 0) & 0xFFFFu] = arg(e, 1);
+        setCoreAttr(arg(e, 0) & 0xFFFFu, arg(e, 1));
         ret(e, 0u);
     }
     void sdGetCoreAttr(Env &e)
@@ -255,7 +274,7 @@ namespace
         case 0x01: setParam(entry, value); return 0u;
         case 0x02: setSwitch(entry, value); return 0u;
         case 0x03: setAddr(entry, value); return 0u;
-        case 0x04: g_state.coreAttributes[entry] = value; return 0u;
+        case 0x04: setCoreAttr(entry, value); return 0u;
         case 0x05: e.w32(entry, value); return 0u; // write to IOP memory
         case 0x10: return getParam(entry);
         case 0x12: return getSwitch(entry);
@@ -354,6 +373,54 @@ namespace
         ret(e, 0u);
     }
 
+    // sceSdSetEffectAttr(core, attr): attr {int core; int mode (bit 8: clear the area first); short depth_L, depth_R;
+    // int delay; int feedback}. The depths are the effect volumes; the area is the mode's size below the effect end.
+    void sdSetEffectAttr(Env &e)
+    {
+        const int core = static_cast<int>(arg(e, 0) & 1u);
+        const uint32_t attr = arg(e, 1);
+        const uint32_t mode = e.r32(attr + 4u);
+        if ((mode & 0xFFu) >= 10u)
+        {
+            ret(e, 0xFFFFFFFFu);
+            return;
+        }
+        auto &effect = g_state.effect[core];
+        effect.mode = mode & 0xFFu;
+        effect.delay = e.r32(attr + 0xCu);
+        effect.feedback = e.r32(attr + 0x10u);
+        if (logging())
+            std::fprintf(stderr, "[audio] effect core %d mode %x depth %x/%x delay %u feedback %u end %x\n", core, mode,
+                         e.r16(attr + 8u), e.r16(attr + 0xAu), effect.delay, effect.feedback, g_state.effectEnd[core]);
+        if ((mode & 0x100u) != 0u)
+            mixer().clearEffectArea(static_cast<int>(effect.mode), g_state.effectEnd[core]);
+        mixer().setEffect(core, static_cast<int>(effect.mode), effect.delay, effect.feedback, g_state.effectEnd[core]);
+        mixer().setEffectVolume(core, 0, e.r16(attr + 8u));
+        mixer().setEffectVolume(core, 1, e.r16(attr + 0xAu));
+        ret(e, 0u);
+    }
+    void sdGetEffectAttr(Env &e)
+    {
+        const int core = static_cast<int>(arg(e, 0) & 1u);
+        const uint32_t attr = arg(e, 1);
+        const auto &effect = g_state.effect[core];
+        e.w32(attr + 4u, effect.mode);
+        e.w16(attr + 8u, mixer().effectVolume(core, 0));
+        e.w16(attr + 0xAu, mixer().effectVolume(core, 1));
+        e.w32(attr + 0xCu, effect.delay);
+        e.w32(attr + 0x10u, effect.feedback);
+        ret(e, 0u);
+    }
+    // sceSdClearEffectWorkArea(core, channel, mode).
+    void sdClearEffectWorkArea(Env &e)
+    {
+        const int core = static_cast<int>(arg(e, 0) & 1u);
+        const uint32_t mode = arg(e, 2) & 0xFFu;
+        if (mode < 10u)
+            mixer().clearEffectArea(static_cast<int>(mode), g_state.effectEnd[core]);
+        ret(e, 0u);
+    }
+
     // PS2X_NATIVE_AUDIO=1: libsd's exports taken over (static initialization, before any module loads).
     const bool g_registered = []
     {
@@ -379,9 +446,9 @@ namespace
         overrideExport("libsd", 20u, &sdBlockTransStatus);
         overrideExport("libsd", 21u, &sdSetTransCallback);
         overrideExport("libsd", 22u, &sdSetIrqCallback);
-        overrideExport("libsd", 23u, &sdReturnZero); // sceSdSetEffectAttr: reverb not rendered yet
-        overrideExport("libsd", 24u, &sdReturnZero); // sceSdGetEffectAttr
-        overrideExport("libsd", 25u, &sdReturnZero); // sceSdClearEffectWorkArea
+        overrideExport("libsd", 23u, &sdSetEffectAttr);
+        overrideExport("libsd", 24u, &sdGetEffectAttr);
+        overrideExport("libsd", 25u, &sdClearEffectWorkArea);
         overrideExport("libsd", 26u, &sdReturnZero); // sceSdSetTransIntrHandler
         overrideExport("libsd", 27u, &sdReturnZero); // sceSdSetSpu2IntrHandler
         return true;
