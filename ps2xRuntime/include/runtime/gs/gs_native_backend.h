@@ -71,6 +71,15 @@ public:
     void NativeDraw(uint64_t group, const GSContext &context) override;
     bool PresentsOnDrawThread() const override { return true; }
 
+    // One axis of a sprite as drawn at an internal scale: corners p0, p1 in window coordinates with texel coordinates
+    // t0, t1. Above 1x the edges move to the boundaries of the GS pixels the GS covers, so every texel of a scaled
+    // pixel is drawn or none is, and the texel coordinates follow the same line. False when the GS draws nothing.
+    struct SpriteSpan
+    {
+        float p0 = 0.0f, p1 = 0.0f, t0 = 0.0f, t1 = 0.0f;
+    };
+    static bool spriteSpan(float p0, float p1, float t0, float t1, uint32_t scale, SpriteSpan &out);
+
 private:
     struct RenderTarget
     {
@@ -218,6 +227,22 @@ private:
     void applyBlend(const GSDrawState &state);
     // What applyBlend asks of the shader: 0 its colour, 1 the blend factor as colour, 2 the colour times (1 + factor).
     int m_blendOut = 0;
+    // COLCLAMP off with a blend that adds or subtracts colours: the GS keeps the low 8 bits of each result, which a
+    // clamping RGBA8 blend cannot. Such draws blend into a float copy of the target (m_wrapTexture), attached in its
+    // place while the next batches do the same into it; the first other batch writes it back modulo 256.
+    void beginWrappedBlend(RenderTarget &target, const GSScissorReg &scissor);
+    bool continuesWrappedBlend() const;
+    void closeWrappedBlend();
+    bool m_wrapOpen = false;
+    bool m_wrapDrawn = false;
+    uint32_t m_wrapFbp = 0;
+    GSScissorReg m_wrapScissor{};
+    GSScissorReg m_wrapArea{}; // what the batches drew since the copy, in GS pixels
+    uint32_t m_wrapTexture = 0;
+    uint32_t m_wrapFramebuffer = 0;
+    uint32_t m_wrapWidth = 0;
+    uint32_t m_wrapHeight = 0;
+    uint32_t m_wrapProgram = 0;
     // One PCRTC read circuit's picture (RGBA8, alpha as the GS stores it), from its render target or else GS memory.
     // The presentation on the GPU (default; PS2X_GS_NATIVE_CPUPRESENT=1 reads the circuits back and merges them on the
     // CPU): the two read circuits merged as PMODE says into a texture the window draws (PresentationFrame::glTexture),

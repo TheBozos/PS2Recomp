@@ -1,7 +1,9 @@
 #include "runtime/native/native_renderer.h"
+#include "runtime/gs/gs_off.h"
 
 #include "raylib.h"
 #include "rlgl.h"
+#include "external/glad.h" // glDepthFunc: Material::depthTest
 
 #include <algorithm>
 #include <chrono>
@@ -58,21 +60,29 @@ uniform int uAlphaTest;
 uniform float uAlphaRef;
 uniform int uOpaque;
 uniform int uFog;
+uniform vec3 uFogColour;
+uniform int uFrameSource;
 uniform int uFunction;
 uniform int uTextureAlpha;
-uniform vec3 uFogColour;
 out vec4 fragColor;
 void main()
 {
     vec4 colour = vCol * (255.0 / 128.0);
-    vec4 texel = uTextured != 0 ? texture(uTex, vUv) : vec4(1.0);
+    vec4 raw = texture(uTex, vUv);
+    vec4 texel = uTextured != 0 ? raw * vec4(1.0, 1.0, 1.0, 255.0 / 128.0) : vec4(1.0); // GS alpha
+    if (uFrameSource == 1)
+        texel.a = 1.0; // the frame: its alpha is coverage, the draw's alpha is the vertices' (TCC 0)
+    else if (uFrameSource == 2)
+        texel.a = raw.a; // an offscreen target: what was drawn there (coverage, 1.0 the GS's 0x80)
+    // The texture function (TFX: 0 modulate, 1 decal, 2 highlight, 3 highlight2) and whether the alpha is the
+    // texture's (TCC) or the vertex's alone.
     if (uTextured != 0 && uFunction == 1)
         fragColor = vec4(texel.rgb, uTextureAlpha != 0 ? texel.a : colour.a);
     else if (uTextured != 0 && uFunction >= 2)
         fragColor = vec4(texel.rgb * colour.rgb + colour.a,
                          uTextureAlpha != 0 ? (uFunction == 2 ? texel.a + colour.a : texel.a) : colour.a);
     else
-        fragColor = vec4(texel.rgb * colour.rgb, (uTextureAlpha != 0 ? texel.a : 1.0) * colour.a);
+        fragColor = vec4(texel.rgb * colour.rgb, (uTextureAlpha != 0 || uTextured == 0 ? texel.a : 1.0) * colour.a);
     fragColor = clamp(fragColor, 0.0, 1.0);
     if (uAlphaTest != 0 && fragColor.a <= uAlphaRef)
         discard;
@@ -88,6 +98,7 @@ void main()
         constexpr int kGlSrcAlpha = 0x0302;
         constexpr int kGlOneMinusSrcAlpha = 0x0303;
         constexpr int kGlOne = 1;
+        constexpr int kGlZero = 0;
         constexpr int kGlFuncAdd = 0x8006;
     }
 
@@ -95,17 +106,45 @@ void main()
     {
         unsigned int shader = 0;
         int locM = -1, locScreen = -1, locDepthMax = -1, locTex = -1, locTextured = -1, locAlphaTest = -1, locAlphaRef = -1, locOpaque = -1, locFog = -1,
-            locFogColour = -1, locFunction = -1, locTextureAlpha = -1;
+            locFogColour = -1, locFrameSource = -1, locFunction = -1, locTextureAlpha = -1;
         unsigned int vao = 0, vbo = 0;
         size_t vboBytes = 0;
         RenderTexture2D target{};
         int targetWidth = 0, targetHeight = 0;
+        // Material::target / source: offscreen targets the frame's size, and the copy of the frame fromFrame samples.
+        RenderTexture2D offscreen[8]{};
+        RenderTexture2D frameCopy{};
+        RenderTexture2D previousFrame{}; // Material::kPreviousFrame: the last frame drawn, kept before the next clears it
+        bool previousValid = false;
+        int offscreenWidth = 0, offscreenHeight = 0;
         struct GpuTexture
         {
             unsigned int id = 0;
             std::shared_ptr<const TextureCache::Texture> source; // held, so its address is not reused while compared
         };
         std::unordered_map<uint64_t, GpuTexture> textures;
+        // The overlay's textures, their alpha from the GS's (0x80 is 1.0) to 255: raylib's own shader draws them.
+        std::unordered_map<const TextureCache::Texture *, GpuTexture> overlayTextures;
+        unsigned int overlayTexture(const std::shared_ptr<const TextureCache::Texture> &source)
+        {
+            GpuTexture &slot = overlayTextures[source.get()];
+            if (slot.id == 0 || slot.source != source)
+            {
+                if (slot.id != 0)
+                    rlUnloadTexture(slot.id);
+                std::vector<uint32_t> rgba(source->rgba);
+                for (uint32_t &c : rgba)
+                    c = (c & 0xffffffu) | (std::min<uint32_t>(255u, ((c >> 24) * 255u + 64u) / 128u) << 24);
+                slot.id = rlLoadTexture(rgba.data(), static_cast<int>(source->width), static_cast<int>(source->height),
+                                        RL_PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+                rlTextureParameters(slot.id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                rlTextureParameters(slot.id, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                rlTextureParameters(slot.id, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
+                rlTextureParameters(slot.id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+                slot.source = source;
+            }
+            return slot.id;
+        }
 
         bool init()
         {
@@ -121,6 +160,7 @@ void main()
             locAlphaRef = rlGetLocationUniform(shader, "uAlphaRef");
             locOpaque = rlGetLocationUniform(shader, "uOpaque");
             locFog = rlGetLocationUniform(shader, "uFog");
+            locFrameSource = rlGetLocationUniform(shader, "uFrameSource");
             locFogColour = rlGetLocationUniform(shader, "uFogColour");
             locFunction = rlGetLocationUniform(shader, "uFunction");
             locTextureAlpha = rlGetLocationUniform(shader, "uTextureAlpha");
@@ -150,6 +190,18 @@ void main()
     Renderer::Renderer() = default;
     Renderer::~Renderer() = default;
 
+    Material::Blend blendOf(uint64_t alpha)
+    {
+        const uint32_t a = alpha & 3u, b = (alpha >> 2) & 3u, c = (alpha >> 4) & 3u, d = (alpha >> 6) & 3u;
+        if (a == b && d == 0u)
+            return Material::Blend::Opaque;
+        if (a == 0u && b == 2u && d == 1u)
+            return c == 1u ? Material::Blend::AdditiveByDestination : Material::Blend::Additive;
+        if (a == 1u && b == 2u && c == 0u && d == 0u)
+            return Material::Blend::DestinationBySource;
+        return Material::Blend::Alpha;
+    }
+
     Renderer &Renderer::instance()
     {
         static Renderer renderer;
@@ -164,14 +216,46 @@ void main()
 
     void Renderer::draw(const Material &material, const float matrix[16], const Vertex *vertices, uint32_t count)
     {
+        draw(material, matrix, vertices, count, nullptr);
+    }
+
+    void Renderer::draw(const Material &material, const float matrix[16], const Vertex *vertices, uint32_t count,
+                        std::shared_ptr<const TextureCache::Texture> texture)
+    {
         if (count == 0u)
             return;
         Batch batch;
         batch.material = material;
+        if (!material.fromGsContext && material.texa == 0u)
+            batch.material.texa = m_gsTexa.load(std::memory_order_relaxed); // the GS's (setGsTexa)
         std::memcpy(batch.matrix, matrix, sizeof(batch.matrix));
-        // A material whose TEXA is the GS's gets its texture where the GS stream reaches the draw (the TEXA there).
-        if (material.textured && !material.fromGsContext && !material.texaFromGs)
-            batch.texture = ps2x::native::textures().texture(material.tex0, material.texa);
+        // With stream draws, the texture is decoded where the batch is drawn in the GS stream (the GS thread, at its
+        // marker, with the uploads before it in the stream: setUploadsInStreamOrder) rather than now: the game's
+        // texture and CLUT uploads reach GS memory on the GS thread, behind this one (TMB rewrites a CLUT ring every
+        // frame). PS2X_NATIVE_DECODE_AT_DRAW=0: decoded now.
+        static const bool s_atDraw = []
+        {
+            const char *value = std::getenv("PS2X_NATIVE_DECODE_AT_DRAW");
+            return !(value && *value == '0');
+        }();
+        if (texture)
+        {
+            batch.texture = std::move(texture);
+            batch.ownTexture = true;
+        }
+        else if (material.textured && !material.fromGsContext && material.fromFrame == 0u && !(s_atDraw && m_streamDraws))
+            batch.texture = ps2x::native::textures().texture(material.tex0, batch.material.texa, material.region);
+        if (texture)
+            batch.texture = std::move(texture);
+        // present() samples the frame and its offscreen targets bottom-up (GL render textures): v flipped for it.
+        std::vector<Vertex> flipped;
+        if (material.fromFrame != 0u && !m_streamDraws)
+        {
+            flipped.assign(vertices, vertices + count);
+            for (Vertex &v : flipped)
+                v.v = 1.0f - v.v;
+            vertices = flipped.data();
+        }
         batch.first = static_cast<uint32_t>(m_building.vertices.size());
         batch.count = count;
         batch.key = m_key;
@@ -198,21 +282,86 @@ void main()
             m_building.batches.push_back(batch);
     }
 
-    void Renderer::draw(const Material &material, const float matrix[16], const Vertex *vertices, uint32_t count,
-                        std::shared_ptr<const TextureCache::Texture> texture)
+    void Renderer::drawOverlay(const Material &material, const Vertex *vertices, uint32_t count,
+                               std::shared_ptr<const TextureCache::Texture> texture)
     {
-        Material own = material;
-        own.fromGsContext = false;
-        own.texaFromGs = false;
-        const bool textured = own.textured;
-        own.textured = false; // no TEX0 lookup in draw()
-        const size_t before = m_building.batches.size();
-        draw(own, matrix, vertices, count);
-        if (m_building.batches.size() > before)
+        if (count == 0u || m_overlayBuilding.vertices.size() > (1u << 20))
+            return; // (never published: a port that does not publish keeps the latest million vertices' worth out)
+        Batch batch;
+        batch.material = material;
+        batch.material.depthTest = false;
+        batch.material.depthWrite = false;
+        static constexpr float kScreenSpace[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        std::memcpy(batch.matrix, kScreenSpace, sizeof(batch.matrix));
+        batch.texture = std::move(texture);
+        batch.first = static_cast<uint32_t>(m_overlayBuilding.vertices.size());
+        batch.count = count;
+        m_overlayBuilding.vertices.insert(m_overlayBuilding.vertices.end(), vertices, vertices + count);
+        m_overlayBuilding.batches.push_back(batch);
+    }
+
+    // The overlay onto the window (raylib's immediate mode over what is there): GS coordinates to the window
+    // rectangle, colours from the GS's (0x80 is 1.0), in submission order.
+    void Renderer::drawOverlay(const Frame &overlay, float x, float y, float width, float height)
+    {
+        const Screen &screen = overlay.screen;
+        const float sx = width / screen.width, sy = height / screen.height;
+        rlDrawRenderBatchActive();
+        rlDisableDepthTest();
+        rlDisableBackfaceCulling();
+        const auto scale = [](uint32_t c) { return static_cast<unsigned char>(std::min<uint32_t>(255u, (c * 255u + 64u) / 128u)); };
+        uint32_t draws = 0u;
+        for (const Batch &batch : overlay.batches)
         {
-            m_building.batches.back().material.textured = textured && texture != nullptr;
-            m_building.batches.back().texture = std::move(texture);
+            // rlgl flushes by itself when its draw calls (256) or vertices run out, and a flush inside rlSetTexture
+            // resets the mode to quads: the batch's triangles then draw as quads (one glyph stretched to a sliver).
+            // Flush here, before rlBegin, while there is room (a batch takes at most two draw calls).
+            if (++draws >= 100u)
+            {
+                rlDrawRenderBatchActive();
+                draws = 1u;
+            }
+            rlCheckRenderBatchLimit(static_cast<int>(batch.count));
+            const Material &m = batch.material;
+            BeginBlendMode(m.blend == Material::Blend::Additive || m.blend == Material::Blend::AdditiveByDestination ? BLEND_ADDITIVE
+                                                                                                                   : BLEND_ALPHA);
+            const unsigned int id = m.textured && batch.texture ? m_gpu->overlayTexture(batch.texture) : rlGetTextureIdDefault();
+            rlBegin(RL_TRIANGLES); // first: a new mode's draw starts with the default texture
+            rlSetTexture(id);
+            for (uint32_t i = batch.first; i < batch.first + batch.count; ++i)
+            {
+                const Vertex &v = overlay.vertices[i];
+                rlColor4ub(scale(v.rgba & 0xffu), scale((v.rgba >> 8) & 0xffu), scale((v.rgba >> 16) & 0xffu),
+                           m.blend == Material::Blend::Opaque ? 255 : scale(v.rgba >> 24));
+                rlTexCoord2f(v.u, v.v);
+                rlVertex2f(x + (v.x - screen.originX) * sx, y + (v.y - screen.originY) * sy);
+            }
+            rlEnd();
+            rlSetTexture(0);
+            EndBlendMode();
         }
+        rlDrawRenderBatchActive();
+    }
+
+    void Renderer::publishOverlay()
+    {
+        publishOverlay(m_building.screen);
+    }
+
+    void Renderer::publishOverlay(const Screen &screen)
+    {
+        auto overlay = std::make_shared<Frame>(std::move(m_overlayBuilding));
+        m_overlayBuilding = Frame{};
+        // PS2X_NATIVE_STATS=1: the overlay's batches every 250 publishes.
+        static const bool s_stats = std::getenv("PS2X_NATIVE_STATS") != nullptr;
+        static uint32_t s_publishes = 0;
+        if (s_stats && ++s_publishes % 250u == 0u)
+            std::fprintf(stderr, "[native] overlay publish %u: %zu batches, %zu vertices\n", s_publishes, overlay->batches.size(),
+                         overlay->vertices.size());
+        overlay->screen = screen;
+        overlay->time = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_overlayPublished = std::move(overlay);
     }
 
     void Renderer::endFrame()
@@ -224,9 +373,28 @@ void main()
         for (uint32_t i = 0; i < frame->batches.size(); ++i)
             if (frame->batches[i].key != 0u)
                 frame->keys.emplace(frame->batches[i].key, i);
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_previous = std::move(m_published);
-        m_published = std::move(frame);
+        if (m_streamDraws && frame->lastGroup != 0u)
+        {
+            std::lock_guard<std::mutex> lock(m_probeMutex);
+            m_frameLastGroups.push_back(frame->lastGroup);
+            if (m_frameLastGroups.size() > 64u)
+                m_frameLastGroups.pop_front();
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_previous = std::move(m_published);
+            m_published = std::move(frame);
+            ++m_publishes;
+        }
+        m_publishedChanged.notify_all();
+    }
+
+    bool Renderer::waitForFrame(uint64_t &seen, double timeout)
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        const bool fresh = m_publishedChanged.wait_for(lock, std::chrono::duration<double>(timeout), [&] { return m_publishes != seen; });
+        seen = m_publishes;
+        return fresh;
     }
 
     bool Renderer::hasDraws()
@@ -250,6 +418,17 @@ void main()
 
     bool Renderer::depthAt(float gsX, float gsY, uint32_t &gsZ)
     {
+        if (m_streamDraws) // the frame is in the GS's targets: a probe, read there after the frame (one frame late)
+        {
+            const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(gsX)) << 16) | static_cast<uint32_t>(gsY);
+            std::lock_guard<std::mutex> lock(m_probeMutex);
+            m_probeWanted[key] = 0u;
+            const auto it = m_probeResults.find(key);
+            if (it == m_probeResults.end())
+                return false;
+            gsZ = it->second;
+            return true;
+        }
         std::lock_guard<std::mutex> lock(m_depthMutex);
         if (m_depth.empty() || m_depthScreen.width <= 0.0f || m_depthScreen.height <= 0.0f)
             return false;
@@ -288,9 +467,30 @@ void main()
                 m_shown = std::move(next);
             }
         }
+        std::shared_ptr<Frame> overlay;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            overlay = m_overlayPublished;
+        }
+        // The GS frame has the native draws already (drawn into it in the GS stream): only the port's 2D over it.
+        const bool overlayOnly = m_drewIntoGs.load(std::memory_order_relaxed) && overlay && !overlay->batches.empty();
+        if (!m_enabled || (!overlayOnly && (!m_shown || m_drewIntoGs.load(std::memory_order_relaxed))))
+            return false;
+        if (overlayOnly)
+        {
+            if (!m_gpu)
+            {
+                m_gpu = std::make_unique<Gpu>();
+                if (!m_gpu->init())
+                {
+                    m_enabled = false;
+                    return false;
+                }
+            }
+            drawOverlay(*overlay, x, y, width, height);
+            return true;
+        }
         const std::shared_ptr<Frame> frame = m_shown, previous = m_shownPrevious;
-        if (!frame || !m_enabled || m_drewIntoGs.load(std::memory_order_relaxed))
-            return false; // or the GS frame has the native draws already (drawn into it in the GS stream)
         if (!m_gpu)
         {
             m_gpu = std::make_unique<Gpu>();
@@ -309,6 +509,54 @@ void main()
             gpu.target = LoadRenderTexture(w, h);
             gpu.targetWidth = w;
             gpu.targetHeight = h;
+        }
+
+        if (gpu.offscreenWidth != w || gpu.offscreenHeight != h)
+        {
+            for (RenderTexture2D &rt : gpu.offscreen)
+                if (rt.id != 0)
+                    UnloadRenderTexture(rt), rt = RenderTexture2D{};
+            if (gpu.frameCopy.id != 0)
+                UnloadRenderTexture(gpu.frameCopy), gpu.frameCopy = RenderTexture2D{};
+            if (gpu.previousFrame.id != 0)
+                UnloadRenderTexture(gpu.previousFrame), gpu.previousFrame = RenderTexture2D{};
+            gpu.previousValid = false;
+            gpu.offscreenWidth = w;
+            gpu.offscreenHeight = h;
+        }
+        // A new render texture starts transparent black, as a game's memory for it would be dark: a feedback loop (DC's
+        // title trail draws its work texture back each frame, then copies the frame into it) keeps what it starts with.
+        auto created = [](int width, int height) {
+            RenderTexture2D rt = LoadRenderTexture(width, height);
+            BeginTextureMode(rt);
+            ClearBackground(BLANK);
+            EndTextureMode();
+            return rt;
+        };
+        // Each target's size (setTargetSize, or the window's): one of another size is made again.
+        int targetW[8], targetH[8];
+        for (uint8_t n = 0; n < 8u; ++n)
+        {
+            const uint32_t size = m_targetSize[n].load(std::memory_order_relaxed);
+            targetW[n] = size != 0u ? static_cast<int>(size >> 16) : w;
+            targetH[n] = size != 0u ? static_cast<int>(size & 0xFFFFu) : h;
+        }
+        for (const Batch &batch : frame->batches)
+        {
+            const Material &m = batch.material;
+            for (const uint8_t n : {m.target, m.source})
+                if (n != 0u && n < 8u)
+                {
+                    RenderTexture2D &rt = gpu.offscreen[n];
+                    if (rt.id != 0 && (rt.texture.width != targetW[n] || rt.texture.height != targetH[n]))
+                        UnloadRenderTexture(rt), rt = RenderTexture2D{};
+                    if (rt.id == 0)
+                        rt = created(targetW[n], targetH[n]);
+                }
+            if (m.fromFrame != 0u && m.source == Material::kPreviousFrame && gpu.previousFrame.id == 0)
+                gpu.previousFrame = created(w, h);
+            if (m.fromFrame != 0u && m.source == 0u && gpu.frameCopy.id == 0)
+                gpu.frameCopy = created(w, h);
         }
 
         const size_t bytes = frame->vertices.size() * sizeof(Vertex);
@@ -332,6 +580,14 @@ void main()
             rlUpdateVertexBuffer(gpu.vbo, frame->vertices.data(), static_cast<int>(bytes), 0);
         rlDisableVertexArray();
 
+        if (gpu.previousFrame.id != 0 && gpu.targetWidth == w && gpu.targetHeight == h)
+        {
+            rlBindFramebuffer(RL_READ_FRAMEBUFFER, gpu.target.id);
+            rlBindFramebuffer(RL_DRAW_FRAMEBUFFER, gpu.previousFrame.id);
+            rlBlitFramebuffer(0, 0, w, h, 0, 0, w, h, 0x00004000); // GL_COLOR_BUFFER_BIT
+            rlBindFramebuffer(RL_DRAW_FRAMEBUFFER, 0);
+            gpu.previousValid = true;
+        }
         BeginTextureMode(gpu.target);
         ClearBackground(BLANK);
         rlDrawRenderBatchActive();
@@ -387,6 +643,8 @@ void main()
             }
         }
         bool scissored = false;
+        uint8_t drawingInto = 0;     // Material::target being drawn into (0: the frame)
+        bool frameCopied = false;    // the frame copied for the run of fromFrame batches being drawn
         for (size_t index = 0; index < frame->batches.size(); ++index)
         {
             const Batch &batch = frame->batches[index];
@@ -394,6 +652,16 @@ void main()
             const Rect &clip = clips[index];
             if (clip.y1 < 0)
                 continue;
+            const uint8_t into = m.target < 8u ? m.target : 0u;
+            if (into != drawingInto)
+            {
+                rlDrawRenderBatchActive();
+                rlEnableFramebuffer(into != 0u ? gpu.offscreen[into].id : gpu.target.id);
+                rlViewport(0, 0, targetW[into], targetH[into]);
+                drawingInto = into;
+            }
+            if (m.fromFrame == 0u)
+                frameCopied = false;
             float matrix[16];
             std::memcpy(matrix, batch.matrix, sizeof(matrix));
             if (s_interpolate && previous && batch.key != 0u)
@@ -408,17 +676,44 @@ void main()
             // array (even with nothing to draw), so they are bound after it.
             if (m.blend == Material::Blend::Opaque)
                 rlDisableColorBlend();
+            else if (m.blend == Material::Blend::DestinationBySource)
+            {
+                // Cd * As + Cs; the alpha written is the source's, as the GS writes it.
+                rlEnableColorBlend();
+                rlSetBlendFactorsSeparate(kGlOne, kGlSrcAlpha, kGlOne, kGlZero, kGlFuncAdd, kGlFuncAdd);
+                rlSetBlendMode(RL_BLEND_CUSTOM_SEPARATE);
+            }
             else
             {
                 rlEnableColorBlend();
-                rlSetBlendFactorsSeparate(kGlSrcAlpha, m.blend == Material::Blend::Additive ? kGlOne : kGlOneMinusSrcAlpha,
+                rlSetBlendFactorsSeparate(kGlSrcAlpha, m.blend == Material::Blend::Alpha ? kGlOneMinusSrcAlpha : kGlOne,
                                           kGlOne, kGlOneMinusSrcAlpha, kGlFuncAdd, kGlFuncAdd);
                 rlSetBlendMode(RL_BLEND_CUSTOM_SEPARATE);
             }
+            // Material::depthTest: the GS's ZTST, GEQUAL with larger nearer (LEQUAL on this depth) or ALWAYS; the test stays
+            // on so a draw without it still writes depth when asked (a Z clear).
+            rlDrawRenderBatchActive();
+            glDepthFunc(m.depthTest ? GL_LEQUAL : GL_ALWAYS);
             if (m.depthWrite)
                 rlEnableDepthMask();
             else
                 rlDisableDepthMask();
+            if (m.textured && m.fromFrame != 0u && m.source == 0u && !frameCopied)
+            {
+                // The frame as drawn so far: copied, its levels made (the game's stretched copies). Before the shader
+                // and the vertex array are bound: flushing raylib's batch unbinds them (the draw that asked for the copy
+                // then drew nothing: DC's title copied an empty frame into its work texture each frame).
+                rlDrawRenderBatchActive();
+                rlBindFramebuffer(RL_READ_FRAMEBUFFER, gpu.target.id);
+                rlBindFramebuffer(RL_DRAW_FRAMEBUFFER, gpu.frameCopy.id);
+                rlBlitFramebuffer(0, 0, w, h, 0, 0, w, h, 0x00004000); // GL_COLOR_BUFFER_BIT
+                rlEnableFramebuffer(drawingInto != 0u ? gpu.offscreen[drawingInto].id : gpu.target.id);
+                int levels = 1;
+                rlGenTextureMipmaps(gpu.frameCopy.texture.id, w, h, gpu.frameCopy.texture.format, &levels);
+                rlTextureParameters(gpu.frameCopy.texture.id, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_MIP_LINEAR);
+                rlTextureParameters(gpu.frameCopy.texture.id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                frameCopied = true;
+            }
             rlEnableShader(gpu.shader);
             rlEnableVertexArray(gpu.vao);
             rlSetUniform(gpu.locScreen, screenRect, RL_SHADER_UNIFORM_VEC4, 1);
@@ -426,8 +721,8 @@ void main()
             rlSetUniform(gpu.locTex, &slot, RL_SHADER_UNIFORM_INT, 1);
             rlSetUniform(gpu.locM, matrix, RL_SHADER_UNIFORM_VEC4, 4);
             std::shared_ptr<const TextureCache::Texture> texture = batch.texture;
-            if (m.textured && !texture)
-                texture = ps2x::native::textures().texture(m.tex0, m.texa);
+            if (m.textured && !texture && m.fromFrame == 0u)
+                texture = ps2x::native::textures().texture(m.tex0, m.texa, m.region);
             // PS2X_NATIVE_DUMP_TEXTURE=<tex0, hex>: that texture as the cache decoded it, once, as texture_<tex0>.png
             // (in PS2X_NATIVE_CAPTURE_DIR, or the current folder).
             static const uint64_t s_dumpTex0 = []
@@ -446,8 +741,12 @@ void main()
                 std::snprintf(path, sizeof(path), "%s/texture_%016llx.png", dir && *dir ? dir : ".", static_cast<unsigned long long>(s_dumpTex0));
                 ExportImage(image, path);
             }
-            const int textured = m.textured && texture ? 1 : 0, alphaTest = m.alphaTest ? 1 : 0;
-            const int opaque = m.blend == Material::Blend::Opaque ? 1 : 0;
+            const int textured = m.textured && (texture || m.fromFrame != 0u) ? 1 : 0, alphaTest = m.alphaTest ? 1 : 0;
+            const int frameSource = m.fromFrame == 0u ? 0 : m.source != 0u && m.source != Material::kPreviousFrame ? 2 : 1;
+            rlSetUniform(gpu.locFrameSource, &frameSource, RL_SHADER_UNIFORM_INT, 1);
+            // Opaque draws cover the frame fully; into an offscreen target they write their own alpha (a game clearing its
+            // work texture to transparent before drawing a shape into it: DC's balloons).
+            const int opaque = m.blend == Material::Blend::Opaque && m.target == 0u ? 1 : 0;
             rlSetUniform(gpu.locOpaque, &opaque, RL_SHADER_UNIFORM_INT, 1);
             const int fog = m.fog ? 1 : 0;
             const float fogColour[3] = {static_cast<float>(m.fogColour & 0xffu) / 255.0f, static_cast<float>((m.fogColour >> 8) & 0xffu) / 255.0f,
@@ -461,19 +760,45 @@ void main()
             rlSetUniform(gpu.locTextured, &textured, RL_SHADER_UNIFORM_INT, 1);
             rlSetUniform(gpu.locAlphaTest, &alphaTest, RL_SHADER_UNIFORM_INT, 1);
             rlSetUniform(gpu.locAlphaRef, &alphaRef, RL_SHADER_UNIFORM_FLOAT, 1);
-            if (textured)
+            if (textured && m.fromFrame != 0u)
             {
-                const unsigned int id = gpu.texture(m.tex0 ^ (m.texa * 0x9e3779b97f4a7c15ull), texture);
-                // Wrap per draw (rlTextureParameters binds and unbinds the texture: before enabling it).
+                unsigned int id = 0;
+                if (m.source == Material::kPreviousFrame)
+                    id = gpu.previousFrame.texture.id;
+                else if (m.source != 0u && m.source < 8u)
+                    id = gpu.offscreen[m.source].texture.id;
+                else
+                {
+                    id = gpu.frameCopy.texture.id;
+                    rlTextureParameters(id, RL_TEXTURE_MIPMAP_BIAS_RATIO, static_cast<int>(m.fromFrame) * 100);
+                }
+                rlTextureParameters(id, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
+                rlTextureParameters(id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+                rlActiveTextureSlot(0);
+                rlEnableTexture(id);
+            }
+            else if (textured)
+            {
+                const unsigned int id = gpu.texture(batch.ownTexture ? (texture->version | 1ull << 63)
+                                                                     : m.tex0 ^ (m.texa * 0x9e3779b97f4a7c15ull) ^ (m.region * 0xc2b2ae3d27d4eb4full),
+                                                    texture);
+                // Wrap and filter per draw (rlTextureParameters binds and unbinds the texture: before enabling it).
                 rlTextureParameters(id, RL_TEXTURE_WRAP_S, m.clampU ? RL_TEXTURE_WRAP_CLAMP : RL_TEXTURE_WRAP_REPEAT);
                 rlTextureParameters(id, RL_TEXTURE_WRAP_T, m.clampV ? RL_TEXTURE_WRAP_CLAMP : RL_TEXTURE_WRAP_REPEAT);
+                const int filter = m.nearest ? RL_TEXTURE_FILTER_NEAREST : RL_TEXTURE_FILTER_LINEAR;
+                rlTextureParameters(id, RL_TEXTURE_MAG_FILTER, filter);
+                rlTextureParameters(id, RL_TEXTURE_MIN_FILTER, filter);
                 rlActiveTextureSlot(0);
                 rlEnableTexture(id);
             }
             if (clip.x1 > clip.x0)
             {
+                // The clip is in the frame's pixels: scaled to a target of another size.
+                const float sx = static_cast<float>(targetW[drawingInto]) / static_cast<float>(w);
+                const float sy = static_cast<float>(targetH[drawingInto]) / static_cast<float>(h);
                 rlEnableScissorTest();
-                rlScissor(clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0);
+                rlScissor(static_cast<int>(clip.x0 * sx), static_cast<int>(clip.y0 * sy), static_cast<int>((clip.x1 - clip.x0) * sx),
+                          static_cast<int>((clip.y1 - clip.y0) * sy));
                 scissored = true;
             }
             else if (scissored)
@@ -484,6 +809,12 @@ void main()
             rlDrawVertexArray(static_cast<int>(batch.first), static_cast<int>(batch.count));
         }
         rlDisableScissorTest();
+        if (drawingInto != 0u)
+        {
+            rlDrawRenderBatchActive();
+            rlEnableFramebuffer(gpu.target.id);
+            rlViewport(0, 0, w, h);
+        }
         if (secondsNow() - m_depthWantedAt.load(std::memory_order_relaxed) < 1.0)
         {
             std::vector<float> depth;
@@ -499,6 +830,7 @@ void main()
         rlDisableVertexArray();
         rlDisableShader();
         rlDisableTexture();
+        glDepthFunc(GL_LEQUAL);
         rlEnableDepthMask();
         rlDisableDepthTest();
         rlEnableColorBlend();
@@ -521,7 +853,8 @@ void main()
 
         // PS2X_NATIVE_CAPTURE_DIR=<dir>: the native frame as native_<n>.png every PS2X_NATIVE_CAPTURE_INTERVAL seconds
         // (default 5), at the window's resolution, to look at it without the GS frame; with gs_<n>.png, the GS frame of
-        // the same moment (a reference to compare to, when the game still runs on VU1 what the native port draws).
+        // the same moment (a reference to compare to, when the game still runs on VU1 what the native port draws), only
+        // when there is a GS (not with PS2X_GS_RENDERER=none).
         static const char *s_captureDir = std::getenv("PS2X_NATIVE_CAPTURE_DIR");
         if (s_captureDir && *s_captureDir)
         {
@@ -541,7 +874,7 @@ void main()
                 const std::string path = std::string(s_captureDir) + "/native_" + std::to_string(++s_count) + ".png";
                 ExportImage(image, path.c_str());
                 UnloadImage(image);
-                if (m_gsFrame[0] != 0)
+                if (m_gsFrame[0] != 0 && !ps2x::gsOff())
                 {
                     const Texture2D gs{static_cast<unsigned int>(m_gsFrame[0]), m_gsFrame[1], m_gsFrame[2], 1, m_gsFrame[3]};
                     Image gsImage = LoadImageFromTexture(gs);
