@@ -11,6 +11,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -56,6 +58,17 @@ namespace
             uint32_t mode = 0, delay = 0, feedback = 0;
         } effect[2];
     } g_state;
+
+    // The halves signalled and not yet answered, per channel: a driver reading the status when its signal's
+    // handler wakes it learns that half, even when the mixer has taken the next one since (its thread ran late).
+    constexpr size_t kHalvesKept = 8u;
+    std::mutex g_halvesMutex;
+    std::deque<uint32_t> g_halves[2];
+    void forgetHalves(uint32_t channel)
+    {
+        std::lock_guard<std::mutex> lock(g_halvesMutex);
+        g_halves[channel].clear();
+    }
 
     uint32_t arg(Env &e, int n)
     {
@@ -235,6 +248,8 @@ namespace
     {
         mixer().reset();
         g_state = State{};
+        forgetHalves(0u);
+        forgetHalves(1u);
         ret(e, 0u);
     }
     void sdQuit(Env &e)
@@ -395,6 +410,7 @@ namespace
         {
             const uint32_t position = blockPosition(channel);
             mixer().stopInput(static_cast<int>(channel));
+            forgetHalves(channel);
             ret(e, position);
             return;
         }
@@ -412,13 +428,15 @@ namespace
             const uint32_t start = (mode & 3u) == 3u && arg(e, 4) >= iop ? arg(e, 4) - iop : 0u;
             g_state.blockBuffer[channel] = iop;
             g_state.blockSize[channel] = size;
+            forgetHalves(channel);
             mixer().startInput(static_cast<int>(channel), e.ramBase() + physical, size, start, (mode & 0x10u) != 0u);
             ret(e, 0u);
             return;
         }
         }
     }
-    // sceSdBlockTransStatus(channel, flag): where the input plays now, | 1 << 24 while in the second half.
+    // sceSdBlockTransStatus(channel, flag): where the input is taken now, | 1 << 24 while in the second half; after a
+    // half's signal, the half taken next as it was at that signal.
     void sdBlockTransStatus(Env &e)
     {
         const uint32_t channel = arg(e, 0) & 1u;
@@ -427,8 +445,17 @@ namespace
             ret(e, 0u);
             return;
         }
-        const uint32_t offset = mixer().inputOffset(static_cast<int>(channel));
-        const uint32_t second = offset >= g_state.blockSize[channel] / 2u ? 1u : 0u;
+        uint32_t offset = mixer().inputOffset(static_cast<int>(channel));
+        uint32_t second = offset >= g_state.blockSize[channel] / 2u ? 1u : 0u;
+        {
+            std::lock_guard<std::mutex> lock(g_halvesMutex);
+            if (!g_halves[channel].empty())
+            {
+                second = g_halves[channel].front();
+                g_halves[channel].pop_front();
+                offset = second * (g_state.blockSize[channel] / 2u);
+            }
+        }
         ret(e, (second << 24u) | (g_state.blockBuffer[channel] + offset));
     }
     void sdSetTransCallback(Env &e)
@@ -467,6 +494,7 @@ namespace
     void sdStopTrans(Env &e)
     {
         mixer().stopInput(static_cast<int>(arg(e, 0) & 1u));
+        forgetHalves(arg(e, 0) & 1u);
         ret(e, 0u);
     }
     void sdSetIrqCallback(Env &e)
@@ -559,8 +587,15 @@ namespace
         const char *value = std::getenv("PS2X_NATIVE_AUDIO");
         if (!(value && *value == '1'))
             return false;
-        // Each half of a block transfer played: the channel's transfer interrupt.
-        mixer().setInputHalfCallback([](int group, int) { transferDone(static_cast<uint32_t>(group)); });
+        // Each half of a block transfer taken: the channel's transfer interrupt.
+        mixer().setInputHalfCallback([](int group, int half)
+                                     {
+            {
+                std::lock_guard<std::mutex> lock(g_halvesMutex);
+                if (g_halves[group].size() < kHalvesKept)
+                    g_halves[group].push_back(half == 0 ? 1u : 0u);
+            }
+            transferDone(static_cast<uint32_t>(group)); });
         using ps2x::iop::native::overrideExport;
         overrideExport("libsd", 2u, &sdQuit);
         overrideExport("libsd", 4u, &sdInit);
