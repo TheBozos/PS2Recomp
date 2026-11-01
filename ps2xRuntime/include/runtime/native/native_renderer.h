@@ -13,13 +13,11 @@
 #include "runtime/native/native_texture_cache.h"
 
 #include <atomic>
-#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
 namespace ps2x::native
@@ -30,8 +28,6 @@ namespace ps2x::native
         float u = 0, v = 0;        // texture coordinates, 0..1 across the texture (the GS's S / Q, T / Q)
         uint32_t rgba = 0;         // lit colour, R in the low byte; 0x80 per channel is 1.0, as the GS modulates
         float fog = 1.0f;          // the GS's F / 255: 1 keeps the colour, 0 is all fog colour (Material::fog)
-        float q = 1.0f;            // the GS's Q, for a draw the GS front end makes (fromGsContext): U / V across the
-                                   // triangle in perspective, as the GS interpolates S, T and Q
     };
 
     // How a draw blends and tests, from the GS registers a game sets (ALPHA, TEST) reduced to what a PC GPU does.
@@ -45,55 +41,49 @@ namespace ps2x::native
             Opaque,   // no blending
             Alpha,    // (Cs - Cd) * As + Cd
             Additive, // Cs * As + Cd
-            AdditiveByDestination, // Cs * Ad + Cd, Ad the target's alpha (0x80 is 1.0)
-            DestinationBySource,   // Cd * As + Cs (ALPHA 0x09: a picture kept where the source is opaque, the source added)
+            Subtract, // Cd - Cs * As
+            Darken,   // Cd * (1 - As)
+            Brighten, // Cd * (1 + As)
+            // A shadow volume (closed, faces outward): counted per pixel where it is in front of the scene (faces
+            // seen from the front +1, from the back -1), then the target darkened once where the count is not 0, by
+            // the alpha of the vertices' colour (0x80 = black).
+            ShadowVolume,
+            // The GS's (A - B) * C + D as gsAlpha (ALPHA's low byte) and gsFix (its FIX) give it, every combination
+            // a GPU blend can do (those with a factor of 1 + C keep only their C part).
+            Gs,
         } blend = Blend::Alpha;
+        uint8_t gsAlpha = 0, gsFix = 0x80;
         uint8_t alphaRef = 0;   // texels at or below are discarded when alphaTest
         bool alphaTest = false;
         bool depthTest = true;  // GS depth: larger is nearer (GEQUAL)
         bool depthWrite = true;
         bool clampU = false, clampV = false; // CLAMP's WMS / WMT: the texture's edge past 0..1 (else it repeats)
-        uint64_t region = 0; // CLAMP, for a REGION_REPEAT window (TextureCache::regionWindow): the texture is that window
-        // The texture is the frame as drawn so far, where the draw's group sits in the stream (a game's own effect on
-        // its frame: DC's depth of field stretches its frame into a work texture and draws it back): 0 none; n, the
-        // frame's frameWidth x frameHeight GS pixels from (0, 0) with the width halved n times (filtered, as the
-        // stretch does; the height kept). U / V span that rectangle. Stream draws into GS targets only (present()
-        // has no such frame: not drawn there); tex0 gives TFX / TCC.
-        uint8_t fromFrame = 0;
-        uint16_t frameWidth = 0, frameHeight = 0;
-        // present() only (no stream draws): the batch draws into offscreen target n (1..7, the frame's size) instead of
-        // the frame, as a game points its frame at a work texture (DC's message balloons); with fromFrame, it samples
-        // target n instead of the frame (u, v over frameWidth x frameHeight as for the frame). The frame itself is
-        // sampled with fromFrame alone: a copy of it as drawn so far, level n read with a mip bias of n.
-        uint8_t target = 0, source = 0;
-        static constexpr uint8_t kPreviousFrame = 8; // source: the frame presented last (a game's feedback trail)
+        // The CLAMP register as written, for its region modes (WMS / WMT 2 REGION_CLAMP to MINU..MAXU, 3 REGION_REPEAT
+        // (u & MINU) | MAXU): a texture atlas's part. 0: clampU / clampV alone.
+        uint64_t clamp = 0;
+        // FBA: the alpha written gets its high bit set (0x80 added below it), as the GS's FBA register does.
+        bool fba = false;
         bool fog = false;           // PRIM.FGE: the colour goes toward fogColour by 1 - Vertex::fog, after texturing
-        // The texture is the target being drawn into, as it is when this batch is drawn (a game's screen distortion:
-        // heat haze sampling the frame through TEX0 = the frame buffer); u, v in the target's GS pixels. Stream draws
-        // only (the GS pass): the frame is not in GS memory for the texture cache to decode.
-        bool sampleTarget = false;
-        // TEX1's MMAG / MMIN nearest: texels sampled as they are, not filtered (a game's 1:1 2D: filtering mixed the
-        // colour of the transparent texels around a glyph into its edges).
-        bool nearest = false;
-        // How the texel and the vertex colour combine (the game's texture function): 0 modulate, 1 decal, 2 highlight,
-        // 3 highlight2; textureAlpha false takes the alpha from the vertex alone (the texture's colour only).
-        uint8_t textureFunction = 0;
-        bool textureAlpha = true;
         uint32_t fogColour = 0;     // FOGCOL, R in the low byte
         // The GS state where the draw's group sits in the stream (a stream draw, beginGroup) gives tex0, texa, blend,
         // the alpha and depth tests, clampU / clampV and fogColour, for games whose meshes take their material from
         // GS packets around them; textured, fog and alphaBlend (PRIM.ABE) stay the draw's own.
         bool fromGsContext = false;
+        // A draw with its own material but the fog colour and TEXA the GS has where it sits (FOGCOL, TEXA: registers
+        // a game may set outside the data its adapter reads).
+        bool fogColourFromGs = false;
+        bool texaFromGs = false;
         bool alphaBlend = true;
         uint8_t context = 0; // PRIM.CTXT of a fromGsContext draw
-        // GS register writes (address, value) the GS front end makes before a fromGsContext draw, in order: the A+D
-        // and packed register writes of the packet it came from (a sandboxed microprogram's TEX0 with its CLUT load,
-        // CLAMP, TEX1, ALPHA, ...), so it draws with the state the packet would have set. Not part of batching.
-        std::shared_ptr<const std::vector<std::pair<uint8_t, uint64_t>>> gsWrites;
+        // How the texel and the vertex colour combine (the game's texture function): 0 modulate, 1 decal, 2 highlight,
+        // 3 highlight2; textureAlpha false takes the alpha from the vertex alone (the texture's colour only).
+        uint8_t textureFunction = 0;
+        bool textureAlpha = true;
     };
 
-    // The blend of a draw with PRIM.ABE set, from the GS's ALPHA register.
-    Material::Blend blendOf(uint64_t alpha);
+    // The blend of a draw whose PRIM.ABE is set, from the GS's ALPHA register ((A - B) * C + D): Opaque when A = B,
+    // else the matching mode (C = As or FIX, taken as As); Alpha for a combination these modes do not cover.
+    Material::Blend blendFromAlpha(uint64_t alpha);
 
     // PS2 screen space as the game draws to it: the screen point at the window's top-left corner and the size
     // that fills the window (the GS XYOFFSET and the frame size; a 640 x 448 / 512 or 640 x 256 picture).
@@ -115,25 +105,9 @@ namespace ps2x::native
         // Triangles (three vertices each) with an object-to-screen matrix: column c is matrix[4c..4c+3], screen
         // point = M * (x, y, z, 1), then divided by w (as a VU's projection).
         void draw(const Material &material, const float matrix[16], const Vertex *vertices, uint32_t count);
-        // The same with the texture handed over, decoded by the port from its game's own data (its texture assets in EE
-        // RAM): no texture cache lookup for this batch (material.textured still says whether it is textured; material.tex0
-        // keys its GPU copy, so each asset needs its own value there).
+        // The same with the texture given (a port's own, from its game's data: no TEX0 looked up).
         void draw(const Material &material, const float matrix[16], const Vertex *vertices, uint32_t count,
                   std::shared_ptr<const TextureCache::Texture> texture);
-        // A port's 2D drawn natively (its HUD, text, menus, from the game's own routines): screen-space triangles (x, y
-        // the GS's primitive coordinates over 16, as a draw with no matrix gets them) over the frame, in submission order,
-        // without depth; publishOverlay at the game frame's end shows them from the next present() on, over the frame
-        // (the GS's, or this renderer's own) until the next publish.
-        void drawOverlay(const Material &material, const Vertex *vertices, uint32_t count,
-                         std::shared_ptr<const TextureCache::Texture> texture);
-        void publishOverlay();
-        // The same, the overlay's GS coordinates mapped to the window by this screen (the game's own view) instead of the
-        // frame being built's.
-        void publishOverlay(const Screen &screen);
-        // The GS's TEXA as the game last wrote it (GS front end): a draw whose material sets no TEXA of its own (texa
-        // 0, not fromGsContext) decodes its texture with it, as the GS would (16- and 24-bit texels take their alpha
-        // from it; a game may write TEXA once, outside the stream a port reads).
-        void setGsTexa(uint64_t texa) { m_gsTexa.store(texa, std::memory_order_relaxed); }
         void endFrame();
         // Depth a game reads back from the GS (a visibility test: TMB's lens flares sample the Z buffer, which the
         // native frame is not in). While asked for (wantDepth, again within a second), present() copies the native
@@ -170,15 +144,6 @@ namespace ps2x::native
         // Present thread: draws the latest frame into the given window rectangle; false when there is none yet.
         bool present(float x, float y, float width, float height);
         // The GS frame shown with the native one (a GL texture): PS2X_NATIVE_CAPTURE_DIR saves it with each capture.
-        // Game thread: offscreen target n (1..7) kept at width x height pixels from now on instead of the window's
-        // resolution (0, 0: the window's again). A game's work texture at the size the game made it: an effect that
-        // feeds a target back into itself, filtering it each frame (DC's title blur), blurs as much as on the PS2 only
-        // at the PS2's resolution. Batches drawn into it keep the frame's coordinates (scaled to the target).
-        void setTargetSize(uint8_t n, uint16_t width, uint16_t height)
-        {
-            if (n != 0u && n < 8u)
-                m_targetSize[n].store(static_cast<uint32_t>(width) << 16 | height, std::memory_order_relaxed);
-        }
         void setGsFrame(unsigned int textureId, int width, int height, int format)
         {
             m_gsFrame[0] = static_cast<int>(textureId);
@@ -190,11 +155,6 @@ namespace ps2x::native
         // The latest published frame has something to draw (not a menu or a movie the native port does not draw yet),
         // and present() draws it (the GS frame does not already have it).
         bool hasDraws();
-        // Present thread: waits up to timeout seconds for a frame published after the one counted in seen (endFrame),
-        // and counts it there. The window then shows each game frame once, on the game's own clock: with a timer of
-        // its own as well, the two 60 Hz clocks drift and every few seconds one frame shows twice and the next not at
-        // all (a stutter).
-        bool waitForFrame(uint64_t &seen, double timeout);
         void setEnabled(bool on)
         {
             m_enabled = on;
@@ -209,7 +169,6 @@ namespace ps2x::native
             uint32_t first = 0, count = 0;
             uint64_t group = 0; // beginGroup's (its clip at present: the GS scissor where that group's marker was)
             uint64_t key = 0; // setKey
-            bool ownTexture = false; // `texture` is the port's own (draw with a texture): never looked up again
             // Taken from the texture cache when the batch is drawn (the game's thread, in stream order): games reuse
             // texture memory before the frame is presented. Null when its upload was not there yet (an upload in the
             // same VIF1 transfer reaches the cache when VIF1 gets to it): looked up again where the batch is drawn,
@@ -227,8 +186,6 @@ namespace ps2x::native
         };
 
     private:
-        std::atomic<uint64_t> m_gsTexa{0};
-        std::atomic<uint32_t> m_targetSize[8]{}; // setTargetSize: width << 16 | height, 0 the window's size
         Renderer();
         ~Renderer();
         struct Gpu;
@@ -242,16 +199,11 @@ namespace ps2x::native
         };
         static void gsDraw(uint64_t group, const GsDrawTarget &target);
         void drawGroups(uint64_t group, const GsDrawTarget &target);
-        void drawOverlay(const Frame &overlay, float x, float y, float width, float height); // present thread
 
         Frame m_building;
-        Frame m_overlayBuilding;                  // game thread (drawOverlay)
-        std::shared_ptr<Frame> m_overlayPublished; // under m_mutex
         std::mutex m_mutex;
         std::shared_ptr<Frame> m_published;
         std::shared_ptr<Frame> m_previous; // the one before m_published (interpolation)
-        uint64_t m_publishes = 0;          // under m_mutex
-        std::condition_variable m_publishedChanged;
         uint64_t m_key = 0;
         int m_gsFrame[4] = {}; // id, width, height, pixel format
         std::unique_ptr<Gpu> m_gpu; // present thread only
@@ -273,18 +225,6 @@ namespace ps2x::native
         static constexpr size_t kClips = 1u << 14;
         std::unique_ptr<Clip[]> m_clips{new Clip[kClips]};
         std::atomic<uint64_t> m_markedGroup{0}; // the latest group whose marker the GS reached
-        // Depth probes with stream draws (depthAt): the points asked for, read on the GS thread from the frame's target
-        // once its last group is drawn (the first group of the next frame), their GS Z kept for the next asks.
-        struct ProbeTarget
-        {
-            uint32_t framebuffer = 0, width = 0, height = 0, scale = 1, xOffset = 0, yOffset = 0;
-            double zScale = 0.0;
-        };
-        std::mutex m_probeMutex;
-        std::unordered_map<uint64_t, uint32_t> m_probeWanted, m_probeResults; // (x << 16 | y) in GS pixels -> GS Z
-        std::deque<uint64_t> m_frameLastGroups; // each published frame's last group, oldest first
-        ProbeTarget m_probeTarget;              // GS thread: the target the last group drew into
-        void readProbes();                      // GS thread
         std::shared_ptr<Frame> m_shown, m_shownPrevious; // present thread: the frame drawn and the one before it
         std::atomic<double> m_depthWantedAt{-10.0};      // wantDepth()'s time (seconds)
         std::mutex m_depthMutex;

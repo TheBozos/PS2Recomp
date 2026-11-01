@@ -14,7 +14,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
 #include <unordered_map>
 
 namespace ps2x::native
@@ -31,9 +30,7 @@ layout(location = 3) in float aFog;
 uniform vec4 uM[4];
 uniform vec2 uOffset;
 uniform vec2 uTargetSize;
-uniform float uGsZScale;     // GS Z per unit of the matrix's z / w
-uniform float uTargetZScale; // the target's depth per GS Z (1/2^24 for Z24)
-uniform vec2 uUvScale;       // 1, or 1 / the target's size (Material::sampleTarget: u, v in its pixels)
+uniform float uDepthScale;
 out vec2 vUv;
 out vec4 vCol;
 out float vFog;
@@ -42,20 +39,16 @@ void main()
     vec4 c = uM[0] * aPos.x + uM[1] * aPos.y + uM[2] * aPos.z + uM[3];
     vec2 s = c.xy / c.w - uOffset;
     vec2 ndc = s / uTargetSize * 2.0 - 1.0;
-    // GS Z as XYZF2 holds it: 24 bits, so a value past 2^24 wraps (a program's FTOI4 into XYZF2 keeps the low 24
-    // bits; Twisted Metal: Black's HUD drums sit behind their bezel that way). Kept in the target's range by
-    // GL_DEPTH_CLAMP rather than clipped.
-    float gz = c.z / c.w * uGsZScale;
-    gz -= 16777216.0 * floor(gz / 16777216.0);
-    gl_Position = vec4(ndc * c.w, (2.0 * gz * uTargetZScale - 1.0) * c.w, c.w);
-    vUv = aUv * uUvScale;
+    float z = clamp(c.z / c.w * uDepthScale, 0.0, 1.0);
+    gl_Position = vec4(ndc * c.w, (z * 2.0 - 1.0) * c.w, c.w);
+    vUv = aUv;
     vCol = aCol;
     vFog = aFog;
 }
 )";
 
-        // As the present pass, but every draw stores its source alpha as the GS does (0x80 = 1.0, byte 128); a blend
-        // takes As at its own scale from the second output.
+        // As the present pass, but the alpha an opaque draw stores is the GS's (0x80 = 1.0, byte 128); blended
+        // draws keep the target's alpha (their blend factors).
         const char *kFragmentShader = R"(#version 330
 in vec2 vUv;
 in vec4 vCol;
@@ -64,36 +57,76 @@ uniform sampler2D uTex;
 uniform int uTextured;
 uniform int uAlphaTest;
 uniform float uAlphaRef;
+uniform int uOpaque;
 uniform int uFog;
 uniform vec3 uFogColour;
 uniform int uDebug;
-uniform int uTfx;
-uniform int uTcc;
-layout(location = 0, index = 0) out vec4 fragColor;
-layout(location = 0, index = 1) out vec4 fragFactor;
+uniform int uAlphaAsColour;
+uniform ivec2 uWrap;      // CLAMP WMS / WMT: 0 repeat, 1 clamp, 2 region clamp, 3 region repeat
+uniform ivec4 uRegion;    // MINU, MAXU, MINV, MAXV
+uniform vec2 uTexSize;
+uniform int uShadowCount; // a shadow volume's faces: +1 seen from the front, -1 from the back (a float count image)
+uniform int uFba;
+out vec4 fragColor;
+float wrap(float t, int mode, int lo, int hi, float size)
+{
+    if (mode == 2)
+        return clamp(t * size, float(lo) + 0.5, float(hi) + 0.5) / size;
+    if (mode == 3)
+    {
+        float f = t * size;
+        int i = int(floor(f));
+        return (float((i & lo) | hi) + fract(f)) / size;
+    }
+    return t;
+}
 void main()
 {
-    vec4 colour = vCol * (255.0 / 128.0);
-    vec4 c = colour;
-    if (uTextured != 0)
+    if (uShadowCount != 0)
     {
-        vec4 texel = texture(uTex, vUv);
-        texel.a *= 255.0 / 128.0; // the GS's alpha (TextureCache: 0x80 is 1.0)
-        float highlight = uTfx >= 2 ? vCol.a : 0.0;
-        c.rgb = uTfx == 1 ? texel.rgb : texel.rgb * colour.rgb + highlight;
-        if (uTcc != 0)
-            c.a = uTfx == 0 ? texel.a * colour.a : uTfx == 2 ? texel.a + colour.a : texel.a;
+        fragColor = vec4(gl_FrontFacing ? 1.0 : -1.0, 0.0, 0.0, 0.0);
+        return;
     }
-    c = clamp(c, vec4(0.0), vec4(1.0, 1.0, 1.0, 255.0 / 128.0));
+    vec4 colour = vCol * (255.0 / 128.0);
+    vec2 uv = vec2(wrap(vUv.x, uWrap.x, uRegion.x, uRegion.y, uTexSize.x), wrap(vUv.y, uWrap.y, uRegion.z, uRegion.w, uTexSize.y));
+    vec4 texel = uTextured != 0 ? texture(uTex, uv) : vec4(1.0);
+    vec4 c = clamp(texel * colour, 0.0, 1.0);
     if (uAlphaTest != 0 && c.a <= uAlphaRef)
         discard;
     if (uFog != 0)
         c.rgb = mix(uFogColour, c.rgb, clamp(vFog, 0.0, 1.0));
-    fragFactor = vec4(min(c.a, 1.0));
-    c.a *= 128.0 / 255.0;
+    if (uOpaque != 0)
+        c.a *= 128.0 / 255.0;
+    if (uFba != 0) // the stored alpha byte with its high bit set
+    {
+        float b = floor(c.a * 255.0 + 0.5);
+        c.a = (b < 128.0 ? b + 128.0 : b) / 255.0;
+    }
+    if (uAlphaAsColour != 0)
+        c.rgb = vec3(c.a);
     if (uDebug != 0)
         c = vec4(1.0, 0.0, 1.0, 128.0 / 255.0);
     fragColor = c;
+}
+)";
+
+        // A shadow volume's darkening: one triangle over the target, black at uAlpha where the count is not 0.
+        const char *kShadowCompositeVertex = R"(#version 330
+void main()
+{
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+        const char *kShadowCompositeFragment = R"(#version 330
+uniform sampler2D uCount;
+uniform float uAlpha;
+out vec4 fragColor;
+void main()
+{
+    if (abs(texelFetch(uCount, ivec2(gl_FragCoord.xy), 0).r) < 0.5)
+        discard;
+    fragColor = vec4(0.0, 0.0, 0.0, uAlpha);
 }
 )";
 
@@ -119,11 +152,9 @@ void main()
     struct Renderer::GsPass
     {
         GLuint program = 0, vao = 0, vbo = 0;
-        GLint locM = -1, locOffset = -1, locTargetSize = -1, locGsZScale = -1, locTargetZScale = -1, locTex = -1, locTextured = -1;
-        GLint locTfx = -1, locTcc = -1, locUvScale = -1;
-        GLuint targetCopy = 0;                     // Material::sampleTarget: the target's colour, copied per batch
-        GLsizei targetCopyWidth = 0, targetCopyHeight = 0;
-        GLint locAlphaTest = -1, locAlphaRef = -1, locFog = -1, locFogColour = -1;
+        GLint locM = -1, locOffset = -1, locTargetSize = -1, locDepthScale = -1, locTex = -1, locTextured = -1;
+        GLint locAlphaTest = -1, locAlphaRef = -1, locOpaque = -1, locFog = -1, locFogColour = -1, locAlphaAsColour = -1;
+        GLint locWrap = -1, locRegion = -1, locTexSize = -1, locFba = -1;
         bool failed = false;
         struct GpuTexture
         {
@@ -131,54 +162,6 @@ void main()
             std::shared_ptr<const TextureCache::Texture> source;
         };
         std::unordered_map<uint64_t, GpuTexture> textures;
-        // Material::fromFrame: the target as drawn so far, stretched to half its width (level 1), and that to half
-        // again (level 2, ...), each from the one before with bilinear filtering, as a game stretches its frame.
-        static constexpr uint32_t kFrameLevels = 3;
-        GLuint frameFbo[kFrameLevels + 1] = {}, frameTex[kFrameLevels + 1] = {};
-        GLsizei frameW[kFrameLevels + 1] = {}, frameH[kFrameLevels + 1] = {};
-
-        void copyFrame(const GsDrawTarget &target, uint32_t width, uint32_t height, uint32_t levels)
-        {
-            const uint32_t scale = std::max(target.scale, 1u);
-            const GLsizei w = static_cast<GLsizei>(std::min(width, target.width) * scale);
-            const GLsizei h = static_cast<GLsizei>(std::min(height, target.height) * scale);
-            if (w <= 0 || h <= 0)
-                return;
-            GLint unpackBuffer = 0;
-            glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpackBuffer);
-            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-            glDisable(GL_SCISSOR_TEST);
-            GLuint from = target.framebuffer;
-            GLsizei fromW = w;
-            for (uint32_t n = 1; n <= std::min(levels, kFrameLevels); ++n)
-            {
-                const GLsizei lw = std::max<GLsizei>(w >> n, 1);
-                if (frameTex[n] == 0)
-                {
-                    glGenTextures(1, &frameTex[n]);
-                    glGenFramebuffers(1, &frameFbo[n]);
-                }
-                if (frameW[n] != lw || frameH[n] != h)
-                {
-                    glBindTexture(GL_TEXTURE_2D, frameTex[n]);
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, lw, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                    glBindFramebuffer(GL_FRAMEBUFFER, frameFbo[n]);
-                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, frameTex[n], 0);
-                    frameW[n] = lw;
-                    frameH[n] = h;
-                }
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, from);
-                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, frameFbo[n]);
-                glBlitFramebuffer(0, 0, fromW, h, 0, 0, lw, h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-                from = frameFbo[n];
-                fromW = lw;
-            }
-            glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
-            glEnable(GL_SCISSOR_TEST);
-            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, static_cast<GLuint>(unpackBuffer));
-        }
 
         bool init()
         {
@@ -198,15 +181,17 @@ void main()
             locM = glGetUniformLocation(program, "uM");
             locOffset = glGetUniformLocation(program, "uOffset");
             locTargetSize = glGetUniformLocation(program, "uTargetSize");
-            locGsZScale = glGetUniformLocation(program, "uGsZScale");
-            locTargetZScale = glGetUniformLocation(program, "uTargetZScale");
+            locDepthScale = glGetUniformLocation(program, "uDepthScale");
             locTex = glGetUniformLocation(program, "uTex");
             locTextured = glGetUniformLocation(program, "uTextured");
-            locTfx = glGetUniformLocation(program, "uTfx");
-            locUvScale = glGetUniformLocation(program, "uUvScale");
-            locTcc = glGetUniformLocation(program, "uTcc");
             locAlphaTest = glGetUniformLocation(program, "uAlphaTest");
             locAlphaRef = glGetUniformLocation(program, "uAlphaRef");
+            locOpaque = glGetUniformLocation(program, "uOpaque");
+            locAlphaAsColour = glGetUniformLocation(program, "uAlphaAsColour");
+            locWrap = glGetUniformLocation(program, "uWrap");
+            locRegion = glGetUniformLocation(program, "uRegion");
+            locTexSize = glGetUniformLocation(program, "uTexSize");
+            locFba = glGetUniformLocation(program, "uFba");
             locFog = glGetUniformLocation(program, "uFog");
             locFogColour = glGetUniformLocation(program, "uFogColour");
             glGenVertexArrays(1, &vao);
@@ -220,7 +205,50 @@ void main()
             for (GLuint i = 0; i < 4; ++i)
                 glEnableVertexAttribArray(i);
             glBindVertexArray(0);
+            locShadowCount = glGetUniformLocation(program, "uShadowCount");
+            const GLuint cvs = compile(GL_VERTEX_SHADER, kShadowCompositeVertex), cfs = compile(GL_FRAGMENT_SHADER, kShadowCompositeFragment);
+            if (cvs == 0 || cfs == 0)
+                return false;
+            shadowProgram = glCreateProgram();
+            glAttachShader(shadowProgram, cvs);
+            glAttachShader(shadowProgram, cfs);
+            glLinkProgram(shadowProgram);
+            glDeleteShader(cvs);
+            glDeleteShader(cfs);
+            glGetProgramiv(shadowProgram, GL_LINK_STATUS, &ok);
+            if (!ok)
+                return false;
+            locShadowTex = glGetUniformLocation(shadowProgram, "uCount");
+            locShadowAlpha = glGetUniformLocation(shadowProgram, "uAlpha");
+            glGenVertexArrays(1, &shadowVao);
             return true;
+        }
+
+        // Shadow volumes: a float count image the size of the target, with the target's depth attached (tested, not
+        // written), to count each volume's faces where it is in front of the scene.
+        GLint locShadowCount = -1, locShadowTex = -1, locShadowAlpha = -1;
+        GLuint shadowProgram = 0, shadowVao = 0, shadowFbo = 0, shadowCount = 0;
+        GLsizei shadowWidth = 0, shadowHeight = 0;
+
+        bool shadowTarget(GLsizei width, GLsizei height, GLuint depth)
+        {
+            if (shadowFbo == 0)
+                glGenFramebuffers(1, &shadowFbo);
+            if (shadowCount == 0 || shadowWidth != width || shadowHeight != height)
+            {
+                if (shadowCount == 0)
+                    glGenTextures(1, &shadowCount);
+                glBindTexture(GL_TEXTURE_2D, shadowCount);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, width, height, 0, GL_RED, GL_FLOAT, nullptr);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                shadowWidth = width;
+                shadowHeight = height;
+            }
+            glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, shadowCount, 0);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth, 0);
+            return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
         }
 
         GLuint texture(uint64_t key, const std::shared_ptr<const TextureCache::Texture> &source)
@@ -314,7 +342,7 @@ void main()
         {
             m.tex0 = target.tex0;
             m.texa = target.texa;
-            m.blend = m.alphaBlend ? blendOf(target.alpha) : Material::Blend::Opaque;
+            m.blend = m.alphaBlend ? blendFromAlpha(target.alpha) : Material::Blend::Opaque;
             const bool ate = target.test & 1u;
             const uint32_t atst = (target.test >> 1) & 7u, aref = (target.test >> 4) & 0xFFu;
             m.alphaTest = ate && (atst == 5u || atst == 6u); // GEQUAL / GREATER (the others: drawn as always)
@@ -325,9 +353,29 @@ void main()
             m.depthWrite = !target.zmask;
             m.clampU = (target.clamp & 3u) == 1u;
             m.clampV = ((target.clamp >> 2) & 3u) == 1u;
+            m.clamp = target.clamp;
             m.fogColour = target.fogcol;
             return m;
         }
+    }
+
+    Material::Blend blendFromAlpha(uint64_t alpha)
+    {
+        // A, B, D: 0 Cs, 1 Cd, 2 zero; C: 0 As, 1 Ad, 2 FIX.
+        const uint32_t a = alpha & 3u, b = (alpha >> 2) & 3u, d = (alpha >> 6) & 3u;
+        if (a == b)
+            return Material::Blend::Opaque; // 0 * C + D: D, Cs as it is for the D = Cs games use
+        if (a == 0u && b == 1u && d == 1u)
+            return Material::Blend::Alpha;
+        if (a == 0u && b == 2u && d == 1u)
+            return Material::Blend::Additive;
+        if (a == 2u && b == 0u && d == 1u)
+            return Material::Blend::Subtract;
+        if (a == 2u && b == 1u && d == 1u)
+            return Material::Blend::Darken;
+        if (a == 1u && b == 2u && d == 1u)
+            return Material::Blend::Brighten;
+        return Material::Blend::Alpha;
     }
 
     void Renderer::gsDraw(uint64_t group, const GsDrawTarget &target)
@@ -339,7 +387,6 @@ void main()
     {
         m_streamDraws = on;
         setGsDrawHook(on ? &Renderer::gsDraw : nullptr);
-        setUploadsInStreamOrder(on);
     }
 
     bool Renderer::takeGsContextBatches(uint64_t group, StreamVisitor visit, void *user)
@@ -378,55 +425,8 @@ void main()
         return it != m_stream.end() && it->group == group;
     }
 
-    void Renderer::readProbes()
-    {
-        std::vector<uint64_t> keys;
-        {
-            std::lock_guard<std::mutex> lock(m_probeMutex);
-            for (const auto &entry : m_probeWanted)
-                keys.push_back(entry.first);
-            m_probeWanted.clear();
-        }
-        const ProbeTarget &t = m_probeTarget;
-        if (keys.empty() || t.framebuffer == 0u || t.zScale <= 0.0)
-            return;
-        GLint readFramebuffer = 0;
-        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFramebuffer);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, t.framebuffer);
-        std::vector<std::pair<uint64_t, uint32_t>> results;
-        for (const uint64_t key : keys)
-        {
-            const int x = static_cast<int>(key >> 16) - static_cast<int>(t.xOffset / 16u), y = static_cast<int>(key & 0xffffu) - static_cast<int>(t.yOffset / 16u);
-            if (x < 0 || y < 0 || x >= static_cast<int>(t.width) || y >= static_cast<int>(t.height))
-                continue;
-            float depth = 0.0f;
-            glReadPixels(x * static_cast<int>(t.scale), y * static_cast<int>(t.scale), 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
-            results.emplace_back(key, static_cast<uint32_t>(std::min(4294967295.0, static_cast<double>(depth) / t.zScale)));
-        }
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(readFramebuffer));
-        std::lock_guard<std::mutex> lock(m_probeMutex);
-        for (const auto &[key, z] : results)
-            m_probeResults[key] = z;
-        if (m_probeResults.size() > 4096u)
-            m_probeResults.clear();
-    }
-
     void Renderer::drawGroups(uint64_t group, const GsDrawTarget &target)
     {
-        // A group past a published frame's last: that frame is drawn, its probes read from the target it ended in.
-        {
-            bool frameDone = false;
-            {
-                std::lock_guard<std::mutex> lock(m_probeMutex);
-                while (!m_frameLastGroups.empty() && group > m_frameLastGroups.front())
-                {
-                    m_frameLastGroups.pop_front();
-                    frameDone = true;
-                }
-            }
-            if (frameDone)
-                readProbes();
-        }
         // PS2X_NATIVE_GS_STATS=1: every 2 s, the markers drawn, their batches and vertices, the time spent drawing
         // them on the GS thread and the textures the cache decoded meanwhile.
         static const bool s_stats = [] { const char *v = std::getenv("PS2X_NATIVE_GS_STATS"); return v && *v == '1'; }();
@@ -520,7 +520,6 @@ void main()
         s_window.vertices += vertices.size();
         glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
         const uint32_t scale = std::max(target.scale, 1u);
-        m_probeTarget = {target.framebuffer, target.width, target.height, scale, target.xOffset, target.yOffset, target.zScale};
         glViewport(0, 0, static_cast<GLsizei>(target.width * scale), static_cast<GLsizei>(target.height * scale));
         glEnable(GL_SCISSOR_TEST);
         const uint32_t x0 = std::min(target.scissorX0, target.width), y0 = std::min(target.scissorY0, target.height);
@@ -552,174 +551,189 @@ void main()
         glGetIntegerv(GL_SAMPLER_BINDING, &sampler);
         glBindSampler(0, 0);
 
-        uint32_t frameLevels = 0; // Material::fromFrame: the deepest level these batches sample
-        for (const StreamBatch &entry : batches)
-            frameLevels = std::max<uint32_t>(frameLevels, entry.batch.material.fromFrame);
-        bool framed = false; // the frame copied for the run of fromFrame batches being drawn
-
         GLint first = 0;
         for (const StreamBatch &entry : batches)
         {
-            const Material m = entry.batch.material.fromGsContext ? materialFromGs(entry.batch.material, target) : entry.batch.material;
-            const GLsizei count = static_cast<GLsizei>(entry.vertices.size());
-            // PS2X_NATIVE_STATE_DIFF=1: a port's own material against the GS's state at the batch's marker (what
-            // materialFromGs would give), field by field; each distinct difference logged once, with a count every
-            // 20000 batches (a port finding the state its translation gets wrong).
-            static const bool s_stateDiff = std::getenv("PS2X_NATIVE_STATE_DIFF") != nullptr;
-            if (s_stateDiff && !entry.batch.material.fromGsContext)
+            Material m = entry.batch.material.fromGsContext ? materialFromGs(entry.batch.material, target) : entry.batch.material;
+            if (m.texaFromGs)
+                m.texa = target.texa;
+            // PS2X_NATIVE_GS_COMPARE=<n>: a port's own material against the GS state at its marker, the first n that
+            // differ (TEX0, blend, alpha test, depth, clamp).
+            static int s_compareLeft = [] { const char *v = std::getenv("PS2X_NATIVE_GS_COMPARE"); return v ? std::atoi(v) : 0; }();
+            if (s_compareLeft > 0 && !entry.batch.material.fromGsContext && m.blend != Material::Blend::ShadowVolume)
             {
                 const Material g = materialFromGs(entry.batch.material, target);
-                char what[256];
-                const int n = std::snprintf(what, sizeof(what), "%s%s%s%s%s%s%s",
-                                            m.blend != g.blend ? " blend" : "", m.alphaTest != g.alphaTest || (m.alphaTest && m.alphaRef != g.alphaRef) ? " alphaTest" : "",
-                                            m.depthTest != g.depthTest ? " depthTest" : "", m.depthWrite != g.depthWrite ? " depthWrite" : "",
-                                            m.clampU != g.clampU || m.clampV != g.clampV ? " clamp" : "", m.texa != g.texa ? " texa" : "",
-                                            m.fog && m.fogColour != g.fogColour ? " fogColour" : "");
-                if (n > 0 && what[0])
+                const uint64_t tex0Mask = ~((uint64_t{7} << 61)); // CLD aside
+                // CLAMP only where it samples differently (a region mode on either side).
+                const bool region = (m.clamp & 3u) >= 2u || ((m.clamp >> 2) & 3u) >= 2u || (g.clamp & 3u) >= 2u || ((g.clamp >> 2) & 3u) >= 2u;
+                if ((m.tex0 & tex0Mask) != (g.tex0 & tex0Mask) || m.blend != g.blend || m.alphaTest != g.alphaTest ||
+                    m.alphaRef != g.alphaRef || m.depthTest != g.depthTest || m.depthWrite != g.depthWrite ||
+                    (region && m.clamp != g.clamp))
                 {
-                    static std::unordered_map<std::string, uint64_t> s_seen;
-                    char key[512];
-                    std::snprintf(key, sizeof(key), "%s | mine blend %d at %d/%u dt %d dw %d clamp %d%d texa %llx | GS blend %d at %d/%u dt %d dw %d clamp %d%d texa %llx (alpha %llx test %llx clamp %llx)",
-                                  what, static_cast<int>(m.blend), m.alphaTest ? 1 : 0, m.alphaRef, m.depthTest ? 1 : 0, m.depthWrite ? 1 : 0,
-                                  m.clampU ? 1 : 0, m.clampV ? 1 : 0, static_cast<unsigned long long>(m.texa), static_cast<int>(g.blend),
-                                  g.alphaTest ? 1 : 0, g.alphaRef, g.depthTest ? 1 : 0, g.depthWrite ? 1 : 0, g.clampU ? 1 : 0, g.clampV ? 1 : 0,
-                                  static_cast<unsigned long long>(g.texa), static_cast<unsigned long long>(target.alpha),
-                                  static_cast<unsigned long long>(target.test), static_cast<unsigned long long>(target.clamp));
-                    if (s_seen[key]++ == 0u)
-                        std::fprintf(stderr, "[native:statediff] new:%s\n", key);
-                    static uint64_t s_batches = 0;
-                    if (++s_batches % 20000u == 0u)
-                        for (const auto &[k, c] : s_seen)
-                            std::fprintf(stderr, "[native:statediff] %llu x%s\n", static_cast<unsigned long long>(c), k.c_str());
+                    --s_compareLeft;
+                    std::fprintf(stderr, "[native-gs] material differs (group %llu): tex0 %#llx/%#llx blend %d/%d atest %d/%d ref %u/%u depth %d%d/%d%d clamp %#llx/%#llx\n",
+                                 static_cast<unsigned long long>(entry.group), static_cast<unsigned long long>(m.tex0),
+                                 static_cast<unsigned long long>(g.tex0), static_cast<int>(m.blend), static_cast<int>(g.blend), m.alphaTest ? 1 : 0,
+                                 g.alphaTest ? 1 : 0, m.alphaRef, g.alphaRef, m.depthTest ? 1 : 0, m.depthWrite ? 1 : 0, g.depthTest ? 1 : 0,
+                                 g.depthWrite ? 1 : 0, static_cast<unsigned long long>(m.clamp), static_cast<unsigned long long>(g.clamp));
                 }
             }
-            glUniform1f(pass.locGsZScale, entry.gsZScale);
-            glUniform1f(pass.locTargetZScale, static_cast<float>(target.zScale));
+            const GLsizei count = static_cast<GLsizei>(entry.vertices.size());
+            glUniform1f(pass.locDepthScale, static_cast<float>(entry.gsZScale * target.zScale));
             glUniform4fv(pass.locM, 4, entry.batch.matrix);
+            if (m.blend == Material::Blend::ShadowVolume)
+            {
+                // Its faces counted where the volume is in front of the scene (the target's depth, tested, not
+                // written), then the target darkened once where the count is not 0.
+                const GLsizei width = static_cast<GLsizei>(target.width * scale), height = static_cast<GLsizei>(target.height * scale);
+                if (count > 0 && pass.shadowTarget(width, height, target.depth))
+                {
+                    GLfloat clear[4];
+                    glGetFloatv(GL_COLOR_CLEAR_VALUE, clear);
+                    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    glClearColor(clear[0], clear[1], clear[2], clear[3]);
+                    glUniform1i(pass.locShadowCount, 1);
+                    glEnable(GL_DEPTH_TEST);
+                    glDepthFunc(GL_GEQUAL);
+                    glDepthMask(GL_FALSE);
+                    glEnable(GL_BLEND);
+                    glBlendEquation(GL_FUNC_ADD);
+                    glBlendFunc(GL_ONE, GL_ONE);
+                    glDrawArrays(GL_TRIANGLES, first, count);
+                    glUniform1i(pass.locShadowCount, 0);
+                    glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
+                    glDisable(GL_DEPTH_TEST);
+                    glBlendFuncSeparate(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+                    glUseProgram(pass.shadowProgram);
+                    glBindVertexArray(pass.shadowVao);
+                    glBindTexture(GL_TEXTURE_2D, pass.shadowCount);
+                    glUniform1i(pass.locShadowTex, 0);
+                    glUniform1f(pass.locShadowAlpha, std::min(1.0f, static_cast<float>(entry.vertices[0].rgba >> 24) / 128.0f));
+                    glDrawArrays(GL_TRIANGLES, 0, 3);
+                    glUseProgram(pass.program);
+                    glBindVertexArray(pass.vao);
+                    glBindBuffer(GL_ARRAY_BUFFER, pass.vbo);
+                }
+                else
+                    glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
+                first += count;
+                continue;
+            }
             std::shared_ptr<const TextureCache::Texture> texture = entry.batch.texture;
-            if (m.fromFrame == 0u)
-                framed = false;
-            if (m.textured && !texture && m.fromFrame == 0u)
-                texture = ps2x::native::textures().texture(m.tex0, m.texa, m.region);
-            const bool textured = m.textured && (texture || m.fromFrame != 0u);
-            // PS2X_NATIVE_TEXSTATS=1: each texture a port's own draw uses, once: TEX0's format, CLUT and size, and the
-            // share of fully transparent texels; over half transparent with TCC set, written out as tex_<tex0>.ppm (RGB)
-            // and .pgm (alpha) in the working directory, to see what was decoded.
-            static const bool s_texStats = std::getenv("PS2X_NATIVE_TEXSTATS") != nullptr;
-            if (s_texStats && texture && textured && !entry.batch.material.fromGsContext)
+            if (m.textured && (!texture || m.texaFromGs))
+                texture = ps2x::native::textures().texture(m.tex0, m.texa);
+            const bool textured = m.textured && texture;
+            // PS2X_NATIVE_GS_LOG=<n>: the first n batches drawn: material, texture, target (PS2X_NATIVE_GS_LOG_EVERY=<k>:
+            // one batch in k).
+            static int s_logLeft = [] { const char *v = std::getenv("PS2X_NATIVE_GS_LOG"); return v ? std::atoi(v) : 0; }();
+            static const uint64_t s_logEvery = [] { const char *v = std::getenv("PS2X_NATIVE_GS_LOG_EVERY"); return v ? std::max<uint64_t>(1u, std::strtoull(v, nullptr, 0)) : 1u; }();
+            static uint64_t s_logSeen = 0;
+            if (s_logLeft > 0 && (s_logSeen++ % s_logEvery) == 0u)
             {
-                static std::unordered_map<uint64_t, bool> s_seenTex;
-                if (!s_seenTex[texture->key])
-                {
-                    s_seenTex[texture->key] = true;
-                    size_t clear = 0;
-                    for (uint32_t c : texture->rgba)
-                        clear += (c >> 24) == 0u ? 1u : 0u;
-                    const double share = texture->rgba.empty() ? 0.0 : static_cast<double>(clear) / static_cast<double>(texture->rgba.size());
-                    const uint64_t t0 = m.tex0;
-                    const bool tcc = (t0 >> 34) & 1u;
-                    std::fprintf(stderr, "[native:tex] tex0 %016llx psm %#x tbp %llu cbp %llu cpsm %llu csa %llu tcc %d texa %llx %ux%u: %.0f%% clear\n",
-                                 static_cast<unsigned long long>(t0), static_cast<unsigned>((t0 >> 20) & 0x3f),
-                                 static_cast<unsigned long long>(t0 & 0x3fff), static_cast<unsigned long long>((t0 >> 37) & 0x3fff),
-                                 static_cast<unsigned long long>((t0 >> 51) & 0xf), static_cast<unsigned long long>((t0 >> 56) & 0x1f), tcc ? 1 : 0,
-                                 static_cast<unsigned long long>(m.texa), texture->width, texture->height, share * 100.0);
-                    if (share > 0.5)
-                    {
-                        std::string pages;
-                        for (const auto &[page, generation] : texture->pages)
-                            pages += " " + std::to_string(page) + "@" + std::to_string(generation);
-                        std::fprintf(stderr, "[native:tex]   pages (page@generation, 0 never uploaded):%s\n", pages.c_str());
-                    }
-                    if (tcc && share > 0.5)
-                    {
-                        char name[96];
-                        std::snprintf(name, sizeof(name), "tex_%016llx", static_cast<unsigned long long>(t0));
-                        const std::string base(name);
-                        if (FILE *f = std::fopen((base + ".ppm").c_str(), "wb"))
-                        {
-                            std::fprintf(f, "P6\n%u %u\n255\n", texture->width, texture->height);
-                            for (uint32_t c : texture->rgba)
-                            {
-                                const unsigned char rgb[3] = {static_cast<unsigned char>(c), static_cast<unsigned char>(c >> 8), static_cast<unsigned char>(c >> 16)};
-                                std::fwrite(rgb, 1, 3, f);
-                            }
-                            std::fclose(f);
-                        }
-                        if (FILE *f = std::fopen((base + ".pgm").c_str(), "wb"))
-                        {
-                            std::fprintf(f, "P5\n%u %u\n255\n", texture->width, texture->height);
-                            for (uint32_t c : texture->rgba)
-                            {
-                                const unsigned char a = static_cast<unsigned char>(c >> 24);
-                                std::fwrite(&a, 1, 1, f);
-                            }
-                            std::fclose(f);
-                        }
-                    }
-                }
+                --s_logLeft;
+                std::fprintf(stderr,
+                             "[native-gs] batch group %llu: %d vertices, blend %d tex0 %#llx textured %d/%d (%ux%u) texa %#llx alphaTest %d ref %u "
+                             "depth %d/%d clamp %#llx fog %d; target fb %u %ux%u scale %u zScale %g offset %u,%u scissor %u,%u-%u,%u; m3 %g %g %g %g\n",
+                             static_cast<unsigned long long>(entry.group), count, static_cast<int>(m.blend), static_cast<unsigned long long>(m.tex0),
+                             m.textured ? 1 : 0, textured ? 1 : 0, textured ? texture->width : 0u, textured ? texture->height : 0u,
+                             static_cast<unsigned long long>(m.texa), m.alphaTest ? 1 : 0, m.alphaRef, m.depthTest ? 1 : 0, m.depthWrite ? 1 : 0,
+                             static_cast<unsigned long long>(m.clamp), m.fog ? 1 : 0, target.framebuffer, target.width, target.height, target.scale,
+                             target.zScale, target.xOffset, target.yOffset, target.scissorX0, target.scissorY0, target.scissorX1, target.scissorY1,
+                             entry.batch.matrix[12], entry.batch.matrix[13], entry.batch.matrix[14], entry.batch.matrix[15]);
             }
-            if (m.sampleTarget)
+            if (textured)
             {
-                // The target as it is now, copied (a texture cannot be sampled while drawn into), u, v in its pixels.
-                const GLsizei w = static_cast<GLsizei>(target.width * scale), h = static_cast<GLsizei>(target.height * scale);
-                if (!pass.targetCopy || pass.targetCopyWidth != w || pass.targetCopyHeight != h)
-                {
-                    if (!pass.targetCopy)
-                        glGenTextures(1, &pass.targetCopy);
-                    glBindTexture(GL_TEXTURE_2D, pass.targetCopy);
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                    pass.targetCopyWidth = w;
-                    pass.targetCopyHeight = h;
-                }
-                glBindTexture(GL_TEXTURE_2D, pass.targetCopy);
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, target.framebuffer);
-                glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w, h);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                glUniform2f(pass.locUvScale, 1.0f / static_cast<float>(target.width), 1.0f / static_cast<float>(target.height));
+                glBindTexture(GL_TEXTURE_2D, pass.texture(m.tex0 ^ (m.texa * 0x9e3779b97f4a7c15ull), texture));
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, m.clampU ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, m.clampV ? GL_CLAMP_TO_EDGE : GL_REPEAT);
             }
-            else
-            {
-                glUniform2f(pass.locUvScale, 1.0f, 1.0f);
-                if (textured && m.fromFrame != 0u)
-                {
-                    if (!framed)
-                        pass.copyFrame(target, m.frameWidth, m.frameHeight, frameLevels);
-                    framed = true;
-                    glBindTexture(GL_TEXTURE_2D, pass.frameTex[std::min<uint32_t>(m.fromFrame, GsPass::kFrameLevels)]);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, m.clampU ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, m.clampV ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-                }
-                else if (textured)
-                {
-                    glBindTexture(GL_TEXTURE_2D, pass.texture(m.tex0 ^ (m.texa * 0x9e3779b97f4a7c15ull) ^ (m.region * 0xc2b2ae3d27d4eb4full), texture));
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, m.clampU ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, m.clampV ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-                }
-            }
-            glUniform1i(pass.locTextured, textured || m.sampleTarget ? 1 : 0);
-            glUniform1i(pass.locTfx, static_cast<GLint>((m.tex0 >> 35) & 3u));
-            glUniform1i(pass.locTcc, static_cast<GLint>((m.tex0 >> 34) & 1u));
+            // The region modes in the shader (a sub-rectangle of the texture, clamped or repeated); the plain modes
+            // stay the sampler's.
+            const int wms = static_cast<int>(m.clamp & 3u), wmt = static_cast<int>((m.clamp >> 2) & 3u);
+            glUniform2i(pass.locWrap, textured && wms >= 2 ? wms : 0, textured && wmt >= 2 ? wmt : 0);
+            glUniform4i(pass.locRegion, static_cast<int>((m.clamp >> 4) & 0x3FFu), static_cast<int>((m.clamp >> 14) & 0x3FFu),
+                        static_cast<int>((m.clamp >> 24) & 0x3FFu), static_cast<int>((m.clamp >> 34) & 0x3FFu));
+            glUniform2f(pass.locTexSize, textured ? static_cast<float>(texture->width) : 1.0f,
+                        textured ? static_cast<float>(texture->height) : 1.0f);
+            glUniform1i(pass.locTextured, textured ? 1 : 0);
             glUniform1i(pass.locAlphaTest, m.alphaTest ? 1 : 0);
             glUniform1f(pass.locAlphaRef, m.alphaRef / 128.0f);
+            glUniform1i(pass.locOpaque, m.blend == Material::Blend::Opaque ? 1 : 0);
             glUniform1i(pass.locFog, m.fog ? 1 : 0);
-            const float fogColour[3] = {static_cast<float>(m.fogColour & 0xffu) / 255.0f, static_cast<float>((m.fogColour >> 8) & 0xffu) / 255.0f,
-                                        static_cast<float>((m.fogColour >> 16) & 0xffu) / 255.0f};
+            const uint32_t fog = m.fogColourFromGs ? target.fogcol : m.fogColour;
+            const float fogColour[3] = {static_cast<float>(fog & 0xffu) / 255.0f, static_cast<float>((fog >> 8) & 0xffu) / 255.0f,
+                                        static_cast<float>((fog >> 16) & 0xffu) / 255.0f};
             glUniform3fv(pass.locFogColour, 1, fogColour);
-            if (m.blend == Material::Blend::Opaque)
-                glDisable(GL_BLEND);
-            else
+            glUniform1i(pass.locAlphaAsColour, m.blend == Material::Blend::Brighten ? 1 : 0);
+            glUniform1i(pass.locFba, m.fba ? 1 : 0);
+            switch (m.blend)
             {
+            case Material::Blend::Opaque:
+                glDisable(GL_BLEND);
+                break;
+            case Material::Blend::Subtract: // Cd - Cs * As
+                glEnable(GL_BLEND);
+                glBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
+                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
+                break;
+            case Material::Blend::Darken: // Cd * (1 - As)
                 glEnable(GL_BLEND);
                 glBlendEquation(GL_FUNC_ADD);
-                if (m.blend == Material::Blend::AdditiveByDestination)
-                    glBlendFuncSeparate(GL_DST_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
-                else
-                    glBlendFuncSeparate(GL_SRC1_ALPHA, m.blend == Material::Blend::Additive ? GL_ONE : GL_ONE_MINUS_SRC1_ALPHA, GL_ONE, GL_ZERO);
+                glBlendFuncSeparate(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+                break;
+            case Material::Blend::Brighten: // Cd + Cd * As: the shader outputs As as the colour, times Cd
+                glEnable(GL_BLEND);
+                glBlendEquation(GL_FUNC_ADD);
+                glBlendFuncSeparate(GL_DST_COLOR, GL_ONE, GL_ZERO, GL_ONE);
+                break;
+            case Material::Blend::Gs:
+            {
+                // (A - B) * C + D, A B D: 0 Cs, 1 Cd, 2 zero; C: 0 As, 1 Ad, 2 FIX (0x80 = 1).
+                const uint32_t a = m.gsAlpha & 3u, b = (m.gsAlpha >> 2) & 3u, c = (m.gsAlpha >> 4) & 3u, d = (m.gsAlpha >> 6) & 3u;
+                const GLenum cf = c == 0u ? GL_SRC_ALPHA : c == 1u ? GL_DST_ALPHA : GL_CONSTANT_ALPHA;
+                const GLenum oneMinusCf = c == 0u ? GL_ONE_MINUS_SRC_ALPHA : c == 1u ? GL_ONE_MINUS_DST_ALPHA : GL_ONE_MINUS_CONSTANT_ALPHA;
+                if (c == 2u)
+                    glBlendColor(0.0f, 0.0f, 0.0f, std::min(1.0f, static_cast<float>(m.gsFix) / 128.0f));
+                GLenum src = GL_ONE, dst = GL_ZERO, equation = GL_FUNC_ADD;
+                const auto pick = [&](GLenum s, GLenum t, GLenum e) { src = s, dst = t, equation = e; };
+                const uint32_t key = a | (b << 2) | (d << 4); // terms: Cs 0, Cd 1, zero 2
+                switch (key)
+                {
+                case 0 | (1 << 2) | (1 << 4): pick(cf, oneMinusCf, GL_FUNC_ADD); break;             // (Cs - Cd) C + Cd
+                case 0 | (1 << 2) | (2 << 4): pick(cf, cf, GL_FUNC_SUBTRACT); break;               // (Cs - Cd) C
+                case 0 | (1 << 2) | (0 << 4): pick(GL_ONE, cf, GL_FUNC_SUBTRACT); break;           // Cs (1 + C) - Cd C
+                case 0 | (2 << 2) | (1 << 4): pick(cf, GL_ONE, GL_FUNC_ADD); break;                // Cs C + Cd
+                case 0 | (2 << 2) | (2 << 4): pick(cf, GL_ZERO, GL_FUNC_ADD); break;               // Cs C
+                case 0 | (2 << 2) | (0 << 4): pick(GL_ONE, GL_ZERO, GL_FUNC_ADD); break;           // Cs (1 + C)
+                case 1 | (0 << 2) | (0 << 4): pick(oneMinusCf, cf, GL_FUNC_ADD); break;            // (Cd - Cs) C + Cs
+                case 1 | (0 << 2) | (2 << 4): pick(cf, cf, GL_FUNC_REVERSE_SUBTRACT); break;       // (Cd - Cs) C
+                case 1 | (0 << 2) | (1 << 4): pick(cf, GL_ONE, GL_FUNC_REVERSE_SUBTRACT); break;   // Cd (1 + C) - Cs C
+                case 1 | (2 << 2) | (0 << 4): pick(GL_ONE, cf, GL_FUNC_ADD); break;                // Cd C + Cs
+                case 1 | (2 << 2) | (2 << 4): pick(GL_ZERO, cf, GL_FUNC_ADD); break;               // Cd C
+                case 1 | (2 << 2) | (1 << 4): pick(GL_ZERO, GL_ONE, GL_FUNC_ADD); break;           // Cd (1 + C)
+                case 2 | (0 << 2) | (1 << 4): pick(cf, GL_ONE, GL_FUNC_REVERSE_SUBTRACT); break;   // Cd - Cs C
+                case 2 | (0 << 2) | (0 << 4): pick(oneMinusCf, GL_ZERO, GL_FUNC_ADD); break;       // Cs (1 - C)
+                case 2 | (1 << 2) | (1 << 4): pick(GL_ZERO, oneMinusCf, GL_FUNC_ADD); break;       // Cd (1 - C)
+                case 2 | (1 << 2) | (0 << 4): pick(GL_ONE, cf, GL_FUNC_SUBTRACT); break;           // Cs - Cd C
+                default: // A = B: D alone
+                    pick(d == 0u ? GL_ONE : GL_ZERO, d == 1u ? GL_ONE : GL_ZERO, GL_FUNC_ADD);
+                    break;
+                }
+                glEnable(GL_BLEND);
+                glBlendEquationSeparate(equation, GL_FUNC_ADD);
+                glBlendFuncSeparate(src, dst, GL_ZERO, GL_ONE);
+                break;
             }
-            if (m.depthTest)
+            default:
+                glEnable(GL_BLEND);
+                glBlendEquation(GL_FUNC_ADD);
+                glBlendFuncSeparate(GL_SRC_ALPHA, m.blend == Material::Blend::Additive ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+                break;
+            }
+            // PS2X_NATIVE_NO_DEPTH=1 (diagnosis): native draws without the depth test.
+            static const bool s_noDepth = std::getenv("PS2X_NATIVE_NO_DEPTH") != nullptr;
+            if (m.depthTest && !s_noDepth)
             {
                 glEnable(GL_DEPTH_TEST);
                 glDepthFunc(GL_GEQUAL);
@@ -727,16 +741,9 @@ void main()
             else
                 glDisable(GL_DEPTH_TEST);
             glDepthMask(m.depthWrite ? GL_TRUE : GL_FALSE);
-            glEnable(GL_DEPTH_CLAMP); // depth beyond the target's range clamped, not clipped (see the vertex shader)
             glDrawArrays(GL_TRIANGLES, first, count);
-            if (m.blend == Material::Blend::AdditiveByDestination) // DST_ALPHA is Ad / 255, half the GS's Ad / 128
-            {
-                glBlendFuncSeparate(GL_DST_ALPHA, GL_ONE, GL_ONE, GL_ZERO);
-                glDrawArrays(GL_TRIANGLES, first, count);
-            }
             first += count;
         }
-        glDisable(GL_DEPTH_CLAMP);
         glBindSampler(0, static_cast<GLuint>(sampler));
         glBindVertexArray(0);
         glUseProgram(0);

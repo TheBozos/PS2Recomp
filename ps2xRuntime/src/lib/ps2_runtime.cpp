@@ -1,6 +1,5 @@
 #include "runtime/gs/gs_off.h"
 #include "runtime/native/native_renderer.h"
-#include "runtime/native/native_vu0_hle.h"
 
 #include "raylib.h"
 #include "rlgl.h"
@@ -35,7 +34,6 @@
 #include <stdexcept>
 #include <fstream>
 #include <algorithm>
-#include <cmath>
 #include <array>
 #include <cstring>
 #include <limits>
@@ -598,21 +596,11 @@ static bool frameCaptureDue(char (&path)[1024])
     return true;
 }
 
-static void writeFrameCapture(const char *path, uint8_t *pixels, int rowPixels, int width, int height)
+static void writeFrameCapture(const char *path, uint8_t *pixels, int rowPixels, int height)
 {
-    std::vector<uint8_t> packed;
-    if (width < rowPixels)
-    {
-        const size_t rowBytes = static_cast<size_t>(width) * 4u;
-        packed.resize(rowBytes * static_cast<size_t>(height));
-        for (int y = 0; y < height; ++y)
-            std::memcpy(packed.data() + static_cast<size_t>(y) * rowBytes,
-                        pixels + static_cast<size_t>(y) * static_cast<size_t>(rowPixels) * 4u, rowBytes);
-        pixels = packed.data();
-    }
     Image image{};
     image.data = pixels;
-    image.width = width;
+    image.width = rowPixels;
     image.height = height;
     image.mipmaps = 1;
     image.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
@@ -636,7 +624,7 @@ static void dumpPresentedTexture(uint32_t texture, uint32_t width, uint32_t heig
     if (dump)
         writeFrameDump(pixels, static_cast<size_t>(width) * height * 4u, width, height);
     if (capture)
-        writeFrameCapture(path, pixels, static_cast<int>(width), static_cast<int>(width), static_cast<int>(height));
+        writeFrameCapture(path, pixels, static_cast<int>(width), static_cast<int>(height));
     RL_FREE(pixels);
 }
 
@@ -664,48 +652,10 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     const bool nativeFrames = rt->eeScheduler().nativeFrames();
     const uint64_t currentTick = nativeFrames ? (1ull << 63) | rt->gsForPresentation().queuedLatchesDone()
                                               : rt->eeScheduler().currentVSyncTick();
-    bool needsLatch = !s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick;
-    // Native frames: a game that ends no frame for a while (a load's screen, a movie, a menu waiting on the disc)
-    // still shows what the GS has: after PS2X_NATIVE_IDLE_PRESENT_MS (default 50, 0: never) without a new picture
-    // the host latches the GS's display itself, as for the first frame. On the host's clock, no vblank involved.
-    bool idleLatch = false;
-    {
-        static const double s_idleSeconds = []
-        {
-            const char *value = std::getenv("PS2X_NATIVE_IDLE_PRESENT_MS");
-            return (value && *value ? std::atof(value) : 50.0) / 1000.0;
-        }();
-        static auto s_lastNewPicture = std::chrono::steady_clock::now();
-        const auto now = std::chrono::steady_clock::now();
-        if (needsLatch)
-            s_lastNewPicture = now;
-        else if (nativeFrames && !overridden && s_idleSeconds > 0.0 &&
-                 std::chrono::duration<double>(now - s_lastNewPicture).count() > s_idleSeconds)
-            idleLatch = true;
-    }
-    // PS2X_PRESENT_HITCH=<ms>: each wait longer than that for a new picture (the window repeating the last one), with
-    // its length and when it ended: freezes that a frame rate averaged over seconds hides.
-    static const double s_hitchSeconds = []
-    {
-        const char *value = std::getenv("PS2X_PRESENT_HITCH");
-        return value && *value ? std::atof(value) / 1000.0 : 0.0;
-    }();
-    if (s_hitchSeconds > 0.0 && needsLatch && !overridden)
-    {
-        static const auto s_start = std::chrono::steady_clock::now();
-        static double s_lastNew = -1.0;
-        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_start).count();
-        if (s_lastNew >= 0.0 && now - s_lastNew > s_hitchSeconds)
-            std::fprintf(stderr, "[present:hitch] %.0f ms without a new picture, until t=%.2f\n", (now - s_lastNew) * 1000.0, now);
-        s_lastNew = now;
-    }
+    const bool needsLatch = !s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick;
     if (overridden)
     {
         s_hasLatchedInitialFrame = false;
-    }
-    else if (idleLatch)
-    {
-        rt->gsForPresentation().latchHostPresentationFrame();
     }
     else if (needsLatch)
     {
@@ -815,8 +765,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     s_hasUploadedFrame = true;
 
     if (char path[1024]; width != 0u && height != 0u && frameCaptureDue(path))
-        writeFrameCapture(path, s_uploadBuffer.data(), FB_MAX_WIDTH, static_cast<int>(std::min<uint32_t>(width, FB_MAX_WIDTH)),
-                          static_cast<int>(std::min<uint32_t>(height, FB_MAX_HEIGHT)));
+        writeFrameCapture(path, s_uploadBuffer.data(), FB_MAX_WIDTH, static_cast<int>(std::min<uint32_t>(height, FB_MAX_HEIGHT)));
 }
 
 PS2Runtime::PS2Runtime()
@@ -1321,8 +1270,7 @@ static void dumpRuntimeState(std::ostream &out, PS2Memory &memory, PS2Runtime &r
         const auto [drainNanoseconds, drains] = GSCpuBackend::TakeDrainStats();
         text << "[state] gs frames=" << lag.frames << " ee waited " << lag.waitNanoseconds / 1000000u << " ms for the GS thread, "
              << drains << " raster drains took " << drainNanoseconds / 1000000u << " ms, drawing estimate "
-             << runtime.gsForPresentation().estimatedDrawCycles() << " cycles, display flips="
-             << runtime.gsForPresentation().displayFlips() << " game frames=" << runtime.gameFrames();
+             << runtime.gsForPresentation().estimatedDrawCycles() << " cycles";
         if (memory.vif1Threaded())
         {
             static uint64_t lastVif1WaitNs = 0;
@@ -2426,102 +2374,6 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     {
         seedVu0IdleSuccess(ctx);
         return;
-    }
-
-    // The port's native version of this microprogram (runtime/native/native_vu0_hle.h).
-    if (const ps2x::native::Vu0Hle hle = ps2x::native::vu0Hle())
-    {
-        static const bool s_hleCheck = []
-        {
-            const char *value = std::getenv("PS2X_VU0_HLE_CHECK");
-            return value && value[0] == '1';
-        }();
-        if (!s_hleCheck)
-        {
-            if (hle(ctx, vu0Code, vu0Data, startPC))
-                return;
-        }
-        else
-        {
-            const R5900Context saved = *ctx;
-            std::vector<uint8_t> dataSaved(vu0Data, vu0Data + PS2_VU0_DATA_SIZE);
-            if (hle(ctx, vu0Code, vu0Data, startPC))
-            {
-                const R5900Context native = *ctx;
-                std::vector<uint8_t> dataNative(vu0Data, vu0Data + PS2_VU0_DATA_SIZE);
-                *ctx = saved;
-                std::memcpy(vu0Data, dataSaved.data(), PS2_VU0_DATA_SIZE);
-                ctx->vu0_itop = m_memory.vif0_regs.itops;
-                m_vu0.reset();
-                copyVu0ContextToState(ctx, m_vu0.state());
-                m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE, vu0Data, PS2_VU0_DATA_SIZE, m_gs, &m_memory, startPC, 0u,
-                              ctx->vu0_itop, 4096, true);
-                copyVu0StateToContext(m_vu0.state(), ctx);
-                // Per program: calls, and the worst relative difference of each register (and of data memory).
-                struct Report
-                {
-                    uint64_t calls = 0, differing = 0;
-                    float worst = 0.0f;
-                    char what[160] = {};
-                };
-                static std::unordered_map<uint32_t, Report> s_reports;
-                static uint64_t s_calls = 0;
-                Report &report = s_reports[startPC];
-                ++report.calls;
-                float worst = 0.0f;
-                char what[160] = {};
-                const auto note = [&](float a, float b, const char *name, int index, int lane)
-                {
-                    if (std::memcmp(&a, &b, 4) == 0)
-                        return;
-                    const float scale = std::max({std::fabs(a), std::fabs(b), 1e-3f});
-                    const float d = std::isfinite(a) && std::isfinite(b) ? std::fabs(a - b) / scale : 1e9f;
-                    if (d > worst)
-                    {
-                        worst = d;
-                        std::snprintf(what, sizeof(what), "%s%d.%c native %g interpreter %g", name, index, "xyzw"[lane], a, b);
-                    }
-                };
-                for (int r = 1; r < 32; ++r)
-                {
-                    alignas(16) float a[4], b[4];
-                    _mm_store_ps(a, native.vu0_vf[r]);
-                    _mm_store_ps(b, ctx->vu0_vf[r]);
-                    for (int l = 0; l < 4; ++l)
-                        note(a[l], b[l], "vf", r, l);
-                }
-                for (int r = 1; r < 16; ++r)
-                    if (native.vi[r] != ctx->vi[r] && worst < 1e9f)
-                    {
-                        worst = 1e9f;
-                        std::snprintf(what, sizeof(what), "vi%d native %#x interpreter %#x", r, native.vi[r], ctx->vi[r]);
-                    }
-                for (uint32_t at = 0; at + 4u <= PS2_VU0_DATA_SIZE; at += 4u)
-                {
-                    float a, b;
-                    std::memcpy(&a, dataNative.data() + at, 4);
-                    std::memcpy(&b, vu0Data + at, 4);
-                    note(a, b, "data@", static_cast<int>(at / 16u), static_cast<int>((at / 4u) & 3u));
-                }
-                if (worst > 1e-4f)
-                {
-                    ++report.differing;
-                    if (worst > report.worst)
-                    {
-                        report.worst = worst;
-                        std::memcpy(report.what, what, sizeof(what));
-                        std::fprintf(stderr, "[vu0:hle] pc %#x call %llu: worst so far %s\n", startPC,
-                                     static_cast<unsigned long long>(report.calls), what);
-                    }
-                }
-                if (++s_calls % 50000u == 0u)
-                    for (const auto &[pc, r] : s_reports)
-                        std::fprintf(stderr, "[vu0:hle] pc %#x: %llu calls, %llu differ (worst %s)\n", pc,
-                                     static_cast<unsigned long long>(r.calls), static_cast<unsigned long long>(r.differing),
-                                     r.differing ? r.what : "-");
-                return;
-            }
-        }
     }
 
     // PS2X_VU0_CHECK=1: every microprogram also runs through the interpreter from the same state; a difference
@@ -3753,7 +3605,6 @@ void PS2Runtime::run()
         stateDumpPeriod = std::max(0.25, std::atof(period));
     }
     auto nextStateDump = std::chrono::steady_clock::now();
-    bool windowClosed = false;
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
         if (stateDumpPeriod > 0.0 && std::chrono::steady_clock::now() >= nextStateDump)
@@ -3805,28 +3656,14 @@ void PS2Runtime::run()
                 const char *value = std::getenv("PS2X_PRESENT_FPS");
                 return value && *value ? std::atoi(value) : 60;
             }();
-            // No GS and native frames: the window shows each frame the game publishes once, when it is published (no
-            // timer of its own: two 60 Hz clocks drift and a frame shows twice every few seconds). 100 ms at most, so
-            // the window stays responsive while nothing is published. Not with interpolation (the window then runs
-            // faster than the game on purpose).
-            static const bool s_interpolate = []
-            {
-                const char *value = std::getenv("PS2X_NATIVE_INTERPOLATE");
-                return value && *value == '1';
-            }();
-            const bool followFrames = ps2x::gsOff() && !s_interpolate && m_eeScheduler && m_eeScheduler->nativeFrames() &&
-                                      ps2x::native::Renderer::instance().enabled();
-            const int targetFps = followFrames                                             ? 0
-                                  : m_eeScheduler && m_eeScheduler->nativeFrames() ? static_cast<int>(m_framePacer.cap())
-                                                                                   : s_presentFps;
+            const int targetFps = m_eeScheduler && m_eeScheduler->nativeFrames()
+                                      ? static_cast<int>(m_framePacer.cap())
+                                      : s_presentFps;
             if (targetFps != s_targetFps)
             {
                 SetTargetFPS(targetFps);
                 s_targetFps = targetFps;
             }
-            static uint64_t s_shownFrame = 0;
-            if (followFrames)
-                ps2x::native::Renderer::instance().waitForFrame(s_shownFrame, 0.1);
         }
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
@@ -3878,9 +3715,6 @@ void PS2Runtime::run()
         if (!ps2x::gsOff() &&
             !(s_nativeOnly && ps2x::native::Renderer::instance().enabled() && ps2x::native::Renderer::instance().hasDraws()))
             DrawTexturePro(shownTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
-        // raylib batches its draws: sent now, before the native renderer's own GL calls change the state they need
-        // (without the debug window, nothing else sent them before the end of the frame, and the window was black).
-        rlDrawRenderBatchActive();
         ps2x::native::Renderer::instance().setGsFrame(shownTex.id, shownTex.width, shownTex.height, shownTex.format);
         ps2x::native::Renderer::instance().present(dstRect.x, dstRect.y, dstRect.width, dstRect.height);
         DrawFpsOverlay(gameFrames(), gsForPresentation().displayFlips(), eeScheduler().currentCycle(), screenWidth, screenHeight);
@@ -3905,7 +3739,6 @@ void PS2Runtime::run()
             if (elapsed >= s_next)
             {
                 s_next += s_interval;
-                rlDrawRenderBatchActive(); // the frame's queued draws, so the capture has them
                 Image image = LoadImageFromScreen();
                 char path[1024];
                 std::snprintf(path, sizeof(path), "%s/window_%06d.png", s_windowCaptureDir, static_cast<int>(elapsed * 10.0));
@@ -3919,23 +3752,11 @@ void PS2Runtime::run()
         {
             RUNTIME_LOG("[run] window close requested, breaking out of loop");
             requestStop();
-            windowClosed = true;
             break;
         }
     }
 
     requestStop();
-    // A game thread parked in a wait nothing will end any more (JC2) kept the process alive after its window closed,
-    // still running and capturing: give it a few seconds to stop, then end the process.
-    if (windowClosed)
-    {
-        std::thread([]
-        {
-            std::this_thread::sleep_for(std::chrono::seconds(3));
-            std::fflush(nullptr);
-            std::_Exit(0);
-        }).detach();
-    }
     if (gameThread.joinable())
     {
         gameThread.join();

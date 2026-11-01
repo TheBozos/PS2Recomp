@@ -1,7 +1,6 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
-#include "runtime/gs/gs_off.h"
 #include "runtime/native/native_vif1.h"
 #include "ps2_log.h"
 #include <atomic>
@@ -341,31 +340,11 @@ PS2Memory::PS2Memory()
     if (const char *stall = std::getenv("PS2X_GS_SIGNAL_STALL"); stall && stall[0] == '0')
         m_signalStallEnabled = false;
     ps2x::native::setVif1Registers(&vif1_regs);
-    ps2x::native::setVif1ClockAdvance(
-        [](void *user, uint64_t cycles)
-        {
-            PS2Memory &memory = *static_cast<PS2Memory *>(user);
-            if (memory.onVif1Worker() && memory.gsLag())
-                memory.advanceVif1WorkerClock(cycles);
-        },
-        this);
-    ps2x::native::setVif1Runner(
-        [](void *user, std::function<void()> job)
-        {
-            PS2Memory &memory = *static_cast<PS2Memory *>(user);
-            if (memory.vif1Threaded() && !memory.onVif1Worker())
-                memory.queueVif1Callback(std::move(job));
-            else
-                job();
-        },
-        this);
 }
 
 PS2Memory::~PS2Memory()
 {
     ps2x::native::setVif1Registers(nullptr);
-    ps2x::native::setVif1ClockAdvance(nullptr, nullptr);
-    ps2x::native::setVif1Runner(nullptr, nullptr);
     stopVif1Worker();
     if (m_rdram)
     {
@@ -1649,13 +1628,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             const uint32_t qwc = m_ioRegisters[channelBase + 0x20] & 0xFFFFu;
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
 
-            // ps2x::packetPathOff (runtime/gs/gs_off.h): VIF1 and GIF transfers are not read; the channel ends at once.
-            if (ps2x::packetPathOff() && (channelBase == kVif1Channel || channelBase == 0x1000A000u))
-            {
-                completeDmacChannel(channelBase, channelBase == 0x1000A000u ? 2u : 1u);
-                return true;
-            }
-
             if (tryProcessScratchpadDma(channelBase, value))
             {
                 return true;
@@ -1685,8 +1657,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                      : channelBase == 0x10009000u ? m_pendingVif1Transfers
                                                                   : m_pendingVif0Transfers;
                 const size_t queuedBefore = channelQueue.size();
-                const bool observeLater = channelBase == kVif1Channel && m_vif1Threaded && ps2x::native::vif1ObservedOnVif1Thread();
-                auto enqueueTransfer = [&](uint32_t srcAddr, uint32_t qwCount, bool observe = false)
+                auto enqueueTransfer = [&](uint32_t srcAddr, uint32_t qwCount)
                 {
                     if (qwCount == 0)
                         return;
@@ -1695,7 +1666,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     pt.fromScratchpad = scratch;
                     pt.srcAddr = srcAddr;
                     pt.qwc = qwCount;
-                    pt.observe = observe;
                     if (channelBase == 0x1000A000u)
                         m_pendingGifTransfers.push_back(pt);
                     else if (channelBase == 0x10009000u)
@@ -1710,17 +1680,16 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                 if (mode == 0 && qwc > 0 && !stallable)
                 {
-                    const bool observe = channelBase == kVif1Channel && ps2x::native::vif1Observed() && !isScratchpad(madr);
-                    if (observe && !observeLater)
+                    if (channelBase == kVif1Channel && ps2x::native::vif1Observed() && !isScratchpad(madr))
                         ps2x::native::observeVif1(m_rdram + (madr & PS2_RAM_MASK), std::min<size_t>(size_t{qwc} * 16u, PS2_RAM_SIZE - (madr & PS2_RAM_MASK)));
-                    enqueueTransfer(madr, qwc, observe && observeLater);
+                    enqueueTransfer(madr, qwc);
                 }
                 else if (mode == 1 || (mode == 0 && qwc > 0))
                 {
                     std::vector<DmaSegment> segments;
                     std::vector<uint8_t> chainBuf = readDmaSourceChain(channelBase, chcr, stallable ? &segments : nullptr,
                                                                        mode == 0 ? qwc : 0u, mode == 0);
-                    if (channelBase == kVif1Channel && !observeLater)
+                    if (channelBase == kVif1Channel)
                         ps2x::native::observeVif1(chainBuf.data(), chainBuf.size());
 
                     if (!chainBuf.empty())
@@ -1729,7 +1698,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         pt.fromScratchpad = false;
                         pt.srcAddr = 0;
                         pt.qwc = 0;
-                        pt.observe = observeLater;
                         pt.chainData = std::move(chainBuf);
                         pt.segments = std::move(segments);
                         if (channelBase == 0x1000A000)
@@ -2706,10 +2674,7 @@ void PS2Memory::processPendingTransfers()
                     srcPhys += chunk;
                 }
             }
-            Vif1Job job;
-            job.data = std::move(data);
-            job.observe = p.observe;
-            queueVif1Job(std::move(job));
+            queueVif1Job(std::move(data));
             continue;
         }
         if (!p.chainData.empty())

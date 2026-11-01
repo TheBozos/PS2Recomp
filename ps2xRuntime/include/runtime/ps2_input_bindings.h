@@ -81,9 +81,6 @@ namespace ps2_input
         uint8_t rx = 128, ry = 128, lx = 128, ly = 128;
     };
     PadState padState(int player, int autoGamepad = -1);
-    // Whether the host's input reaches the game now: only while its window has the focus (gamepads are read by every
-    // program at once, so each recomp running beside another took the other's presses). PS2X_INPUT_BACKGROUND=1: always.
-    bool hostInputAllowed();
 
     // Window thread, once a frame: mouse movement and wheel, cursor capture. setUiOpen: a runtime window has the mouse
     // (the cursor is free and the mouse drives no binding meanwhile).

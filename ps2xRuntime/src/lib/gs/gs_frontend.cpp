@@ -1,7 +1,6 @@
 #include "runtime/native/native_texture_cache.h"
 #include "runtime/native/native_renderer.h"
 #include "ThreadNaming.h"
-#include <unordered_map>
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_off.h"
 #include "runtime/gs/gs_cpu_backend.h"
@@ -435,12 +434,6 @@ void GS::submitNativeBatch(void *user, const ps2x::native::Material &material, c
     GS &gs = *static_cast<GS *>(user);
     if (!gs.m_backend)
         return;
-    if (material.gsWrites) // the drawing state its packet set (a sandboxed microprogram's), as if the GS had it
-    {
-        std::lock_guard<std::recursive_mutex> lock(gs.m_stateMutex);
-        for (const auto &[reg, value] : *material.gsWrites)
-            gs.writeRegisterUnlocked(reg, value);
-    }
     GSPrimReg prim{};
     prim.type = GS_PRIM_TRIANGLE;
     prim.iip = true;
@@ -474,9 +467,9 @@ void GS::submitNativeBatch(void *user, const ps2x::native::Material &material, c
             const double zs = static_cast<double>(cz) * q * gsZScale;
             const double zf = zs == zs ? std::clamp(zs, -2147483648.0, 2147483647.0) : 0.0;
             g.z = static_cast<double>(static_cast<uint32_t>(static_cast<int32_t>(zf)));
-            g.q = q * v.q;
-            g.s = v.u * g.q;
-            g.t = v.v * g.q;
+            g.q = q;
+            g.s = v.u * q;
+            g.t = v.v * q;
             g.r = static_cast<uint8_t>(v.rgba & 0xFFu);
             g.g = static_cast<uint8_t>((v.rgba >> 8) & 0xFFu);
             g.b = static_cast<uint8_t>((v.rgba >> 16) & 0xFFu);
@@ -583,9 +576,8 @@ void GS::workerLoop()
             {
                 const GSTransferSnapshot transfer = m_backend->GetTransferSnapshot();
                 // No image transfer in flight: none set up, or the last one complete (a game uploading every frame
-                // never goes back to "none"), or a readback (VRAM unchanged: TMB's flares read the Z buffer back).
-                if (transfer.direction == 3u || transfer.direction == 1u || transfer.totalPixels == 0u ||
-                    transfer.copiedPixels >= transfer.totalPixels)
+                // never goes back to "none").
+                if (transfer.direction == 3u || transfer.totalPixels == 0u || transfer.copiedPixels >= transfer.totalPixels)
                 {
                     GsTraceHeader header;
                     m_backend->SnapshotVram(header.vram);
@@ -610,14 +602,6 @@ void GS::workerLoop()
         }
         if (queueTraceActive())
             traceQueuedCommand(command);
-        // The native textures in stream order (setUploadsInStreamOrder): the uploads as the GS reaches them.
-        if (!m_isShadow && ps2x::native::uploadsInStreamOrder() && size != 0u)
-        {
-            if (command.kind == QueuedCommand::Kind::GifPacket || command.kind == QueuedCommand::Kind::NativePackedGifPacket)
-                ps2x::native::textures().scanGifPacket(data, size);
-            else if (command.kind == QueuedCommand::Kind::NativeImageUpload && (command.registers[3] & 3u) == 0u)
-                ps2x::native::textures().upload(command.registers[0], command.registers[1], command.registers[2], data, size);
-        }
         if (m_parallel)
             processWithParallel(command);
         else
@@ -695,21 +679,6 @@ bool ps2x::gsOff()
     return g_gsOff.load(std::memory_order_acquire);
 }
 
-namespace
-{
-    std::atomic<bool> g_packetPathOff{false};
-}
-
-void ps2x::setPacketPathOff(bool off)
-{
-    g_packetPathOff.store(off, std::memory_order_release);
-}
-
-bool ps2x::packetPathOff()
-{
-    return g_packetPathOff.load(std::memory_order_acquire);
-}
-
 void GS::submitGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
     if (!data || sizeBytes < 16u)
@@ -749,12 +718,10 @@ void GS::submitGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         }
         return;
     }
-    if (ps2x::native::uploadsAtSubmit()) // the native textures: the game's own uploads
+    if (ps2x::native::uploadsWanted()) // the native textures: the game's own uploads
         ps2x::native::textures().scanGifPacket(data, sizeBytes);
     if (!shouldQueue())
     {
-        if (ps2x::native::uploadsInStreamOrder())
-            ps2x::native::textures().scanGifPacket(data, sizeBytes);
         processGIFPacket(data, sizeBytes);
         return;
     }
@@ -1843,14 +1810,10 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 
 bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
-    if (data && sizeBytes >= 16u && ps2x::native::uploadsAtSubmit())
+    if (data && sizeBytes >= 16u && ps2x::native::uploadsWanted())
         ps2x::native::textures().scanGifPacket(data, sizeBytes);
     if (!shouldQueue())
-    {
-        if (data && sizeBytes >= 16u && ps2x::native::uploadsInStreamOrder())
-            ps2x::native::textures().scanGifPacket(data, sizeBytes);
         return processNativePackedGIFPacketNow(data, sizeBytes);
-    }
     // Validation only looks at the packet, so the EE can still fall back when it fails.
     if (!data || sizeBytes < 16u || !m_backend || !validatePackedGifPacket(data, sizeBytes))
         return false;
@@ -1920,12 +1883,10 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
                            const uint8_t *data,
                            uint32_t sizeBytes)
 {
-    if (data && sizeBytes != 0u && (trxdir & 3u) == 0u && ps2x::native::uploadsAtSubmit())
+    if (data && sizeBytes != 0u && (trxdir & 3u) == 0u && ps2x::native::uploadsWanted())
         ps2x::native::textures().upload(bitbltbuf, trxpos, trxreg, data, sizeBytes);
     if (!shouldQueue())
     {
-        if (data && sizeBytes != 0u && (trxdir & 3u) == 0u && ps2x::native::uploadsInStreamOrder())
-            ps2x::native::textures().upload(bitbltbuf, trxpos, trxreg, data, sizeBytes);
         uploadImageNativeNow(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
         return;
     }
@@ -2565,18 +2526,6 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
     case GS_REG_TRXDIR:
     {
         m_trxdir = static_cast<uint32_t>(value & 0x3);
-        // PS2X_LOG_GS_WRITERS=1: each transfer (TRXDIR 0 upload, 1 readback, 2 GS-to-GS copy), once per BITBLTBUF.
-        if (static const bool logWriters = std::getenv("PS2X_LOG_GS_WRITERS") != nullptr; logWriters && m_trxdir != 3u)
-        {
-            static std::unordered_map<uint64_t, uint32_t> s_seen;
-            const uint64_t bitbltbuf = static_cast<uint64_t>(m_bitbltbuf.sbp) | static_cast<uint64_t>(m_bitbltbuf.sbw) << 16 |
-                                       static_cast<uint64_t>(m_bitbltbuf.spsm) << 24 | static_cast<uint64_t>(m_bitbltbuf.dbp) << 32 |
-                                       static_cast<uint64_t>(m_bitbltbuf.dbw) << 48 | static_cast<uint64_t>(m_bitbltbuf.dpsm) << 56;
-            if (s_seen[bitbltbuf ^ m_trxdir]++ == 0u)
-                std::fprintf(stderr, "[gs:writers] trxdir %u sbp %u sbw %u spsm 0x%x -> dbp %u dbw %u dpsm 0x%x, %ux%u\n", m_trxdir,
-                             m_bitbltbuf.sbp, m_bitbltbuf.sbw, m_bitbltbuf.spsm, m_bitbltbuf.dbp, m_bitbltbuf.dbw, m_bitbltbuf.dpsm,
-                             m_trxreg.rrw, m_trxreg.rrh);
-        }
 
         if (m_backend)
         {
@@ -2640,7 +2589,6 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         m_texa.ta0 = static_cast<uint8_t>(value & 0xFFu);
         m_texa.aem = ((value >> 15) & 0x1u) != 0u;
         m_texa.ta1 = static_cast<uint8_t>((value >> 32) & 0xFFu);
-        ps2x::native::Renderer::instance().setGsTexa(value & 0xFF000080FFull); // TA0, AEM, TA1
         PS2_IF_AGRESSIVE_LOGS({
             const uint32_t texaIndex = s_debugTexaWriteCount.fetch_add(1u, std::memory_order_relaxed);
             if (texaIndex < 24u)
