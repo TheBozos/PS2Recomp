@@ -1,0 +1,91 @@
+{
+  "title": "Soulcalibur III",
+  "game_id": "SLUS_212.16",
+  "short_name": "SC3",
+  "elf": ["${SC3_ELF}", "../game/SLUS_212.16"],
+  "recomp_config": "sc3.toml",
+  "generated": "../generated",
+  "function_list_csv": "ghidra_map.csv",
+  "ps2recomp": "../PS2Recomp",
+  "ps2recomp_submodule": "PS2Recomp",
+  "out": "../build/funcmap",
+  "runtime_sources": ["../runtime/*.cpp"],
+  "irx": {"lists_dir": "../build"},
+  "game_code_end": "0x3e0000",
+  "unnamed_library_label": "unnamed library code (CRI middleware and others)",
+  "vu_programs": {
+    "lift_spec": "vu1_lift_spec.json",
+    "lift_how": "lifted to C++ by tools/vu1_lift.py ({file}); keeps the microcode's VU register model",
+    "programs": [
+      {
+        "program": "B", "unit": "VU1", "entries": ["0x1388"],
+        "how": "hand-written C++ (runtime/sc3_vu1_port.cpp)",
+        "require": [{"file": "../runtime/sc3_vu1_port.cpp", "match": "\\b0x1388u?\\b"}]
+      }
+    ]
+  },
+  "runtime_badges": [
+    {
+      "name": "GS front end",
+      "rules": [
+        {"if": [{"file": "../runtime/sc3_overrides.cpp", "match": "requestNativeGsRenderer"}], "status": "present",
+         "evidence": "requestNativeGsRenderer() in sc3_overrides.cpp: GSNativeBackend draws the GS stream and keeps GS memory; 2D, HUD, post passes and the VU1 programs' render state still go through gs_frontend.cpp"},
+        {"if": [{"file": "ps2recomp:ps2xRuntime/src/lib/gs/gs_frontend.cpp", "exists": true}], "status": "present",
+         "evidence": "requestNativeGsRenderer() in sc3_overrides.cpp: GSNativeBackend draws the GS stream and keeps GS memory; 2D, HUD, post passes and the VU1 programs' render state still go through gs_frontend.cpp"},
+        {"status": "absent", "evidence": "no GS renderer requested"}
+      ]
+    },
+    {
+      "name": "SPU2",
+      "rules": [
+        {"if": [{"file": "../runtime/sc3_overrides.cpp", "match": "setSpu2Mixer"}], "status": "present",
+         "evidence": "ps2_audio_spu2.cpp mixes the voices the game's LIBSD/SDRDRV drive; SC3 adds movie audio to it"},
+        {"if": [{"file": "ps2recomp:ps2xRuntime/src/lib/ps2_audio_spu2.cpp", "exists": true}], "status": "present",
+         "evidence": "ps2_audio_spu2.cpp mixes the voices the game's LIBSD/SDRDRV drive; SC3 adds movie audio to it"},
+        {"status": "absent", "evidence": "no SPU2 model found"}
+      ]
+    },
+    {
+      "name": "VIF1 reads",
+      "rules": [
+        {"if": [{"file": "../runtime/sc3_native.cpp", "match": "Vu1StreamAdapter"}], "status": "present",
+         "evidence": "Vu1StreamAdapter (sc3_native.cpp) walks the DMA chains and unpacks every VIF1 stream into VU memory before the C++ programs read it; setVif1Threaded(true) in sc3_overrides.cpp"},
+        {"if": [{"file": "../runtime/sc3_overrides.cpp", "match": "setVif1Threaded\\(true\\)"}], "status": "present",
+         "evidence": "Vu1StreamAdapter (sc3_native.cpp) walks the DMA chains and unpacks every VIF1 stream into VU memory before the C++ programs read it; setVif1Threaded(true) in sc3_overrides.cpp"},
+        {"status": "absent", "evidence": "no VIF1 stream reader installed"}
+      ]
+    },
+    {
+      "name": "VU interpreter",
+      "rules": [
+        {"if": [{"file": "../runtime/sc3_native.cpp", "match": "parsePort\\(port\\)\\s*:\\s*Port::On"},
+                {"file": "../runtime/sc3_vu0.cpp", "match": "Mode::Interpreter"},
+                {"file": "../runtime/sc3_vu0.cpp", "match": "\\*mode == '0'"}], "status": "diagnostic",
+         "evidence": "off by default: VU1 programs and VU0 microprograms run as C++ ports (SC3_NATIVE_VU1_PORT and SC3_NATIVE_VU0 default on); =0 brings the interpreter back as a diagnostic"},
+        {"status": "present", "evidence": "a VU program still runs on the interpreter by default"}
+      ]
+    },
+    {
+      "name": "vblank pacing",
+      "rules": [
+        {"if": [{"file": "../runtime/sc3_overrides.cpp", "match": "getenv\\(\"SC3_NATIVE_FRAMES\"\\);\\s*!native"}], "status": "partial",
+         "evidence": "frames paced by FramePacer (SC3_NATIVE_FRAMES default on), but the vblank and GS interrupts are still raised on EE time and the game's handlers run on them"},
+        {"status": "present", "evidence": "frames end on the emulated vblank"}
+      ]
+    },
+    {
+      "name": "IOP kernel model",
+      "rules": [
+        {"if": [{"file": "ps2recomp:ps2xIOP/src/emulator/iop_emulator.cpp", "exists": true},
+                {"file": "../runtime/sc3_overrides.cpp", "match": "setenv\\(\"PS2X_IOP_NATIVE\", \"1\""}], "status": "present",
+         "evidence": "the IRX modules run on ps2xIOP's emulated IOP kernel (imports, threads, interrupts, DMA), recompiled to native code (PS2X_IOP_NATIVE=1)"},
+        {"if": [{"file": "ps2recomp:ps2xIOP/src/emulator/iop_emulator.cpp", "exists": true}], "status": "present",
+         "evidence": "the IRX modules run on ps2xIOP's emulated IOP kernel (imports, threads, interrupts, DMA), interpreted"},
+        {"status": "absent", "evidence": "no IOP emulator found"}
+      ]
+    }
+  ],
+  "blind_spots": [
+    "The movie overrides answer CRI's player on the host: native, but outside the game's own code."
+  ]
+}

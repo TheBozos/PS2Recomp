@@ -1,0 +1,57 @@
+{
+  "title": "Twisted Metal: Black",
+  "game_id": "SCUS_971.01",
+  "short_name": "TMB",
+  "elf": ["${TMB_ELF}", "../game_us/SCUS_971.01"],
+  "recomp_config": "tmb_scus97101.toml",
+  "generated": "../generated_us",
+  "ps2recomp": "../PS2Recomp",
+  "ps2recomp_submodule": "PS2Recomp",
+  "out": "../build/funcmap",
+  "runtime_sources": ["../runtime/*.cpp", "../runtime/*.h", "../runtime/vu1/*.cpp"],
+  "runtime_badges": [
+    {
+      "name": "GS front end",
+      "rules": [
+        {"if": [{"file": "../runtime/tmb_native.cpp", "match": "setGsFrontEndAbsent"}], "status": "absent",
+         "evidence": "ps2x::native::setGsFrontEndAbsent in tmb_native.cpp: no GS object, no GS memory, no GS packet read in the default mode (TMB_NATIVE=0 is the diagnostic path)"},
+        {"status": "present", "evidence": "no setGsFrontEndAbsent: the GS front end is constructed"}
+      ]
+    },
+    {
+      "name": "SPU2",
+      "rules": [
+        {"if": [{"file": "../runtime/tmb_overrides.cpp", "match": "setEnvDefault\\(\"PS2X_NATIVE_AUDIO\""}], "status": "absent",
+         "evidence": "PS2X_NATIVE_AUDIO=1 by default (tmb_overrides.cpp): libsd's exports go to the fork's native mixer, the SPU2 is never scheduled (TMB_NATIVE_AUDIO=0 brings it back)"},
+        {"status": "present", "evidence": "libsd runs on the emulated SPU2"}
+      ]
+    },
+    {
+      "name": "IOP hardware",
+      "rules": [
+        {"if": [{"file": "../runtime/tmb_overrides.cpp", "match": "setEnvDefault\\(\"PS2X_IOP_HARDWARE\""}], "status": "diagnostic",
+         "evidence": "PS2X_IOP_HARDWARE=0 by default (tmb_overrides.cpp): the registers a module's start code touches are plain storage; TMB_IOP_HARDWARE=1 brings the models back"},
+        {"status": "present", "evidence": "the IOP's devices are modelled"}
+      ]
+    },
+    {
+      "name": "IOP kernel model",
+      "rules": [
+        {"if": [{"file": "ps2recomp:ps2xIOP/src/emulator/iop_emulator.cpp", "exists": true}], "status": "partial",
+         "evidence": "the recompiled IOP modules still run on the fork's IOP kernel layer (interrupts, timers, SIF): TMB's README lists it as in progress"},
+        {"status": "absent", "evidence": "no IOP emulator found"}
+      ]
+    },
+    {
+      "name": "vblank pacing",
+      "rules": [
+        {"if": [{"file": "../runtime/tmb_overrides.cpp", "match": "g_nativeFrames = true"}], "status": "absent",
+         "evidence": "native frames by default (timer1HandlerNative, setNativeFrames): frames on the PC clock; TMB_NATIVE_FRAMES=0 is the diagnostic"},
+        {"status": "present", "evidence": "frames end on the emulated vblank"}
+      ]
+    }
+  ],
+  "blind_spots": [
+    "TMB's native VU programs are matched by the microcode they replace at run time (tmb_native.cpp, runtime/vu1): they are not listed as VU program squares."
+  ]
+}
