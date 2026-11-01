@@ -597,6 +597,23 @@ void main()
                static_cast<uint64_t>(texa.ta1) << 32;
     }
 
+    struct SubmitDump
+    {
+        std::string dir;
+        std::FILE *file = nullptr;
+    };
+    SubmitDump &submitDump()
+    {
+        static SubmitDump d = []
+        {
+            SubmitDump out;
+            if (const char *v = std::getenv("PS2X_GS_SUBMIT_DUMP"))
+                out.dir = v;
+            return out;
+        }();
+        return d;
+    }
+
     // A CT24 target has no alpha: the GS blends with Ad as 0x80 there, which is FIX 0x80.
     uint64_t effectiveAlpha(const GSContext &context)
     {
@@ -2759,6 +2776,24 @@ void GSNativeBackend::Reset()
 
 void GSNativeBackend::Submit(const GSPrimitiveBatch &batch)
 {
+    if (SubmitDump &d = submitDump(); d.file)
+    {
+        const GSDrawState &st = batch.state;
+        const GSContext &c = st.context;
+        std::fprintf(d.file, "P %u %d %d %d %d %d %d f %u %u %u %#x z %u %u %d t %#llx a %#llx fba %#llx x0 %#llx x1 %#llx cl %#llx nk %#llx texa %#llx fog %#x pabe %d cc %#llx dt %#llx sc %u %u %u %u off %u %u\n",
+                     static_cast<unsigned>(st.prim.type), st.prim.tme, st.prim.abe, st.prim.fge, st.prim.ctxt, st.prim.fst, st.prim.iip,
+                     c.frame.fbp, c.frame.fbw, c.frame.psm, c.frame.fbmsk, c.zbuf.zbp, c.zbuf.psm, c.zbuf.zmask,
+                     static_cast<unsigned long long>(c.test), static_cast<unsigned long long>(c.alpha), static_cast<unsigned long long>(c.fba),
+                     static_cast<unsigned long long>(rawTex0(c.tex0)), static_cast<unsigned long long>(c.tex1), static_cast<unsigned long long>(c.clamp),
+                     static_cast<unsigned long long>(st.nativeTexture ? st.nativeTexture->key : 0u), static_cast<unsigned long long>(rawTexa(st.texa)),
+                     static_cast<unsigned>(st.fogR | st.fogG << 8 | st.fogB << 16), st.pabe, static_cast<unsigned long long>(st.colclamp),
+                     static_cast<unsigned long long>(st.dthe), c.scissor.x0, c.scissor.y0, c.scissor.x1, c.scissor.y1, c.xyoffset.ofx, c.xyoffset.ofy);
+        for (uint32_t k = 0; k < batch.vertexCount && k < 3u; ++k)
+        {
+            const GSVertex &v = batch.vertices[k];
+            std::fprintf(d.file, "V %.4f %.4f %.1f %.9g %.9g %.9g %u %u %u %u %u %u %u\n", v.x, v.y, v.z, v.s, v.t, v.q, v.r, v.g, v.b, v.a, v.fog, v.u, v.v);
+        }
+    }
     if (m_submitThread == std::thread::id{})
         m_submitThread = std::this_thread::get_id();
     appendPrimitive(batch);
@@ -2933,6 +2968,26 @@ void GSNativeBackend::TextureFlush()
 void GSNativeBackend::Sync(GSSyncReason reason)
 {
     flushBatch();
+    if (SubmitDump &d = submitDump(); !d.dir.empty() && reason == GSSyncReason::Finish)
+    {
+        if (d.file)
+        {
+            std::fclose(d.file);
+            d.file = nullptr;
+        }
+        const std::string request = d.dir + "/request";
+        if (std::FILE *r = std::fopen(request.c_str(), "rb"))
+        {
+            char name[64] = {};
+            const size_t n = std::fread(name, 1, sizeof(name) - 1u, r);
+            std::fclose(r);
+            std::remove(request.c_str());
+            std::string tag(name, n);
+            while (!tag.empty() && (tag.back() == '\n' || tag.back() == ' '))
+                tag.pop_back();
+            d.file = std::fopen((d.dir + "/" + tag + ".txt").c_str(), "w");
+        }
+    }
     m_memory->Sync(reason);
 }
 
