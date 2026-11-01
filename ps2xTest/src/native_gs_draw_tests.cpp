@@ -153,5 +153,34 @@ void register_native_gs_draw_tests()
             backend.SubmitNative(target, m, tris, 3);
             t.Equals(backend.cluts.size(), size_t{0}, "no CLUT load without a TEX0 write");
         });
+        tc.Run("SubmitNative draws sprites and lines by their two vertices", [](TestCase &t)
+        {
+            RecordingBackend backend;
+            GSDrawState target{};
+            GsMaterial m = material();
+            m.prim = ps2x::gs::decodePrim(0x256);
+            const GsVertex corners[5] = {vertex(1, 2, 3, 0x80u), vertex(9, 8, 3, 0x80u), vertex(4, 4, 5, 0u), vertex(6, 7, 5, 0u),
+                                         vertex(0, 0, 0, 0u)};
+            backend.SubmitNative(target, m, corners, 5);
+            t.Equals(backend.batches.size(), size_t{2}, "a batch per sprite, the odd vertex left out");
+            t.IsTrue(!backend.batches.empty() && backend.batches[0].vertexCount == 2u && backend.batches[0].state.prim.type == GS_PRIM_SPRITE,
+                     "two corners, drawn as a GS sprite");
+            t.IsTrue(backend.batches.size() == 2 && backend.batches[1].vertices[0].x == 4.0f && backend.batches[1].vertices[1].y == 7.0f,
+                     "the second sprite's corners");
+            backend.batches.clear();
+            m.prim = ps2x::gs::decodePrim(0x2C1);
+            backend.SubmitNative(target, m, corners, 2);
+            t.IsTrue(backend.batches.size() == 1 && backend.batches[0].vertexCount == 2u && backend.batches[0].state.prim.type == GS_PRIM_LINE &&
+                         backend.batches[0].state.prim.aa1,
+                     "a line, antialiased as the material says");
+            Renderer &renderer = Renderer::instance();
+            renderer.setStreamDraws(true);
+            m.prim = ps2x::gs::decodePrim(0x256);
+            renderer.drawGsKeyed(0x77, m, corners, 3);
+            g_taken.clear();
+            t.IsTrue(renderer.takeGsKeyed(0x77, &take, nullptr), "the key's batch");
+            t.Equals(g_taken.empty() ? size_t{0} : g_taken[0].triangles.size(), size_t{2}, "whole sprites kept");
+            renderer.setStreamDraws(false);
+        });
     });
 }
