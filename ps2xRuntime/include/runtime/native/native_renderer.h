@@ -120,6 +120,17 @@ namespace ps2x::native
         // from it; a game may write TEXA once, outside the stream a port reads).
         void setGsTexa(uint64_t texa) { m_gsTexa.store(texa, std::memory_order_relaxed); }
         void endFrame();
+        // A full-screen pass at this point of the frame (a port's game's own post effect, from its parameters): the
+        // frame drawn so far shrunk to width x height (bilinear), brightened by gain (clamped to 1), blurred (Gaussian,
+        // sigma in shrunk pixels), stretched back (bilinear) and mixed over the frame by alpha (0..1), only where the
+        // depth is the cleared one when farDepthOnly (the sky behind everything drawn).
+        struct PostEffect
+        {
+            int width = 128, height = 89;
+            float gain = 1.0f, sigma = 0.0f, alpha = 1.0f;
+            bool farDepthOnly = true;
+        };
+        void postEffect(const PostEffect &effect);
         // Depth a game reads back from the GS (a visibility test: TMB's lens flares sample the Z buffer, which the
         // native frame is not in). While asked for (wantDepth, again within a second), present() copies the native
         // frame's depth; depthAt gives it at a GS screen point as GS Z, from the frame presented last (false before).
@@ -218,12 +229,14 @@ namespace ps2x::native
             // same VIF1 transfer reaches the cache when VIF1 gets to it): looked up again where the batch is drawn,
             // in the GS stream (after the upload) or at present.
             std::shared_ptr<const TextureCache::Texture> texture;
+            int post = -1; // >= 0: not a draw but Frame::posts[post] (postEffect)
         };
         struct Frame
         {
             Screen screen;
             std::vector<Vertex> vertices;
             std::vector<Batch> batches;
+            std::vector<PostEffect> posts;
             double time = 0.0;                           // when it was published (seconds)
             std::unordered_map<uint64_t, uint32_t> keys; // key -> its first batch
             uint64_t lastGroup = 0;                      // its batches' latest group (0: none)
