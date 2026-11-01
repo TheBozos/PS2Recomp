@@ -77,7 +77,8 @@ public:
         state.textureWidth = static_cast<uint16_t>(1u << (material.tex0.tw < 10u ? material.tex0.tw : 10u));
         state.textureHeight = static_cast<uint16_t>(1u << (material.tex0.th < 10u ? material.tex0.th : 10u));
         state.linearFilter = ps2x::gs::linearFilter(material.tex1);
-        if (material.loadClut)
+        state.nativeTexture = material.texture;
+        if (material.loadClut && !material.texture)
             LoadClut(material.tex0, target.texclut);
         batch.vertexCount = 3;
         for (uint32_t i = 0; i + 2u < count; i += 3u)

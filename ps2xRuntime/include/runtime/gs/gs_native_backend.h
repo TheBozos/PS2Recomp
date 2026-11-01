@@ -316,6 +316,7 @@ private:
     };
     std::unordered_map<uint32_t, ReadbackBuffers> m_readbacks; // per read circuit, 1 or 2 (readCircuit)
     std::unordered_map<uint64_t, UploadedTexture> m_uploaded;
+    std::unordered_map<uint64_t, UploadedTexture> m_nativeUploaded;
     struct LastLookup
     {
         uint64_t tex0 = 0, texa = 0, uploads = ~0ull;

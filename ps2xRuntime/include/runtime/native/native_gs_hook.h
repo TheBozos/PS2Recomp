@@ -34,6 +34,17 @@ namespace ps2x::native
         bool zmask = false;
     };
 
+    // A texture a port decoded from its game's own assets (an offline pack), in place of the one TEX0 selects in GS
+    // memory: RGBA8 rows, R in the low byte, alpha doubled from the GS's 0x80 = 1.0 (as TextureCache::Texture): the
+    // top-left part of the 2^TW x 2^TH texture the draw's texels reach. The port keeps it alive for as long as draws
+    // may use it; key tells textures apart.
+    struct NativeTexture
+    {
+        uint32_t width = 0, height = 0;
+        const uint32_t *rgba = nullptr;
+        uint64_t key = 0;
+    };
+
     // A draw a port computes in the GS's own terms (a microprogram's output, translated to C++): vertices as the GS
     // takes them and the drawing registers the port knows, drawn at its group's point of the GS stream into the
     // render target there (Renderer::drawGs), by the GS renderer itself, with its textures, CLUTs and blending.
@@ -52,6 +63,8 @@ namespace ps2x::native
         uint64_t tex1 = 0, clamp = 0, alpha = 0, test = 0, miptbp1 = 0, miptbp2 = 0;
         // The first draw with this TEX0 since the game set it: its CLUT load (CLD) happens here.
         bool loadClut = false;
+        // Set: the draw samples this instead of GS memory (TEX0 still gives the wrap and size), and loads no CLUT.
+        const NativeTexture *texture = nullptr;
     };
 
     using GsDrawHook = void (*)(uint64_t group, const GsDrawTarget &target);

@@ -5,6 +5,11 @@
 #include <cstdint>
 #include <vector>
 
+namespace ps2x::native
+{
+    struct NativeTexture;
+}
+
 enum GSPrimType : uint8_t
 {
     GS_PRIM_POINT = 0,
@@ -250,6 +255,7 @@ struct GSDrawState
     uint16_t textureWidth = 1;
     uint16_t textureHeight = 1;
     bool linearFilter = false;
+    const ps2x::native::NativeTexture *nativeTexture = nullptr;
 };
 
 struct GSPrimitiveBatch

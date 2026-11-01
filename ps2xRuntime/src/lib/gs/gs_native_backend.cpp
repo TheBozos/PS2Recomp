@@ -589,9 +589,42 @@ void main()
         if (a.prim.fge && (a.fogR != b.fogR || a.fogG != b.fogG || a.fogB != b.fogB))
             return false;
         if (a.prim.tme && (rawTex0(x.tex0) != rawTex0(y.tex0) || x.clamp != y.clamp || x.tex1 != y.tex1 ||
-                           rawTexa(a.texa) != rawTexa(b.texa)))
+                           rawTexa(a.texa) != rawTexa(b.texa) || a.nativeTexture != b.nativeTexture))
             return false;
         return true;
+    }
+
+    // PS2X_NATIVE_TEXTURE_CHECK=1 (with the game's uploads still sent): a port's texture against the top-left part of
+    // the one the GS memory holds where its TEX0 points, decoded by the texture cache.
+    void checkNativeTexture(const ps2x::native::NativeTexture &native, uint64_t tex0, uint64_t texa)
+    {
+        static uint64_t s_checked = 0, s_differing = 0, s_missing = 0;
+        ps2x::native::setUploadsWanted(true);
+        const std::shared_ptr<const ps2x::native::TextureCache::Texture> decoded = ps2x::native::textures().texture(tex0, texa);
+        ++s_checked;
+        if (!decoded || decoded->rgba.empty())
+            ++s_missing;
+        else if (decoded->width < native.width || decoded->height < native.height ||
+                 [&]
+                 {
+                     for (uint32_t y = 0; y < native.height; ++y)
+                         if (std::memcmp(decoded->rgba.data() + size_t{y} * decoded->width, native.rgba + size_t{y} * native.width,
+                                         size_t{native.width} * 4u) != 0)
+                             return true;
+                     return false;
+                 }())
+        {
+            ++s_differing;
+            static int s_logged = 0;
+            if (s_logged++ < 20)
+                std::fprintf(stderr, "[gs:native] native texture %#llx differs from GS memory at tex0 %#llx (%ux%u)\n",
+                             static_cast<unsigned long long>(native.key), static_cast<unsigned long long>(tex0),
+                             native.width, native.height);
+        }
+        if ((s_checked & 0xFFFFu) == 0u)
+            std::fprintf(stderr, "[gs:native] native textures checked %llu: %llu differ from GS memory, %llu not decodable there\n",
+                         static_cast<unsigned long long>(s_checked), static_cast<unsigned long long>(s_differing),
+                         static_cast<unsigned long long>(s_missing));
     }
 
     struct DisplayRead
@@ -1928,167 +1961,190 @@ bool GSNativeBackend::bindTexture(const GSDrawState &state, const RenderTarget &
                              context.tex0.tw, context.tex0.th, target.fbp);
         }
     }
-    // The GS texture buffer (textureCacheRead): pages drawn over since this TEXFLUSH interval first read them read as
-    // they were then, decoded from the copy saved before that write; the texture's other pages and its CLUT as now.
-    if (!m_fillingFromMemory && !m_batch.empty())
+    if (const ps2x::native::NativeTexture *native = state.nativeTexture; native && native->rgba)
     {
-        // The texels the batch reads (a texel's margin for bilinear taps), not the texture's whole extent: the cache
-        // keeps the pages read, and 2^TW x 2^TH texels would push them out.
-        float u0 = 1e30f, u1 = -1e30f, v0 = 1e30f, v1 = -1e30f;
-        for (const Vertex &v : m_batch)
+        if (static const bool check = std::getenv("PS2X_NATIVE_TEXTURE_CHECK") != nullptr; check)
+            checkNativeTexture(*native, rawTex0(context.tex0), rawTexa(state.texa));
+        UploadedTexture &uploaded = m_nativeUploaded[native->key];
+        if (!uploaded.texture)
         {
-            const float s = v.q != 0.0f ? v.s / v.q : v.s, t = v.q != 0.0f ? v.t / v.q : v.t;
-            u0 = std::min(u0, s), u1 = std::max(u1, s), v0 = std::min(v0, t), v1 = std::max(v1, t);
+            glGenTextures(1, &uploaded.texture);
+            glBindTexture(GL_TEXTURE_2D, uploaded.texture);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, native->width, native->height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                         native->rgba);
+            uploaded.width = native->width;
+            uploaded.height = native->height;
         }
-        const float columns = static_cast<float>(1u << std::min<uint32_t>(context.tex0.tw, 10u));
-        const float rows = static_cast<float>(textureRows(context.tex0, context.clamp));
-        const auto texel = [](float c, float last) { return static_cast<uint32_t>(std::clamp(c, 0.0f, last)); };
-        std::vector<uint32_t> readPages;
-        texelPages(context.tex0.tbp0, context.tex0.tbw, context.tex0.psm, texel(std::floor(u0) - 1.0f, columns - 1.0f),
-                   texel(std::floor(v0) - 1.0f, rows - 1.0f), texel(std::ceil(u1) + 1.0f, columns - 1.0f),
-                   texel(std::ceil(v1) + 1.0f, rows - 1.0f), readPages);
-        if (textureCacheRead(readPages))
+        texture = uploaded.texture;
+        width = static_cast<float>(native->width);
+        height = static_cast<float>(native->height);
+        glUniform1i(m_uniforms.decode, 0);
+    }
+    else
+    {
+        // The GS texture buffer (textureCacheRead): pages drawn over since this TEXFLUSH interval first read them read as
+        // they were then, decoded from the copy saved before that write; the texture's other pages and its CLUT as now.
+        if (!m_fillingFromMemory && !m_batch.empty())
         {
-            std::vector<uint32_t> current;
-            const auto keepsOld = [this](uint32_t page) {
-                for (const TexCachePage &entry : m_texCache)
-                    if (entry.page == page)
-                        return entry.saved && entry.version != m_pageVersion[page];
-                return false;
-            };
-            for (const uint32_t page : readPages)
-                if (!keepsOld(page))
-                    current.push_back(page);
-            for (uint32_t page = context.tex0.cbp / 32u; page <= (context.tex0.cbp + 4u) / 32u && page < kPages; ++page)
-                if (!keepsOld(page))
-                    current.push_back(page);
-            copyPagesToTextureCache(current);
-            if (bindDecodedTexture(state, m_texCacheTexture))
+            // The texels the batch reads (a texel's margin for bilinear taps), not the texture's whole extent: the cache
+            // keeps the pages read, and 2^TW x 2^TH texels would push them out.
+            float u0 = 1e30f, u1 = -1e30f, v0 = 1e30f, v1 = -1e30f;
+            for (const Vertex &v : m_batch)
+            {
+                const float s = v.q != 0.0f ? v.s / v.q : v.s, t = v.q != 0.0f ? v.t / v.q : v.t;
+                u0 = std::min(u0, s), u1 = std::max(u1, s), v0 = std::min(v0, t), v1 = std::max(v1, t);
+            }
+            const float columns = static_cast<float>(1u << std::min<uint32_t>(context.tex0.tw, 10u));
+            const float rows = static_cast<float>(textureRows(context.tex0, context.clamp));
+            const auto texel = [](float c, float last) { return static_cast<uint32_t>(std::clamp(c, 0.0f, last)); };
+            std::vector<uint32_t> readPages;
+            texelPages(context.tex0.tbp0, context.tex0.tbw, context.tex0.psm, texel(std::floor(u0) - 1.0f, columns - 1.0f),
+                       texel(std::floor(v0) - 1.0f, rows - 1.0f), texel(std::ceil(u1) + 1.0f, columns - 1.0f),
+                       texel(std::ceil(v1) + 1.0f, rows - 1.0f), readPages);
+            if (textureCacheRead(readPages))
+            {
+                std::vector<uint32_t> current;
+                const auto keepsOld = [this](uint32_t page) {
+                    for (const TexCachePage &entry : m_texCache)
+                        if (entry.page == page)
+                            return entry.saved && entry.version != m_pageVersion[page];
+                    return false;
+                };
+                for (const uint32_t page : readPages)
+                    if (!keepsOld(page))
+                        current.push_back(page);
+                for (uint32_t page = context.tex0.cbp / 32u; page <= (context.tex0.cbp + 4u) / 32u && page < kPages; ++page)
+                    if (!keepsOld(page))
+                        current.push_back(page);
+                copyPagesToTextureCache(current);
+                if (bindDecodedTexture(state, m_texCacheTexture))
+                {
+                    width = height = 1.0f;
+                    return true;
+                }
+            }
+        }
+        if ((context.tex0.psm & 0x30u) == 0x30u && bindDepthAsTexture(state, width, height))
+        {
+            fromTarget = true;
+            texture = m_depthTexture;
+            drawnWidth = static_cast<uint32_t>(width);
+            drawnHeight = static_cast<uint32_t>(height);
+        }
+        else if (colorFormat(context.tex0.psm))
+        {
+            // A read in the target's own layout and width samples it (directSource); flushBatch brought the pages it
+            // covers up to date. Another format sees GS memory.
+            RenderTarget *source = directSource(state);
+            if (source)
+            {
+                // A render target sampled as a texture (copies, blurs, depth of field). When the draw also writes it,
+                // sample a copy of it as it was before the draw.
+                static const bool logSamples = std::getenv("PS2X_GS_NATIVE_LOG") != nullptr;
+                static uint32_t s_logged = 0;
+                if (logSamples && s_logged < 200u)
+                {
+                    ++s_logged;
+                    std::fprintf(stderr,
+                                 "[gs:native] target as texture: fbp=%u fbw=%u psm=0x%x -> tex psm=0x%x tbw=%u tw=%u th=%u "
+                                 "fst=%d into fbp=%u (self=%d)\n",
+                                 source->fbp, source->fbw, source->psm, context.tex0.psm, context.tex0.tbw,
+                                 context.tex0.tw, context.tex0.th, state.prim.fst ? 1 : 0, target.fbp,
+                                 source->fbp == target.fbp ? 1 : 0);
+                }
+                fromTarget = true;
+                drawnWidth = source->width;
+                drawnHeight = source->height;
+                width = static_cast<float>(source->width);
+                height = static_cast<float>(source->height);
+                texture = source->color;
+                m_lastSourceFramebuffer = source->framebuffer;
+                if (source->fbp == target.fbp && !std::getenv("PS2X_GS_NATIVE_NOFEEDBACKCOPY"))
+                {
+                    const uint32_t feedbackWidth = source->width * m_scale, feedbackHeight = source->height * m_scale;
+                    if (!m_feedbackTexture || m_feedbackWidth != feedbackWidth || m_feedbackHeight != feedbackHeight)
+                    {
+                        if (!m_feedbackTexture)
+                            glGenTextures(1, &m_feedbackTexture);
+                        glBindTexture(GL_TEXTURE_2D, m_feedbackTexture);
+                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, feedbackWidth, feedbackHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                                     nullptr);
+                        m_feedbackWidth = feedbackWidth;
+                        m_feedbackHeight = feedbackHeight;
+                    }
+                    glBindTexture(GL_TEXTURE_2D, m_feedbackTexture);
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, source->framebuffer);
+                    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, feedbackWidth, feedbackHeight);
+                    glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
+                    texture = m_feedbackTexture;
+                }
+            }
+        }
+        glUniform1i(m_uniforms.decode, 0);
+        if (!fromTarget)
+        {
+            // (A reload's own read: reloadTargetPages brought its pages up to date.)
+            const auto [firstPage, endPage] = m_fillingFromMemory ? std::pair<uint32_t, uint32_t>{0u, 0u} : texturePages(context.tex0, context.clamp);
+            syncMemoryPages(firstPage, endPage);
+            if (const uint32_t psm = context.tex0.psm; psm == 0x13u || psm == 0x14u || psm == 0x1Bu || psm == 0x24u || psm == 0x2Cu)
+                syncMemoryPages(std::min(context.tex0.cbp / 32u, kPages), std::min((context.tex0.cbp + 4u) / 32u + 1u, kPages));
+            if (static const bool cpuDecode = std::getenv("PS2X_GS_NATIVE_CPUDECODE") != nullptr;
+                !cpuDecode && bindDecodedTexture(state))
             {
                 width = height = 1.0f;
                 return true;
             }
-        }
-    }
-    if ((context.tex0.psm & 0x30u) == 0x30u && bindDepthAsTexture(state, width, height))
-    {
-        fromTarget = true;
-        texture = m_depthTexture;
-        drawnWidth = static_cast<uint32_t>(width);
-        drawnHeight = static_cast<uint32_t>(height);
-    }
-    else if (colorFormat(context.tex0.psm))
-    {
-        // A read in the target's own layout and width samples it (directSource); flushBatch brought the pages it
-        // covers up to date. Another format sees GS memory.
-        RenderTarget *source = directSource(state);
-        if (source)
-        {
-            // A render target sampled as a texture (copies, blurs, depth of field). When the draw also writes it,
-            // sample a copy of it as it was before the draw.
-            static const bool logSamples = std::getenv("PS2X_GS_NATIVE_LOG") != nullptr;
-            static uint32_t s_logged = 0;
-            if (logSamples && s_logged < 200u)
+            const uint64_t tex0 = rawTex0(context.tex0);
+            const uint64_t texa = rawTexa(state.texa);
+            // The cache revalidates a texture's pages on every lookup; while nothing was uploaded since this TEX0/TEXA was
+            // last looked up, its texture is still the same one.
+            ps2x::native::TextureCache &cache = ps2x::native::textures();
+            LastLookup &last = m_lastLookups[tex0 ^ (texa * 0x9E3779B97F4A7C15ull)];
+            if (!last.texture || last.tex0 != tex0 || last.texa != texa || last.uploads != cache.uploads())
             {
-                ++s_logged;
-                std::fprintf(stderr,
-                             "[gs:native] target as texture: fbp=%u fbw=%u psm=0x%x -> tex psm=0x%x tbw=%u tw=%u th=%u "
-                             "fst=%d into fbp=%u (self=%d)\n",
-                             source->fbp, source->fbw, source->psm, context.tex0.psm, context.tex0.tbw,
-                             context.tex0.tw, context.tex0.th, state.prim.fst ? 1 : 0, target.fbp,
-                             source->fbp == target.fbp ? 1 : 0);
+                last.texture = cache.texture(tex0, texa);
+                last.tex0 = tex0;
+                last.texa = texa;
+                last.uploads = cache.uploads();
             }
-            fromTarget = true;
-            drawnWidth = source->width;
-            drawnHeight = source->height;
-            width = static_cast<float>(source->width);
-            height = static_cast<float>(source->height);
-            texture = source->color;
-            m_lastSourceFramebuffer = source->framebuffer;
-            if (source->fbp == target.fbp && !std::getenv("PS2X_GS_NATIVE_NOFEEDBACKCOPY"))
+            const std::shared_ptr<const ps2x::native::TextureCache::Texture> decoded = last.texture;
+            if (!decoded || decoded->width == 0u || decoded->height == 0u || decoded->rgba.empty())
+                return false;
+            const uint64_t version = decoded->version;
+            if (static const bool logTextures = std::getenv("PS2X_GS_NATIVE_LOG") != nullptr; logTextures)
             {
-                const uint32_t feedbackWidth = source->width * m_scale, feedbackHeight = source->height * m_scale;
-                if (!m_feedbackTexture || m_feedbackWidth != feedbackWidth || m_feedbackHeight != feedbackHeight)
+                static std::unordered_map<uint64_t, uint64_t> s_seen;
+                if (s_seen.size() < 200u && s_seen.emplace(tex0 ^ (version << 1), 0u).second)
                 {
-                    if (!m_feedbackTexture)
-                        glGenTextures(1, &m_feedbackTexture);
-                    glBindTexture(GL_TEXTURE_2D, m_feedbackTexture);
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, feedbackWidth, feedbackHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-                                 nullptr);
-                    m_feedbackWidth = feedbackWidth;
-                    m_feedbackHeight = feedbackHeight;
+                    size_t nonZero = 0, opaque = 0;
+                    for (const uint32_t texel : decoded->rgba)
+                    {
+                        nonZero += (texel & 0x00FFFFFFu) != 0u;
+                        opaque += (texel >> 24) != 0u;
+                    }
+                    std::fprintf(stderr, "[gs:native] texture psm=0x%x tbp=%u cbp=%u %ux%u: %zu non-black, %zu with alpha\n",
+                                 context.tex0.psm, context.tex0.tbp0, context.tex0.cbp, decoded->width, decoded->height,
+                                 nonZero, opaque);
                 }
-                glBindTexture(GL_TEXTURE_2D, m_feedbackTexture);
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, source->framebuffer);
-                glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, feedbackWidth, feedbackHeight);
-                glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
-                texture = m_feedbackTexture;
             }
-        }
-    }
-    glUniform1i(m_uniforms.decode, 0);
-    if (!fromTarget)
-    {
-        // (A reload's own read: reloadTargetPages brought its pages up to date.)
-        const auto [firstPage, endPage] = m_fillingFromMemory ? std::pair<uint32_t, uint32_t>{0u, 0u} : texturePages(context.tex0, context.clamp);
-        syncMemoryPages(firstPage, endPage);
-        if (const uint32_t psm = context.tex0.psm; psm == 0x13u || psm == 0x14u || psm == 0x1Bu || psm == 0x24u || psm == 0x2Cu)
-            syncMemoryPages(std::min(context.tex0.cbp / 32u, kPages), std::min((context.tex0.cbp + 4u) / 32u + 1u, kPages));
-        if (static const bool cpuDecode = std::getenv("PS2X_GS_NATIVE_CPUDECODE") != nullptr;
-            !cpuDecode && bindDecodedTexture(state))
-        {
-            width = height = 1.0f;
-            return true;
-        }
-        const uint64_t tex0 = rawTex0(context.tex0);
-        const uint64_t texa = rawTexa(state.texa);
-        // The cache revalidates a texture's pages on every lookup; while nothing was uploaded since this TEX0/TEXA was
-        // last looked up, its texture is still the same one.
-        ps2x::native::TextureCache &cache = ps2x::native::textures();
-        LastLookup &last = m_lastLookups[tex0 ^ (texa * 0x9E3779B97F4A7C15ull)];
-        if (!last.texture || last.tex0 != tex0 || last.texa != texa || last.uploads != cache.uploads())
-        {
-            last.texture = cache.texture(tex0, texa);
-            last.tex0 = tex0;
-            last.texa = texa;
-            last.uploads = cache.uploads();
-        }
-        const std::shared_ptr<const ps2x::native::TextureCache::Texture> decoded = last.texture;
-        if (!decoded || decoded->width == 0u || decoded->height == 0u || decoded->rgba.empty())
-            return false;
-        const uint64_t version = decoded->version;
-        if (static const bool logTextures = std::getenv("PS2X_GS_NATIVE_LOG") != nullptr; logTextures)
-        {
-            static std::unordered_map<uint64_t, uint64_t> s_seen;
-            if (s_seen.size() < 200u && s_seen.emplace(tex0 ^ (version << 1), 0u).second)
+            UploadedTexture &uploaded = m_uploaded[decoded->key ^ (texa << 1)];
+            if (!uploaded.texture)
+                glGenTextures(1, &uploaded.texture);
+            glBindTexture(GL_TEXTURE_2D, uploaded.texture);
+            if (uploaded.version != version || uploaded.width != decoded->width || uploaded.height != decoded->height)
             {
-                size_t nonZero = 0, opaque = 0;
-                for (const uint32_t texel : decoded->rgba)
-                {
-                    nonZero += (texel & 0x00FFFFFFu) != 0u;
-                    opaque += (texel >> 24) != 0u;
-                }
-                std::fprintf(stderr, "[gs:native] texture psm=0x%x tbp=%u cbp=%u %ux%u: %zu non-black, %zu with alpha\n",
-                             context.tex0.psm, context.tex0.tbp0, context.tex0.cbp, decoded->width, decoded->height,
-                             nonZero, opaque);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, decoded->width, decoded->height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                             decoded->rgba.data());
+                uploaded.version = version;
+                uploaded.width = decoded->width;
+                uploaded.height = decoded->height;
             }
+            texture = uploaded.texture;
+            width = static_cast<float>(decoded->width);
+            height = static_cast<float>(decoded->height);
         }
-        UploadedTexture &uploaded = m_uploaded[decoded->key ^ (texa << 1)];
-        if (!uploaded.texture)
-            glGenTextures(1, &uploaded.texture);
-        glBindTexture(GL_TEXTURE_2D, uploaded.texture);
-        if (uploaded.version != version || uploaded.width != decoded->width || uploaded.height != decoded->height)
-        {
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, decoded->width, decoded->height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-                         decoded->rgba.data());
-            uploaded.version = version;
-            uploaded.width = decoded->width;
-            uploaded.height = decoded->height;
-        }
-        texture = uploaded.texture;
-        width = static_cast<float>(decoded->width);
-        height = static_cast<float>(decoded->height);
     }
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texture);
