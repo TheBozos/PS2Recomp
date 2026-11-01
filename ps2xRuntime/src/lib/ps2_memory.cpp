@@ -1482,6 +1482,8 @@ void PS2Memory::write128(uint32_t address, __m128i value)
 
 bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 {
+    if ((address & 0xFFFFF000u) == 0x10002000u || (address & 0xFFFFF000u) == 0x10007000u)
+        ps2x::native::packetStats().ipuAccesses.fetch_add(1, std::memory_order_relaxed);
     if (address == kIntcStatAddress) // write-one-to-clear
     {
         m_intcStat.fetch_and(~value, std::memory_order_acq_rel);
@@ -3333,6 +3335,8 @@ int PS2Memory::pollDmaRegisters()
 
 uint32_t PS2Memory::readIORegister(uint32_t address)
 {
+    if ((address & 0xFFFFF000u) == 0x10002000u || (address & 0xFFFFF000u) == 0x10007000u)
+        ps2x::native::packetStats().ipuAccesses.fetch_add(1, std::memory_order_relaxed);
     if (address == kIntcStatAddress)
         return m_intcStat.load(std::memory_order_acquire);
     if ((address >= 0x10003C00u && address < 0x10003E00u) || (address >= 0x10003000u && address < 0x10003100u))
