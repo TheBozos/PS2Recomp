@@ -96,6 +96,11 @@ namespace ps2x::iop::native
     // cpu.gpr[2] the result and cpu.pc = cpu.gpr[31]. For drivers taken over at their API (libsd: native audio).
     void overrideExport(const char *library, uint32_t index, Function function);
 
+    // A guest function called as an interrupt handler would be (function(a0, a1), with the module's gp), delay IOP
+    // cycles from now, once interrupts are enabled: the completion callbacks of a driver taken over at its API (libsd's
+    // transfer callbacks after an upload). Any thread may queue one.
+    void queueInterruptCall(uint32_t function, uint32_t a0, uint32_t a1, uint32_t gp, uint32_t delay);
+
     // Generated code: one per module, at namespace scope (static initialization).
     struct Registration
     {
