@@ -15,8 +15,11 @@ public:
     void toggleVisible() { m_visible = !m_visible; }
 
 private:
-    // The pad bindings window (F2): runtime/ps2_input_bindings.h.
-    void drawControlsWindow();
+    // The settings window (F2): the pad bindings (runtime/ps2_input_bindings.h) and the window and rendering
+    // (runtime/ps2_video_settings.h).
+    void drawSettingsWindow();
+    void drawControlsTab();
+    void drawVideoTab();
 
     bool m_initialized = false;
     bool m_visible = true;

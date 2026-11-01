@@ -12,6 +12,7 @@
 
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
 #include "runtime/ps2_input_bindings.h"
+#include "runtime/ps2_video_settings.h"
 #include "imgui.h"
 #include "rlImGui.h"
 #include "raylib.h"
@@ -19,6 +20,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <numeric>
 #include <cstdlib>
 #include <cstdint>
 #include <cstdio>
@@ -2209,15 +2212,147 @@ void PS2DebugPanel::shutdown()
 #endif
 }
 
-void PS2DebugPanel::drawControlsWindow()
+void PS2DebugPanel::drawSettingsWindow()
 {
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
     ImGui::SetNextWindowSize(ImVec2(640.0f, 600.0f), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Controls (F2)", &m_controlsVisible))
+    if (!ImGui::Begin("Settings (F2)", &m_controlsVisible))
     {
         ImGui::End();
         return;
     }
+    if (ImGui::BeginTabBar("settings-tabs"))
+    {
+        if (ImGui::BeginTabItem("Controls"))
+        {
+            drawControlsTab();
+            ImGui::EndTabItem();
+        }
+        else
+            m_bindingAction = -1;
+        if (ImGui::BeginTabItem("Video"))
+        {
+            drawVideoTab();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+    ImGui::End();
+#endif
+}
+
+void PS2DebugPanel::drawVideoTab()
+{
+#if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
+    ps2_video::Settings &edited = ps2_video::edited();
+    const ps2_video::Settings &current = ps2_video::current();
+    // What the environment sets wins over video.ini at the next launch too.
+    const auto envNote = [](const char *name)
+    {
+        if (const char *value = std::getenv(name); value && *value)
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%s=%s at launch)", name, value);
+        }
+    };
+
+    ImGui::SeparatorText("Display");
+    static const char *kModes[] = {"Windowed", "Fullscreen", "Borderless window"};
+    int mode = static_cast<int>(edited.mode);
+    ImGui::SetNextItemWidth(240.0f);
+    if (ImGui::Combo("Mode", &mode, kModes, IM_ARRAYSIZE(kModes)))
+        edited.mode = static_cast<ps2_video::WindowMode>(mode);
+    envNote("PS2X_WINDOW_MODE");
+
+    const std::vector<std::pair<int, int>> sizes = ps2_video::resolutions();
+    const auto [monitorWidth, monitorHeight] = ps2_video::monitorSize();
+    const auto label = [&](int width, int height)
+    {
+        const int divisor = std::gcd(width, height);
+        int ratioW = divisor ? width / divisor : 0, ratioH = divisor ? height / divisor : 0;
+        if (ratioW == 8 && ratioH == 5)
+            ratioW = 16, ratioH = 10;
+        std::string text = std::to_string(width) + " x " + std::to_string(height);
+        if (ratioW != 0 && ratioW <= 21 && ratioH <= 10)
+            text += "  (" + std::to_string(ratioW) + ":" + std::to_string(ratioH) + ")";
+        else if (std::abs(width * 9 - height * 16) < width / 50)
+            text += "  (16:9)";
+        if (width == monitorWidth && height == monitorHeight)
+            text += "  monitor";
+        return text;
+    };
+    const bool borderless = edited.mode == ps2_video::WindowMode::Borderless;
+    ImGui::BeginDisabled(borderless);
+    ImGui::SetNextItemWidth(240.0f);
+    if (ImGui::BeginCombo("Resolution", label(edited.width, edited.height).c_str()))
+    {
+        for (const auto &[width, height] : sizes)
+        {
+            const bool selected = width == edited.width && height == edited.height;
+            if (ImGui::Selectable(label(width, height).c_str(), selected))
+                edited.width = width, edited.height = height;
+            if (selected)
+                ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    envNote("PS2X_WINDOW_SIZE");
+    if (borderless)
+        ImGui::TextDisabled("Borderless covers the monitor (%d x %d); the resolution is the window's when it leaves.",
+                            monitorWidth, monitorHeight);
+    else if (edited.mode == ps2_video::WindowMode::Fullscreen)
+        ImGui::TextDisabled("Fullscreen sets the monitor to this resolution.");
+    else
+        ImGui::TextDisabled("The window can also be resized with the mouse.");
+
+    ImGui::SeparatorText("Rendering");
+    static const float kScales[] = {0.5f, 0.75f, 1.0f, 1.5f, 2.0f};
+    static const char *kScaleNames[] = {"50%", "75%", "100% (the window's)", "150%", "200% (supersampled)"};
+    int scaleIndex = 2;
+    for (int i = 0; i < IM_ARRAYSIZE(kScales); ++i)
+        if (std::fabs(edited.renderScale - kScales[i]) < 0.01f)
+            scaleIndex = i;
+    ImGui::SetNextItemWidth(240.0f);
+    if (ImGui::Combo("Render scale", &scaleIndex, kScaleNames, IM_ARRAYSIZE(kScaleNames)))
+        edited.renderScale = kScales[scaleIndex];
+    envNote("PS2X_RENDER_SCALE");
+    ImGui::TextDisabled("The native renderer's 3D against the window's resolution (applies at once).");
+    ImGui::SetNextItemWidth(240.0f);
+    ImGui::SliderInt("GS renderer scale", &edited.gsScale, 1, 4, "%dx");
+    envNote("PS2X_GS_SCALE");
+    ImGui::TextDisabled("The GS renderer's internal resolution, times the PS2's (at the next launch).");
+
+    ImGui::Separator();
+    ImGui::Text("Now: %d x %d, %s, render scale %d%%; window %d x %d", current.width, current.height,
+                ps2_video::modeName(current.mode), static_cast<int>(std::lround(current.renderScale * 100.0f)),
+                GetScreenWidth(), GetScreenHeight());
+    static std::string s_status;
+    if (ImGui::Button("Apply"))
+    {
+        ps2_video::requestApply();
+        s_status = edited.gsScale != current.gsScale ? "applied (the GS scale at the next launch)" : "applied (not saved)";
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Apply and save"))
+    {
+        ps2_video::requestApply();
+        s_status = ps2_video::save() ? "saved to " + ps2_video::configPath() : "could not write " + ps2_video::configPath();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Revert"))
+    {
+        edited = current;
+        s_status.clear();
+    }
+    ImGui::TextUnformatted(s_status.c_str());
+    ImGui::TextDisabled("F11 or Alt+Enter switches between the window and full screen.");
+#endif
+}
+
+void PS2DebugPanel::drawControlsTab()
+{
+#if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
     ps2_input::Config &config = ps2_input::config();
     std::mutex &mutex = ps2_input::configMutex();
 
@@ -2323,7 +2458,6 @@ void PS2DebugPanel::drawControlsWindow()
     }
     ImGui::SameLine();
     ImGui::TextUnformatted(s_status.c_str());
-    ImGui::End();
 #endif
 }
 
@@ -2356,7 +2490,7 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
 
     if (m_controlsVisible)
     {
-        drawControlsWindow();
+        drawSettingsWindow();
     }
     if (!m_visible)
     {

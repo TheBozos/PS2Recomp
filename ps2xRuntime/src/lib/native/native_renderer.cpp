@@ -98,6 +98,7 @@ void main()
         size_t vboBytes = 0;
         RenderTexture2D target{};
         int targetWidth = 0, targetHeight = 0;
+        bool targetFiltered = false; // bilinear (render scale other than 1) rather than point
         struct GpuTexture
         {
             unsigned int id = 0;
@@ -516,14 +517,22 @@ void main()
             }
         }
         Gpu &gpu = *m_gpu;
-        const int w = std::max(1, static_cast<int>(width)), h = std::max(1, static_cast<int>(height));
+        const float scale = renderScale();
+        const int w = std::max(1, static_cast<int>(std::lround(width * scale))), h = std::max(1, static_cast<int>(std::lround(height * scale)));
         if (gpu.targetWidth != w || gpu.targetHeight != h)
         {
             if (gpu.targetWidth != 0)
                 UnloadRenderTexture(gpu.target);
             gpu.target = LoadRenderTexture(w, h);
+            gpu.targetFiltered = false;
             gpu.targetWidth = w;
             gpu.targetHeight = h;
+        }
+        // Filtered to the window when the render scale makes it another size, as it is (point) otherwise.
+        if (const bool filtered = scale != 1.0f; filtered != gpu.targetFiltered)
+        {
+            SetTextureFilter(gpu.target.texture, filtered ? TEXTURE_FILTER_BILINEAR : TEXTURE_FILTER_POINT);
+            gpu.targetFiltered = filtered;
         }
 
         const size_t bytes = frame->vertices.size() * sizeof(Vertex);
