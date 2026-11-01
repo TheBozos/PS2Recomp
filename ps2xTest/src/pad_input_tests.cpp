@@ -90,6 +90,13 @@ void register_pad_input_tests()
             t.Equals(static_cast<int>(ps2PadLiveInputButtonsAt("jump", 0.0, 0.1)), 0, "unknown words press nothing");
         });
 
+        tc.Run("PS2X_PAD_INPUT reads lines ending in CRLF", [](TestCase &t)
+        {
+            const char *lines = "\r\nSTART\r\ncross";
+            t.Equals(static_cast<int>(ps2PadLiveInputButtonsAt(lines, 10.0, 10.1)), 0x0008, "START");
+            t.Equals(static_cast<int>(ps2PadLiveInputButtonsAt(lines, 10.0, 10.4)), 0x4000, "then CROSS");
+        });
+
         tc.Run("scePadRead uses override state", [](TestCase &t)
                {
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);

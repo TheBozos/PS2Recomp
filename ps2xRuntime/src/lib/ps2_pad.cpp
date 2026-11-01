@@ -119,7 +119,7 @@ namespace
         size_t start = 0;
         while (start < added.size())
         {
-            size_t end = added.find_first_of(" ,\n", start);
+            size_t end = added.find_first_of(" ,\r\n\t", start);
             if (end == std::string::npos)
                 end = added.size();
             std::string word = added.substr(start, end - start);
