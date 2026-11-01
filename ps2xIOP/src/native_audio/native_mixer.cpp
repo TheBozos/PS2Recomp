@@ -117,6 +117,7 @@ namespace ps2x::audio
         std::lock_guard<std::mutex> lock(m_mutex);
         for (Group &group : m_groups)
             group = Group{};
+        m_groups[1].mix = 0xFFCu;
     }
 
     void NativeMixer::write(uint32_t address, const uint8_t *data, uint32_t bytes)
@@ -392,6 +393,71 @@ namespace ps2x::audio
         out[1] = clamp16(rout);
     }
 
+    void NativeMixer::setMix(int group, uint16_t mix)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_groups[group].mix = mix & 0xFFFu;
+    }
+    uint16_t NativeMixer::mix(int group) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_groups[group].mix;
+    }
+    void NativeMixer::setInputVolume(int group, int side, uint16_t value)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_groups[group].input.volume[side] = static_cast<int16_t>(value);
+    }
+    uint16_t NativeMixer::inputVolume(int group, int side) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return static_cast<uint16_t>(m_groups[group].input.volume[side]);
+    }
+
+    namespace
+    {
+        // The input's layout: blocks of 1024 bytes, 256 left samples then 256 right.
+        uint32_t inputSampleAt(uint32_t offset)
+        {
+            return (offset / 1024u) * 256u + (offset % 512u) / 2u;
+        }
+        uint32_t inputOffsetOf(uint32_t sample)
+        {
+            return (sample / 256u) * 1024u + (sample % 256u) * 2u;
+        }
+    }
+
+    void NativeMixer::startInput(int group, const uint8_t *memory, uint32_t bytes, uint32_t offset, bool loop)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        Input &input = m_groups[group].input;
+        input.memory = memory;
+        input.samples = bytes / 1024u * 256u;
+        input.position = input.samples != 0u ? inputSampleAt(offset) % input.samples : 0u;
+        input.loop = loop;
+        input.playing = memory != nullptr && input.samples != 0u;
+    }
+    void NativeMixer::stopInput(int group)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_groups[group].input.playing = false;
+    }
+    bool NativeMixer::inputPlaying(int group) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_groups[group].input.playing;
+    }
+    uint32_t NativeMixer::inputOffset(int group) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return inputOffsetOf(m_groups[group].input.position);
+    }
+    void NativeMixer::setInputHalfCallback(std::function<void(int group, int half)> half)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_inputHalf = std::move(half);
+    }
+
     void NativeMixer::decode(Voice &voice)
     {
         const uint8_t *block = &m_memory[voice.block & (kSoundMemory - 16u)];
@@ -491,12 +557,36 @@ namespace ps2x::audio
         std::lock_guard<std::mutex> lock(m_mutex);
         for (size_t frame = 0; frame < frames; ++frame)
         {
-            // Group 0's output goes through group 1's master volume too, as the drivers set them up.
+            // Group 0's output goes into group 1 (as its external input, through group 1's master volume).
             int32_t mixed[2] = {0, 0};
             for (int g = 0; g < kGroups; ++g)
             {
                 Group &group = m_groups[g];
                 int32_t dry[2] = {0, 0}, wet[2] = {0, 0};
+                int32_t input[2] = {0, 0};
+                if (group.input.playing)
+                {
+                    Input &in = group.input;
+                    const uint32_t at = inputOffsetOf(in.position);
+                    for (int side = 0; side < 2; ++side)
+                    {
+                        const uint8_t *p = in.memory + at + static_cast<uint32_t>(side) * 512u;
+                        input[side] = mul15(static_cast<int16_t>(static_cast<uint16_t>(p[0] | (p[1] << 8u))), in.volume[side]);
+                    }
+                    ++in.position;
+                    const uint32_t half = in.samples / 2u;
+                    if (in.position == half || in.position >= in.samples)
+                    {
+                        const int which = in.position == half ? 0 : 1;
+                        if (in.position >= in.samples)
+                        {
+                            in.position = 0u;
+                            in.playing = in.loop;
+                        }
+                        if (m_inputHalf)
+                            m_inputHalf(g, which);
+                    }
+                }
                 for (int index = 0; index < kVoices; ++index)
                 {
                     Voice &voice = group.voices[index];
@@ -517,12 +607,26 @@ namespace ps2x::audio
                 }
                 // The reverb: the send averaged over two output samples, a step every other sample, its output
                 // eased between steps; at the group's effect volume.
+                int32_t returned[2] = {0, 0};
                 Reverb &reverb = group.reverb;
                 group.effect[0].tick();
                 group.effect[1].tick();
                 if (reverb.enabled && reverb.mode != 0)
                 {
-                    const int32_t send[2] = {clamp16(wet[0]), clamp16(wet[1])};
+                    int32_t send[2] = {clamp16(wet[0]), clamp16(wet[1])};
+                    if ((group.mix & 0x200u) == 0u)
+                        send[0] = 0;
+                    if ((group.mix & 0x100u) == 0u)
+                        send[1] = 0;
+                    send[0] += (group.mix & 0x20u) != 0u ? input[0] : 0;
+                    send[1] += (group.mix & 0x10u) != 0u ? input[1] : 0;
+                    if (g == 1)
+                    {
+                        send[0] += (group.mix & 0x2u) != 0u ? mixed[0] : 0;
+                        send[1] += (group.mix & 0x1u) != 0u ? mixed[1] : 0;
+                    }
+                    send[0] = clamp16(send[0]);
+                    send[1] = clamp16(send[1]);
                     if (reverb.phase)
                     {
                         const int32_t average[2] = {(reverb.input[0] + send[0]) >> 1, (reverb.input[1] + send[1]) >> 1};
@@ -538,7 +642,7 @@ namespace ps2x::audio
                     for (int side = 0; side < 2; ++side)
                     {
                         const int32_t value = reverb.phase ? (reverb.previous[side] + reverb.out[side]) >> 1 : reverb.out[side];
-                        dry[side] += mul15(value, group.effect[side].level);
+                        returned[side] = mul15(value, group.effect[side].level);
                     }
                     reverb.phase = !reverb.phase;
                 }
@@ -546,8 +650,18 @@ namespace ps2x::audio
                 group.master[1].tick();
                 for (int side = 0; side < 2; ++side)
                 {
-                    const int32_t level = clamp16(dry[side]);
-                    mixed[side] = g == 0 ? mul15(level, group.master[side].level) : clamp16(mixed[side] + level);
+                    // The dry switches: the voices (bits 11 / 10, left / right), the input (7 / 6), group 0 (3 / 2).
+                    const uint32_t shift = side == 0 ? 1u : 0u;
+                    int32_t level = returned[side];
+                    if ((group.mix & (0x400u << shift)) != 0u)
+                        level += clamp16(dry[side]);
+                    if ((group.mix & (0x40u << shift)) != 0u)
+                        level += input[side];
+                    level = clamp16(level);
+                    if (g == 0)
+                        mixed[side] = mul15(level, group.master[side].level);
+                    else
+                        mixed[side] = clamp16(((group.mix & (0x4u << shift)) != 0u ? mixed[side] : 0) + level);
                 }
                 if (g == kGroups - 1)
                     for (int side = 0; side < 2; ++side)

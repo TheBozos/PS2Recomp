@@ -10,10 +10,16 @@
 // time and feedback), the reverb's delay lines in sound memory below the effect end address as the drivers place
 // them, at 24 kHz as on the console, mixed back at the group's effect volume.
 //
-// Not done yet: noise, pitch modulation, and the sound data input (streamed PCM into the mixer).
+// The sound data input: a driver's PCM stream (sceSdBlockTrans) played from its buffer in IOP memory, 16-bit stereo at
+// 48 kHz in blocks of 256 left samples then 256 right, looping or once, with a signal at each half for the driver to
+// refill the other. Each group's mix (MMIX) routes the voices, the input and (group 1) group 0's output to the output
+// and the reverb.
+//
+// Not done yet: noise, pitch modulation.
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <vector>
 
@@ -27,6 +33,7 @@ namespace ps2x::audio
         static constexpr int kGroups = 2, kVoices = 24;
 
         static NativeMixer &instance();
+        NativeMixer() { m_groups[1].mix = 0xFFCu; } // sceSdInit's mixes: group 1 also takes group 0's output (dry)
 
         void reset();
         // The drivers' uploads: bytes into sound memory at address.
@@ -73,6 +80,20 @@ namespace ps2x::audio
         void clearEffectArea(int mode, uint32_t end);
         static uint32_t effectAreaBytes(int mode);
 
+        // A group's mix switches (MMIX: bits 0-3 group 0's output into group 1, 4-7 the input, 8-11 the voices; wet
+        // right, wet left, dry right, dry left) and its input volume (16-bit level).
+        void setMix(int group, uint16_t mix);
+        uint16_t mix(int group) const;
+        void setInputVolume(int group, int side, uint16_t value);
+        uint16_t inputVolume(int group, int side) const;
+        // The input: bytes at memory (a buffer in IOP RAM, which the driver refills while it plays) from offset; loop
+        // or once. half(group, half) is called (on the mixer's thread) each time a half has played, half 0 or 1.
+        void startInput(int group, const uint8_t *memory, uint32_t bytes, uint32_t offset, bool loop);
+        void stopInput(int group);
+        bool inputPlaying(int group) const;
+        uint32_t inputOffset(int group) const; // the byte the input plays next
+        void setInputHalfCallback(std::function<void(int group, int half)> half);
+
         // The PC's audio device: frames stereo 16-bit samples.
         void render(int16_t *out, size_t frames);
 
@@ -117,6 +138,13 @@ namespace ps2x::audio
             bool phase = false;            // the reverb steps every other output sample
             int32_t input[2] = {}, out[2] = {}, previous[2] = {};
         };
+        struct Input
+        {
+            const uint8_t *memory = nullptr;
+            uint32_t samples = 0, position = 0; // in stereo samples
+            bool playing = false, loop = false;
+            int16_t volume[2] = {0x7FFF, 0x7FFF};
+        };
         struct Group
         {
             Voice voices[kVoices];
@@ -124,6 +152,8 @@ namespace ps2x::audio
             uint32_t dry[2] = {}, wet[2] = {};
             Volume master[2], effect[2];
             Reverb reverb;
+            uint16_t mix = 0xFF0u;
+            Input input;
         };
 
         void decode(Voice &voice);
@@ -134,5 +164,6 @@ namespace ps2x::audio
         mutable std::mutex m_mutex;
         std::vector<uint8_t> m_memory = std::vector<uint8_t>(kSoundMemory, 0u);
         Group m_groups[kGroups];
+        std::function<void(int group, int half)> m_inputHalf;
     };
 }
