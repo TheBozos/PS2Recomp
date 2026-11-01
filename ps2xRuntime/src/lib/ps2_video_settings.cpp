@@ -1,6 +1,7 @@
 #include "runtime/ps2_video_settings.h"
 
 #include "ps2_runtime.h"
+#include "ps2_app.h"
 #include "runtime/native/native_renderer.h"
 
 #include "raylib.h"
@@ -155,7 +156,9 @@ namespace ps2_video
     {
         if (const char *path = std::getenv("PS2X_VIDEO_CONFIG"); path && *path)
             return path;
-        const std::filesystem::path dir = PS2Runtime::getIoPaths().elfDirectory;
+        // The per-user folder of a port that has one (ps2_app.h), else the ELF's.
+        const std::filesystem::path dir =
+            ps2x::app::userDirectory().empty() ? PS2Runtime::getIoPaths().elfDirectory : ps2x::app::userDirectory();
         return (dir.empty() ? std::filesystem::path("video.ini") : dir / "video.ini").string();
     }
 
