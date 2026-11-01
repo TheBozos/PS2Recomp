@@ -102,6 +102,7 @@ void main()
         int targetWidth = 0, targetHeight = 0;
         // Material::target / source: offscreen targets the frame's size, and the copy of the frame fromFrame samples.
         RenderTexture2D offscreen[8]{};
+        bool offscreenSharesDepth[8]{}; // the frame's depth attached to offscreen[n]
         RenderTexture2D frameCopy{};
         RenderTexture2D previousFrame{}; // Material::kPreviousFrame: the last frame drawn, kept before the next clears it
         bool previousValid = false;
@@ -489,8 +490,22 @@ void main()
         }
         Gpu &gpu = *m_gpu;
         const int w = std::max(1, static_cast<int>(width)), h = std::max(1, static_cast<int>(height));
+        // An offscreen target released: raylib deletes the depth attached to a framebuffer it unloads, so one sharing the
+        // frame's depth gets its own back first (the frame's would be deleted with it).
+        auto release = [&gpu](uint8_t n) {
+            RenderTexture2D &rt = gpu.offscreen[n];
+            if (rt.id == 0)
+                return;
+            if (gpu.offscreenSharesDepth[n])
+                rlFramebufferAttach(rt.id, rt.depth.id, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_RENDERBUFFER, 0);
+            UnloadRenderTexture(rt);
+            rt = RenderTexture2D{};
+            gpu.offscreenSharesDepth[n] = false;
+        };
         if (gpu.targetWidth != w || gpu.targetHeight != h)
         {
+            for (uint8_t n = 0; n < 8u; ++n)
+                release(n);
             if (gpu.targetWidth != 0)
                 UnloadRenderTexture(gpu.target);
             gpu.target = LoadRenderTexture(w, h);
@@ -500,9 +515,8 @@ void main()
 
         if (gpu.offscreenWidth != w || gpu.offscreenHeight != h)
         {
-            for (RenderTexture2D &rt : gpu.offscreen)
-                if (rt.id != 0)
-                    UnloadRenderTexture(rt), rt = RenderTexture2D{};
+            for (uint8_t n = 0; n < 8u; ++n)
+                release(n);
             if (gpu.frameCopy.id != 0)
                 UnloadRenderTexture(gpu.frameCopy), gpu.frameCopy = RenderTexture2D{};
             if (gpu.previousFrame.id != 0)
@@ -535,16 +549,19 @@ void main()
                 if (n != 0u && n < 8u)
                 {
                     RenderTexture2D &rt = gpu.offscreen[n];
-                    if (rt.id != 0 && (rt.texture.width != targetW[n] || rt.texture.height != targetH[n]))
-                        UnloadRenderTexture(rt), rt = RenderTexture2D{};
+                    // A target asked to share the frame's depth (setTargetSharesDepth) and of the frame's size gets it;
+                    // one whose sharing changed is made again (the game's places reuse the slots).
+                    static const bool s_noSharedDepth = std::getenv("PS2X_NO_SHARED_DEPTH") != nullptr; // diagnosis
+                    const bool share = !s_noSharedDepth && (m_sharedDepth.load(std::memory_order_relaxed) & (1u << n)) != 0u &&
+                                       targetW[n] == w && targetH[n] == h && gpu.target.id != 0;
+                    if (rt.id != 0 && (rt.texture.width != targetW[n] || rt.texture.height != targetH[n] || gpu.offscreenSharesDepth[n] != share))
+                        release(n);
                     if (rt.id == 0)
                     {
                         rt = created(targetW[n], targetH[n]);
-                        // A target of the frame's size shares the frame's depth: a draw into it can be depth-tested against
-                        // the scene as drawn so far (DC's shadow pass marks its work texture behind the characters' depth).
-                        static const bool s_noSharedDepth = std::getenv("PS2X_NO_SHARED_DEPTH") != nullptr; // diagnosis
-                        if (!s_noSharedDepth && targetW[n] == w && targetH[n] == h && gpu.target.id != 0)
+                        if (share)
                             rlFramebufferAttach(rt.id, gpu.target.depth.id, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_RENDERBUFFER, 0);
+                        gpu.offscreenSharesDepth[n] = share;
                     }
                 }
             if (m.fromFrame != 0u && m.source == Material::kPreviousFrame && gpu.previousFrame.id == 0)

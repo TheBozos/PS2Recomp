@@ -175,6 +175,19 @@ namespace ps2x::native
             if (n != 0u && n < 8u)
                 m_targetSize[n].store(static_cast<uint32_t>(width) << 16 | height, std::memory_order_relaxed);
         }
+        // Game thread: whether offscreen target n (1..7) shares the frame's depth (when it has the frame's size): a draw
+        // into it is then depth-tested against the scene drawn so far (DC's shadow pass marks its work texture behind the
+        // characters). Off by default: a target drawn as a picture of its own (DC's balloons) keeps a depth of its own.
+        void setTargetSharesDepth(uint8_t n, bool share)
+        {
+            if (n != 0u && n < 8u)
+            {
+                if (share)
+                    m_sharedDepth.fetch_or(1u << n, std::memory_order_relaxed);
+                else
+                    m_sharedDepth.fetch_and(~(1u << n), std::memory_order_relaxed);
+            }
+        }
         void setGsFrame(unsigned int textureId, int width, int height, int format)
         {
             m_gsFrame[0] = static_cast<int>(textureId);
@@ -225,6 +238,7 @@ namespace ps2x::native
     private:
         std::atomic<uint64_t> m_gsTexa{0};
         std::atomic<uint32_t> m_targetSize[8]{}; // setTargetSize: width << 16 | height, 0 the window's size
+        std::atomic<uint32_t> m_sharedDepth{0};  // setTargetSharesDepth: bit n
         Renderer();
         ~Renderer();
         struct Gpu;
