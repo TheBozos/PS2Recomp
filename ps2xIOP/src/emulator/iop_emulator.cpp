@@ -2,6 +2,7 @@
 #include <cstdio>
 #include "iop_emulator.h"
 #include "ps2x/iop/iop_native.h"
+#include "ps2x/iop/native_mixer.h"
 #include "imports/iop_cdvd.h"
 #include "core/iop_cpu.h"
 #include "imports/iop_heaplib.h"
@@ -41,6 +42,11 @@
 #include <vector>
 
 
+namespace ps2x::audio
+{
+    bool nativeLibsd(); // native_libsd.cpp
+}
+
 namespace ps2x::iop::native
 {
     namespace
@@ -64,6 +70,23 @@ namespace ps2x::iop::native
     Registration::Registration(const char *name, uint64_t fileHash, uint32_t base, uint32_t size, const Entry *entries, size_t count)
     {
         registeredModules().push_back(RegisteredModule{name, fileHash, base, size, entries, count});
+    }
+
+    struct ExportOverride
+    {
+        std::string library;
+        uint32_t index;
+        Function function;
+    };
+    std::vector<ExportOverride> &exportOverrides()
+    {
+        static std::vector<ExportOverride> overrides;
+        return overrides;
+    }
+
+    void overrideExport(const char *library, uint32_t index, Function function)
+    {
+        exportOverrides().push_back(ExportOverride{library, index, function});
     }
 }
 
@@ -242,7 +265,12 @@ namespace ps2x::iop::detail
             spu2.setClock(&totalCycles);
             spu2.setInterruptSink([this](int irq)
                                   { pendingDmaInterrupts[irq] = totalCycles; });
-            if (spu2.wallClock())
+            timrman.setInterruptSink([this](int irq) { return intrman.dispatchInterrupt(irq, *this); });
+            // PS2X_NATIVE_AUDIO=1: libsd is taken over and the native mixer is the sound (native_mixer.h); the SPU2 is
+            // left unused.
+            if (ps2x::audio::nativeLibsd())
+                host.setAudioSource([](int16_t *frames, size_t count) { ps2x::audio::NativeMixer::instance().render(frames, count); });
+            else if (spu2.wallClock())
                 host.setAudioSource([this](int16_t *frames, size_t count) { spu2.pull(frames, count); });
             spu2.setOutputSink([this](const int16_t *frames, size_t count)
                                { host.submitAudio(frames, count); });
@@ -346,7 +374,7 @@ namespace ps2x::iop::detail
         ~Impl()
         {
             // The host's audio callback must not call into a SPU2 that is gone.
-            if (spu2.wallClock())
+            if (spu2.wallClock() || ps2x::audio::nativeLibsd())
                 host.setAudioSource({});
         }
 
@@ -649,6 +677,53 @@ namespace ps2x::iop::detail
                 }
                 std::fprintf(stderr, "[IOP] native: %s (%zu entries)\n", module.name.c_str(), registered.count);
                 return;
+            }
+        }
+
+        // native::overrideExport: the module's export tables (magic 0x41C00000, then version, name[8] at + 12 and the
+        // function addresses from + 20 up to a 0) for the libraries overridden.
+        void applyExportOverrides(const Module &module)
+        {
+            // PS2X_IOP_LOG_EXPORTS=1 (diagnosis): each module's export tables once loaded (the addresses relocated).
+            static const bool s_logExports = [] { const char *v = std::getenv("PS2X_IOP_LOG_EXPORTS"); return v && *v == '1'; }();
+            if (s_logExports)
+                for (uint32_t at = module.base; at + 24u <= module.base + module.size; at += 4u)
+                {
+                    if (memory.read32(at) != 0x41C00000u)
+                        continue;
+                    char name[9] = {};
+                    for (uint32_t k = 0; k < 8u; ++k)
+                        name[k] = static_cast<char>(memory.read8(at + 12u + k));
+                    std::fprintf(stderr, "[IOP] exports %s:", name);
+                    uint32_t index = 0;
+                    for (uint32_t slot = at + 20u, function; (function = memory.read32(slot)) != 0u && index < 64u; slot += 4u, ++index)
+                        std::fprintf(stderr, " %u=%x", index, function);
+                    std::fprintf(stderr, "\n");
+                }
+            if (native::exportOverrides().empty())
+                return;
+            for (uint32_t at = module.base; at + 24u <= module.base + module.size; at += 4u)
+            {
+                if (memory.read32(at) != 0x41C00000u)
+                    continue;
+                char name[9] = {};
+                for (uint32_t k = 0; k < 8u; ++k)
+                    name[k] = static_cast<char>(memory.read8(at + 12u + k));
+                for (const native::ExportOverride &entry : native::exportOverrides())
+                {
+                    if (entry.library != name)
+                        continue;
+                    uint32_t index = 0;
+                    uint32_t function = 0;
+                    for (uint32_t slot = at + 20u; (function = memory.read32(slot)) != 0u && index < entry.index; slot += 4u)
+                        ++index;
+                    if (function == 0u || index != entry.index)
+                        continue;
+                    const uint32_t physical = physicalAddress(function);
+                    nativeEntries[physical] = entry.function;
+                    nativeBits[physical >> 8] |= 1ull << ((physical >> 2) & 63u);
+                    std::fprintf(stderr, "[IOP] %s export %u (%08x) taken over natively\n", name, entry.index, function);
+                }
             }
         }
 
@@ -1595,6 +1670,7 @@ namespace ps2x::iop::detail
                 findNativeFunctions(module.base, module.size);
             dumpModule(module, image);
             activateNative(module, image);
+            applyExportOverrides(module);
 
             // Like loadcore: start(argc, argv) with argv[0] the module path, then one entry per
             // NUL-separated argument. The block stays allocated, as resident modules may keep argv strings.
