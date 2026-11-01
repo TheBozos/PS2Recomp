@@ -47,6 +47,7 @@ namespace
             uint32_t function = 0, argument = 0, gp = 0;
         };
         Callback transCallback[2], transHandler[2]; // per DMA channel
+        Callback spu2Handler;
         uint32_t irqCallback = 0;
         uint32_t blockBuffer[2] = {}, blockSize[2] = {}; // the block transfer playing as each core's input
         uint32_t effectEnd[2] = {0x1DFFFFu, 0x1FFFFFu}; // sceSdInit's effect end addresses
@@ -446,29 +447,44 @@ namespace
             std::fprintf(stderr, "[audio] sceSdSetTransIntrHandler(%u, %08x, %08x)\n", channel, arg(e, 1), arg(e, 2));
         ret(e, previous);
     }
+    void sdGetTransIntrHandlerArgument(Env &e)
+    {
+        ret(e, g_state.transHandler[arg(e, 0) & 1u].argument);
+    }
+    void sdSetSpu2IntrHandler(Env &e)
+    {
+        const uint32_t previous = g_state.spu2Handler.function;
+        g_state.spu2Handler = State::Callback{arg(e, 0), arg(e, 1), e.cpu.gpr[28]};
+        if (logging())
+            std::fprintf(stderr, "[audio] sceSdSetSpu2IntrHandler(%08x, %08x)\n", arg(e, 0), arg(e, 1));
+        ret(e, previous);
+    }
+    void sdGetSpu2IntrHandlerArgument(Env &e)
+    {
+        ret(e, g_state.spu2Handler.argument);
+    }
+    // sceSdStopTrans(channel): the channel's block transfer stopped.
+    void sdStopTrans(Env &e)
+    {
+        mixer().stopInput(static_cast<int>(arg(e, 0) & 1u));
+        ret(e, 0u);
+    }
     void sdSetIrqCallback(Env &e)
     {
         const uint32_t previous = g_state.irqCallback;
         g_state.irqCallback = arg(e, 0);
         ret(e, previous);
     }
-    void sdReturnZero(Env &e)
-    {
-        ret(e, 0u);
-    }
 
     // sceSdSetEffectAttr(core, attr): attr {int core; int mode (bit 8: clear the area first); short depth_L, depth_R;
     // int delay; int feedback}. The depths are the effect volumes; the area is the mode's size below the effect end.
-    void sdSetEffectAttr(Env &e)
+    bool setEffect(Env &e, bool volumes)
     {
         const int core = static_cast<int>(arg(e, 0) & 1u);
         const uint32_t attr = arg(e, 1);
         const uint32_t mode = e.r32(attr + 4u);
         if ((mode & 0xFFu) >= 10u)
-        {
-            ret(e, 0xFFFFFFFFu);
-            return;
-        }
+            return false;
         auto &effect = g_state.effect[core];
         effect.mode = mode & 0xFFu;
         effect.delay = e.r32(attr + 0xCu);
@@ -478,6 +494,36 @@ namespace
                          e.r16(attr + 8u), e.r16(attr + 0xAu), effect.delay, effect.feedback, g_state.effectEnd[core]);
         if ((mode & 0x100u) != 0u)
             mixer().clearEffectArea(static_cast<int>(effect.mode), g_state.effectEnd[core]);
+        mixer().setEffect(core, static_cast<int>(effect.mode), effect.delay, effect.feedback, g_state.effectEnd[core]);
+        if (volumes)
+        {
+            mixer().setEffectVolume(core, 0, e.r16(attr + 8u));
+            mixer().setEffectVolume(core, 1, e.r16(attr + 0xAu));
+        }
+        return true;
+    }
+    void sdSetEffectAttr(Env &e)
+    {
+        ret(e, setEffect(e, true) ? 0u : 0xFFFFFFFFu);
+    }
+    // sceSdSetEffectMode(core, attr): the preset (and its clear) without the effect volumes.
+    void sdSetEffectMode(Env &e)
+    {
+        ret(e, setEffect(e, false) ? 0u : 0xFFFFFFFFu);
+    }
+    // sceSdSetEffectModeParams(core, attr): the delay, feedback and depths of the mode set, which attr must name.
+    void sdSetEffectModeParams(Env &e)
+    {
+        const int core = static_cast<int>(arg(e, 0) & 1u);
+        const uint32_t attr = arg(e, 1);
+        auto &effect = g_state.effect[core];
+        if ((e.r32(attr + 4u) & 0xFFu) != effect.mode)
+        {
+            ret(e, 0xFFFFFFFFu);
+            return;
+        }
+        effect.delay = e.r32(attr + 0xCu);
+        effect.feedback = e.r32(attr + 0x10u);
         mixer().setEffect(core, static_cast<int>(effect.mode), effect.delay, effect.feedback, g_state.effectEnd[core]);
         mixer().setEffectVolume(core, 0, e.r16(attr + 8u));
         mixer().setEffectVolume(core, 1, e.r16(attr + 0xAu));
@@ -495,7 +541,7 @@ namespace
         e.w32(attr + 0x10u, effect.feedback);
         ret(e, 0u);
     }
-    // sceSdClearEffectWorkArea(core, channel, mode).
+    // sceSdClearEffectWorkArea(core, channel, mode), sceSdCleanEffectWorkArea(core, channel, mode).
     void sdClearEffectWorkArea(Env &e)
     {
         const int core = static_cast<int>(arg(e, 0) & 1u);
@@ -538,7 +584,13 @@ namespace
         overrideExport("libsd", 24u, &sdGetEffectAttr);
         overrideExport("libsd", 25u, &sdClearEffectWorkArea);
         overrideExport("libsd", 26u, &sdSetTransIntrHandler);
-        overrideExport("libsd", 27u, &sdReturnZero); // sceSdSetSpu2IntrHandler
+        overrideExport("libsd", 27u, &sdSetSpu2IntrHandler);
+        overrideExport("libsd", 28u, &sdGetTransIntrHandlerArgument);
+        overrideExport("libsd", 29u, &sdGetSpu2IntrHandlerArgument);
+        overrideExport("libsd", 30u, &sdStopTrans);
+        overrideExport("libsd", 31u, &sdClearEffectWorkArea);
+        overrideExport("libsd", 32u, &sdSetEffectMode);
+        overrideExport("libsd", 33u, &sdSetEffectModeParams);
         return true;
     }
 }
