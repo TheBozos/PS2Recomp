@@ -252,10 +252,41 @@ else()
 endif()
 
 option(PS2X_ENABLE_FFMPEG "Enable FFmpeg-backed MPEG video decoding" ${PS2X_ENABLE_FFMPEG_DEFAULT})
+# An FFmpeg install folder (include/, lib/libavcodec.a, libswscale.a, libavutil.a and their lib/pkgconfig/*.pc) used
+# directly, without pkg-config: a static FFmpeg with only what src/lib/Kernel/Stubs/MPEG.cpp uses (avcodec with the
+# MPEG-2 video decoder and parser, swscale, avutil), such as the one a port's build kit ships. Empty: pkg-config (or
+# the MSVC prebuilt).
+set(PS2X_FFMPEG_ROOT "" CACHE PATH "FFmpeg install folder with static avcodec, swscale and avutil (no pkg-config)")
 
 if(NOT PS2X_ENABLE_FFMPEG)
     message(STATUS "FFmpeg disabled; MPEG video decode falls back to stub frames")
     add_library(ffmpeg INTERFACE)
+elseif(PS2X_FFMPEG_ROOT)
+    # Link order: avcodec before swscale before avutil, then the system libraries each .pc names in Libs.private
+    # (on Windows avutil wants bcrypt for its random seed).
+    add_library(ffmpeg INTERFACE)
+    target_include_directories(ffmpeg INTERFACE "${PS2X_FFMPEG_ROOT}/include")
+    set(_ps2x_ffmpeg_system_libs)
+    foreach(_ps2x_ffmpeg_lib avcodec swscale avutil)
+        set(_ps2x_ffmpeg_file "${PS2X_FFMPEG_ROOT}/lib/lib${_ps2x_ffmpeg_lib}.a")
+        if(NOT EXISTS "${_ps2x_ffmpeg_file}")
+            message(FATAL_ERROR "PS2X_FFMPEG_ROOT: ${_ps2x_ffmpeg_file} is missing")
+        endif()
+        target_link_libraries(ffmpeg INTERFACE "${_ps2x_ffmpeg_file}")
+        set(_ps2x_ffmpeg_pc "${PS2X_FFMPEG_ROOT}/lib/pkgconfig/lib${_ps2x_ffmpeg_lib}.pc")
+        if(EXISTS "${_ps2x_ffmpeg_pc}")
+            file(STRINGS "${_ps2x_ffmpeg_pc}" _ps2x_ffmpeg_private REGEX "^Libs\\.private:")
+            string(REGEX MATCHALL "-l[^ \t]+" _ps2x_ffmpeg_flags "${_ps2x_ffmpeg_private}")
+            foreach(_ps2x_ffmpeg_flag ${_ps2x_ffmpeg_flags})
+                string(SUBSTRING "${_ps2x_ffmpeg_flag}" 2 -1 _ps2x_ffmpeg_name)
+                list(APPEND _ps2x_ffmpeg_system_libs "${_ps2x_ffmpeg_name}")
+            endforeach()
+        endif()
+    endforeach()
+    list(REMOVE_DUPLICATES _ps2x_ffmpeg_system_libs)
+    list(REMOVE_ITEM _ps2x_ffmpeg_system_libs avcodec swscale avutil)
+    target_link_libraries(ffmpeg INTERFACE ${_ps2x_ffmpeg_system_libs})
+    message(STATUS "FFmpeg from ${PS2X_FFMPEG_ROOT} (static; system libraries: ${_ps2x_ffmpeg_system_libs})")
 elseif(MSVC)
     # MinGW (MSYS2) finds its FFmpeg packages with pkg-config, like Linux, below.
     include(ExternalProject)
@@ -347,11 +378,10 @@ elseif(MSVC)
         "Script used to stage FFmpeg runtime DLLs beside executables")
 else()
     find_package(PkgConfig REQUIRED)
+    # What MPEG.cpp uses: avcodec (the MPEG-2 video decoder and parser), swscale, avutil.
     pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET GLOBAL
         libavcodec
-        libavformat
         libavutil
-        libswresample
         libswscale
     )
 
