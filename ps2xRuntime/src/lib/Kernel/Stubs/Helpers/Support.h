@@ -2016,6 +2016,17 @@ namespace
     {
         if (!runtime || !runtime->syncCoreSubsystems())
             return;
+        // No GS front end: no display registers to program; the interlace / field mode is the native display's.
+        if (ps2x::native::gsFrontEndAbsent())
+        {
+            PS2X_GS_TOUCH("display: display environment, its mode noted (libgraph)");
+            ps2x::native::DisplayMode mode = ps2x::native::displayMode();
+            mode.interlace = (env.smode2 & 0x1u) != 0u;
+            mode.frameMode = (env.smode2 & 0x2u) != 0u;
+            ps2x::native::setDisplayMode(mode);
+            return;
+        }
+        PS2X_GS_TOUCH("gs: display environment written to the GS display registers (libgraph)");
         auto &regs = runtime->memory().gs();
         regs.pmode = env.pmode;
         regs.smode2 = env.smode2;
@@ -2030,6 +2041,12 @@ namespace
     {
         if (!runtime || !pairs || !runtime->syncCoreSubsystems())
             return;
+        if (ps2x::native::gsFrontEndAbsent()) // no GS: a drawing environment has nothing to set
+        {
+            PS2X_GS_TOUCH("display: drawing environment not sent (no GS)");
+            return;
+        }
+        PS2X_GS_TOUCH("gs: drawing environment written to the GS (GS::writeRegister)");
         for (size_t i = 0; i < pairCount; ++i)
         {
             runtime->gs().writeRegister(static_cast<uint8_t>(pairs[i].reg & 0xFFu), pairs[i].value);

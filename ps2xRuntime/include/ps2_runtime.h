@@ -276,18 +276,21 @@ public:
     inline const PS2Memory &memory() const { return m_memory; }
 
     // The GS as the guest sees it: after the queued VIF1 transfers (PS2Memory::waitForVif1).
+    // A port with no GS front end (ps2x::native::setGsFrontEndAbsent) has none: hasGs() is false and reaching gs()
+    // is a fault (reported, then the process ends: every caller checks hasGs() or the switch first).
+    inline bool hasGs() const { return m_gs != nullptr; }
     inline GS &gs()
     {
         m_memory.waitForVif1();
-        return m_gs;
+        return gsChecked();
     }
     inline const GS &gs() const
     {
         m_memory.waitForVif1();
-        return m_gs;
+        return const_cast<PS2Runtime *>(this)->gsChecked();
     }
     // Without waiting: presentation, which shows whatever is drawn by then.
-    inline GS &gsForPresentation() { return m_gs; }
+    inline GS &gsForPresentation() { return gsChecked(); }
     inline GifArbiter &gifArbiter() { return m_gifArbiter; }
     inline const GifArbiter &gifArbiter() const { return m_gifArbiter; }
     inline VU1Interpreter &vu0() { return m_vu0; }
@@ -339,7 +342,15 @@ private:
 private:
     PS2Memory m_memory;
     GifArbiter m_gifArbiter;
-    GS m_gs;
+    // Constructed with the runtime unless the port has no GS front end (ps2x::native::gsFrontEndAbsent()).
+    std::unique_ptr<GS> m_gs;
+    GS &gsChecked()
+    {
+        if (!m_gs)
+            gsAbsentFault();
+        return *m_gs;
+    }
+    [[noreturn]] static void gsAbsentFault();
     std::unique_ptr<PS2IopHostAdapter> m_iopHost;
     std::unique_ptr<ps2x::iop::IopSubsystem> m_iopSubsystem;
     void iopThreadMain();

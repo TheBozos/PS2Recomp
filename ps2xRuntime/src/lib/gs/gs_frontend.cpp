@@ -1,3 +1,4 @@
+#include "runtime/native/native_display.h"
 #include "runtime/native/native_gs_hook.h"
 #include "runtime/native/native_texture_cache.h"
 #include "runtime/native/native_renderer.h"
@@ -164,6 +165,7 @@ namespace
 GS::GS()
     : m_backend(std::make_unique<GSCpuBackend>())
 {
+    PS2X_GS_TOUCH("gs: GS::GS (with a CPU raster backend)");
     reset();
 }
 
@@ -180,6 +182,7 @@ GS::~GS()
 
 bool GS::fifoEmpty() const
 {
+    PS2X_GS_TOUCH("gs: GS::fifoEmpty");
     std::lock_guard<std::mutex> lock(m_queueMutex);
     return m_queue.empty() && !m_workerBusy;
 }
@@ -293,6 +296,7 @@ void GS::waitForGsFrames()
 
 GS::LagStats GS::takeLagStats()
 {
+    PS2X_GS_TOUCH("gs: GS::takeLagStats");
     std::lock_guard<std::mutex> lock(m_queueMutex);
     return std::exchange(m_lagStats, LagStats{});
 }
@@ -686,6 +690,7 @@ void GS::workerLoop()
 
 void GS::submitGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    PS2X_GS_TOUCH("gs: GS::submitGIFPacket");
     if (!data || sizeBytes < 16u)
         return;
     ps2x::native::packetStats().gifPackets.fetch_add(1, std::memory_order_relaxed);
@@ -841,6 +846,7 @@ void GS::traceQueuedCommand(const QueuedCommand &command)
 
 void GS::queueNativeDraw(uint64_t group, int context)
 {
+    PS2X_GS_TOUCH("gs: GS::queueNativeDraw");
     if (ps2x::native::gsHeadless())
         return;
     const int index = context != 0 ? 1 : 0;
@@ -945,6 +951,7 @@ void GS::compareShadowVram()
 
 void GS::enableAsync()
 {
+    PS2X_GS_TOUCH("gs: GS::enableAsync");
     // Called by the runtime after init(). Library users (tests, tools) keep the synchronous GS, whose
     // VRAM is current as soon as a packet call returns.
 #if defined(PS2X_HAVE_PARALLEL_GS)
@@ -978,6 +985,7 @@ void GS::enableAsync()
 
 bool GS::requestParallelRenderer()
 {
+    PS2X_GS_TOUCH("gs: GS::requestParallelRenderer");
 #if defined(PS2X_HAVE_PARALLEL_GS)
     std::lock_guard<std::mutex> lock(m_queueMutex);
     if (m_parallelRequested)
@@ -1003,12 +1011,14 @@ void GS::waitForIdle()
 
 void GS::setDrawRates(GsDrawEstimate::Rates rates)
 {
+    PS2X_GS_TOUCH("gs: GS::setDrawRates");
     m_drawRates = rates;
     m_drawEstimate.setRates(gsDrawRates(m_drawRates));
 }
 
 void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
 {
+    PS2X_GS_TOUCH("gs: GS::init");
     waitForIdle();
     m_drawEstimate = GsDrawEstimate{};
     m_drawEstimate.setRates(gsDrawRates(m_drawRates));
@@ -1138,6 +1148,7 @@ const uint8_t *GS::lockDisplaySnapshot(uint32_t &outSize)
 
 GSDebugSnapshot GS::getDebugSnapshot() const
 {
+    PS2X_GS_TOUCH("gs: GS::getDebugSnapshot");
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
 
     GSDebugSnapshot snapshot{};
@@ -1457,6 +1468,7 @@ GSPresentationRequest GS::buildPresentationRequestUnlocked() const
 
 void GS::latchHostPresentationFrame()
 {
+    PS2X_GS_TOUCH("gs: GS::latchHostPresentationFrame");
     // paraLLEl-GS, and a backend whose GPU context lives on the GS thread (GSNativeBackend), present on the GS
     // thread, after what is queued before it.
     if ((m_parallelRequested || (m_backend && m_backend->PresentsOnDrawThread())) && shouldQueue())
@@ -1469,6 +1481,7 @@ void GS::latchHostPresentationFrame()
 
 void GS::queueHostPresentationLatch()
 {
+    PS2X_GS_TOUCH("gs: GS::queueHostPresentationLatch");
     if (!shouldQueue())
     {
         latchHostPresentationFrame();
@@ -1591,6 +1604,7 @@ void GS::storePresentationFrame(PresentationFrame &&frame)
 
 bool GS::latchedHostPresentationTexture(uint32_t &texture, uint32_t &width, uint32_t &height) const
 {
+    PS2X_GS_TOUCH("gs: GS::latchedHostPresentationTexture");
     std::lock_guard<std::mutex> lock(m_presentationMutex);
     if (!m_hasHostPresentationFrame || m_hostPresentationTexture == 0u)
         return false;
@@ -1669,6 +1683,7 @@ extern std::atomic<uint32_t> g_gsDumpGifPath;
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    PS2X_GS_TOUCH("gs: GS::processGIFPacket");
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16 || !m_backend)
         return;
@@ -1792,6 +1807,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 
 bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    PS2X_GS_TOUCH("gs: GS::processNativePackedGIFPacket");
     if (data && sizeBytes >= 16u && ps2x::native::uploadsAtSubmit())
         ps2x::native::textures().scanGifPacket(data, sizeBytes);
     if (!shouldQueue())
@@ -2176,6 +2192,7 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
 
 void GS::writeRegister(uint8_t regAddr, uint64_t value)
 {
+    PS2X_GS_TOUCH("gs: GS::writeRegister");
     // paraLLEl-GS: in queue order, without waiting (0x59-0x5f mirror display registers, no drawing state).
     if (m_parallelRequested && shouldQueue() && (regAddr < 0x59u || regAddr > 0x5fu) && regAddr != GS_REG_SIGNAL &&
         regAddr != GS_REG_FINISH && regAddr != GS_REG_LABEL)
@@ -2750,6 +2767,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
 bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
 {
+    PS2X_GS_TOUCH("gs: GS::clearFramebufferContext");
     // The clear packet the caller sends next draws it (sceGsSwapDBuffDc).
     if (m_parallelRequested)
         return true;
@@ -2762,6 +2780,7 @@ bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
 
 bool GS::clearActiveFramebuffer(uint32_t rgba)
 {
+    PS2X_GS_TOUCH("gs: GS::clearActiveFramebuffer");
     if (m_parallelRequested)
         return true;
     waitForIdle(); // the EE needs every earlier packet applied first
@@ -2773,6 +2792,7 @@ bool GS::clearActiveFramebuffer(uint32_t rgba)
 
 uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 {
+    PS2X_GS_TOUCH("gs: GS::consumeLocalToHostBytes");
     if (m_parallelRequested)
     {
         uint32_t copied = 0u;
@@ -2803,6 +2823,7 @@ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 
 void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
 {
+    PS2X_GS_TOUCH("gs: GS::setRasterBackend");
     if (!backend)
         backend = std::make_unique<GSCpuBackend>();
 

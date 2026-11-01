@@ -1516,6 +1516,11 @@ namespace
 
     void drawGsTab(PS2Runtime &runtime)
     {
+        if (!runtime.hasGs()) // a port with no GS front end (ps2x::native::setGsFrontEndAbsent)
+        {
+            ImGui::TextUnformatted("No GS front end: the native renderer draws and presents every frame.");
+            return;
+        }
         GSRegisters &regs = runtime.memory().gs();
         const GSDebugSnapshot gs = runtime.gs().getDebugSnapshot();
 

@@ -27,4 +27,5 @@
 #include <limits>
 
 #include "ps2_host_backend.h"
+#include "runtime/native/native_display.h"
 #include "Helpers/Support.h"

@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "System.h"
+#include "runtime/native/native_display.h"
 
 namespace ps2_syscalls
 {
@@ -9,8 +10,18 @@ namespace ps2_syscalls
         int videoMode = getRegU32(ctx, 5);  // $a1 - 0=NTSC, 1=PAL, 2=VESA, 3=HiVision
         int frameMode = getRegU32(ctx, 6);  // $a2 - 0=field, 1=frame
 
-        if (runtime)
+        if (runtime && ps2x::native::gsFrontEndAbsent()) // the mode is the native display's, no GS registers
         {
+            PS2X_GS_TOUCH("display: display mode set (SetGsCrt)");
+            ps2x::native::DisplayMode mode;
+            mode.interlace = interlaced != 0;
+            mode.frameMode = frameMode != 0;
+            mode.pal = videoMode == 1 || videoMode == 3;
+            ps2x::native::setDisplayMode(mode);
+        }
+        else if (runtime)
+        {
+            PS2X_GS_TOUCH("gs: SetGsCrt, GS SMODE1 / SMODE2 / PMODE written");
             auto &gs = runtime->memory().gs();
             const uint64_t smode2 =
                 (static_cast<uint64_t>(interlaced) & 0x1ull) |
@@ -45,8 +56,14 @@ namespace ps2_syscalls
     void GsGetIMR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         uint64_t imr = 0;
-        if (runtime)
+        if (runtime && ps2x::native::gsFrontEndAbsent())
         {
+            PS2X_GS_TOUCH("display: interrupt mask read (GsGetIMR)");
+            imr = ps2x::native::display().imr.load(std::memory_order_relaxed);
+        }
+        else if (runtime)
+        {
+            PS2X_GS_TOUCH("gs: GsGetIMR, GS IMR read");
             imr = runtime->memory().gs().imr;
         }
 
@@ -67,8 +84,14 @@ namespace ps2_syscalls
     {
         const uint64_t newImr = GPR_U64(ctx, 4);
         uint64_t oldImr = 0;
-        if (runtime)
+        if (runtime && ps2x::native::gsFrontEndAbsent()) // kept for GsGetIMR: there is no GS interrupt to mask
         {
+            PS2X_GS_TOUCH("display: interrupt mask set (GsPutIMR)");
+            oldImr = ps2x::native::display().imr.exchange(newImr, std::memory_order_relaxed);
+        }
+        else if (runtime)
+        {
+            PS2X_GS_TOUCH("gs: GsPutIMR, GS IMR written");
             oldImr = runtime->memory().gs().imr;
             runtime->memory().gs().imr = newImr;
         }
