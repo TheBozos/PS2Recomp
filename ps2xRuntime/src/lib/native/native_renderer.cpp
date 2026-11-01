@@ -327,13 +327,14 @@ void main()
         }
     }
 
-    void Renderer::postEffect(const PostEffect &effect)
+    void Renderer::postEffect(const PostEffect &effect, size_t at)
     {
         Batch batch;
         batch.post = static_cast<int>(m_building.posts.size());
         batch.first = static_cast<uint32_t>(m_building.vertices.size());
         m_building.posts.push_back(effect);
-        m_building.batches.push_back(std::move(batch));
+        at = std::min(at, m_building.batches.size());
+        m_building.batches.insert(m_building.batches.begin() + static_cast<std::ptrdiff_t>(at), std::move(batch));
     }
 
     void Renderer::endFrame()

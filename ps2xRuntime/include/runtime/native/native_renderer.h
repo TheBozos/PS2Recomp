@@ -119,7 +119,9 @@ namespace ps2x::native
             float gain = 1.0f, sigma = 0.0f, alpha = 1.0f;
             bool farDepthOnly = true;
         };
-        void postEffect(const PostEffect &effect);
+        // at: the batch it goes before (batchCount() when that point was reached; past the end: at the end).
+        void postEffect(const PostEffect &effect, size_t at = SIZE_MAX);
+        size_t batchCount() const { return m_building.batches.size(); }
         // Depth a game reads back from the GS (a visibility test: TMB's lens flares sample the Z buffer, which the
         // native frame is not in). While asked for (wantDepth, again within a second), present() copies the native
         // frame's depth; depthAt gives it at a GS screen point as GS Z, from the frame presented last (false before).
