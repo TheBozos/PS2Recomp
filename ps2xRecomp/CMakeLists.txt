@@ -125,6 +125,14 @@ PRIVATE
 add_executable(ps2_vu_aot src/vu_aot/ps2_vu_aot.cpp)
 target_include_directories(ps2_vu_aot PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../ps2xRuntime/include)
 
+# UTF-8 paths on Windows (cmake/windows/Ps2xUtf8CodePage.cmake): the TOML's ELF and output paths, argv.
+include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/windows/Ps2xUtf8CodePage.cmake")
+if(MINGW AND PS2X_WINDOWS_UTF8)
+    enable_language(RC)
+endif()
+ps2x_utf8_code_page(ps2_recomp)
+ps2x_utf8_code_page(ps2_vu_aot)
+
 install(TARGETS ps2_recomp ps2_recomp_lib
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib

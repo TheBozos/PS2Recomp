@@ -768,6 +768,15 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebI
     endif()
 endif()
 
+# UTF-8 paths on Windows (cmake/windows/Ps2xUtf8CodePage.cmake): the ELF in argv, the disc image, the user folder.
+include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/windows/Ps2xUtf8CodePage.cmake")
+if(MINGW AND PS2X_WINDOWS_UTF8 AND NOT PS2X_IS_ANDROID)
+    enable_language(RC)
+endif()
+if(NOT PS2X_IS_ANDROID)
+    ps2x_utf8_code_page(ps2EntryRunner)
+endif()
+
 # Work around WinAPI vs raylib symbol clash for CloseWindow on x64
 if(MSVC)
     target_link_options(ps2EntryRunner PRIVATE "/FORCE:MULTIPLE")
