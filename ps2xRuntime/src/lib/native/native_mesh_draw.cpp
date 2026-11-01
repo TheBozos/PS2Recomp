@@ -124,6 +124,8 @@ namespace ps2x::native
     {
         Renderer &renderer = Renderer::instance();
         renderer.setKey(drawn.screenSpace ? 0u : drawn.key); // screen space: not interpolated
+        if (drawn.group != 0u)
+            renderer.beginGroup(drawn.group);
         static const float kScreenSpace[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         if (drawn.hasContext)
             gs.apply(drawn.context);
@@ -135,6 +137,18 @@ namespace ps2x::native
             gs.apply(batch);
             if (observer)
                 observer->batch(batch, gs);
+            if (batch.gs)
+            {
+                if (batch.gsTriangles.empty())
+                    continue;
+                GsMaterial material = batch.gsMaterial;
+                material.alpha = gs.alpha;
+                material.test = gs.test;
+                if (live.noTex)
+                    material.texture = nullptr;
+                renderer.drawGs(material, batch.gsTriangles.data(), static_cast<uint32_t>(batch.gsTriangles.size()));
+                continue;
+            }
             if (batch.vertices.empty())
                 continue;
             // The strips' clip volume (the microprograms' CLIP, MeshDraw::clip): a triangle wholly outside one of its

@@ -38,6 +38,13 @@ namespace ps2x::native
         bool depthMasked = false;
         std::shared_ptr<const TextureCache::Texture> texture;
         std::vector<Vertex> vertices; // triangles, three vertices each
+        // A batch the port computed in the GS's own terms (its microprogram's output, in C++): GS-space triangles drawn
+        // with Renderer::drawGs at the draw's group, by the GS renderer with every drawing register the material holds
+        // (TEX0, TEX1, CLAMP, MIPTBP, the texture handed over); its ALPHA and TEST are the GS state followed in
+        // submission order (setsAlpha / setsTest as above). Neither the matrix nor the clip volume applies.
+        bool gs = false;
+        GsMaterial gsMaterial;
+        std::vector<GsVertex> gsTriangles;
     };
 
     // One object's draws, waiting for its place in the view's order.
@@ -55,6 +62,7 @@ namespace ps2x::native
         bool hasContext = false;
         MeshBatch context;
         uint32_t object = 0, file = 0, offset = 0; // the port's identity of the object (diagnostics)
+        uint64_t group = 0; // Renderer::beginGroup before its batches (its place in the GS stream); 0: none
     };
 
     // The GS registers the draws depend on, as context and register blocks leave them in submission order.
