@@ -250,12 +250,13 @@ void main()
 
     void Renderer::drawGs(const GsMaterial &material, const GsVertex *triangles, uint32_t count)
     {
-        if (count < 3u || !m_streamDraws)
+        const uint32_t n = gsPrimitiveVertices(material);
+        if (count < n || !m_streamDraws)
             return;
         GsBatch batch;
         batch.group = m_group;
         batch.material = material;
-        batch.vertices.assign(triangles, triangles + count - count % 3u);
+        batch.vertices.assign(triangles, triangles + count - count % n);
         std::lock_guard<std::mutex> lock(m_streamMutex);
         m_gsStream.push_back(std::move(batch));
         if (m_gsStream.size() > 65536u)
@@ -264,12 +265,13 @@ void main()
 
     void Renderer::drawGsKeyed(uint64_t key, const GsMaterial &material, const GsVertex *triangles, uint32_t count)
     {
-        if (count < 3u || !m_streamDraws)
+        const uint32_t n = gsPrimitiveVertices(material);
+        if (count < n || !m_streamDraws)
             return;
         GsBatch batch;
         batch.group = key;
         batch.material = material;
-        batch.vertices.assign(triangles, triangles + count - count % 3u);
+        batch.vertices.assign(triangles, triangles + count - count % n);
         std::lock_guard<std::mutex> lock(m_streamMutex);
         auto [it, added] = m_gsKeyed.try_emplace(key);
         it->second.push_back(std::move(batch));

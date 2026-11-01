@@ -58,7 +58,7 @@ public:
         target.fbmsk = context.frame.fbmsk;
     }
 
-    // A native port's triangles (Renderer::drawGs) at their marker: drawn into `target`'s render target, with the
+    // A native port's primitives (Renderer::drawGs: triangles, or sprites and lines by their two vertices) at their marker: drawn into `target`'s render target, with the
     // drawing registers the material carries and the target's for the rest (frame, Z buffer, offset, scissor, TEXA,
     // TEXCLUT, FOGCOL, dithering and the other global ones).
     virtual void SubmitNative(const GSDrawState &target, const ps2x::native::GsMaterial &material,
@@ -81,10 +81,11 @@ public:
         state.nativeTexture = material.texture;
         if (material.loadClut && !material.texture)
             LoadClut(material.tex0, target.texclut);
-        batch.vertexCount = 3;
-        for (uint32_t i = 0; i + 2u < count; i += 3u)
+        const uint32_t n = ps2x::native::gsPrimitiveVertices(material);
+        batch.vertexCount = n;
+        for (uint32_t i = 0; i + n <= count; i += n)
         {
-            for (uint32_t k = 0; k < 3u; ++k)
+            for (uint32_t k = 0; k < n; ++k)
             {
                 const ps2x::native::GsVertex &v = triangles[i + k];
                 GSVertex &g = batch.vertices[k];

@@ -71,6 +71,22 @@ namespace ps2x::native
         bool testFromTarget = false;
     };
 
+    // Vertices a primitive of the material takes: a sprite or a line two (its corners, its ends: the GS draws it as it
+    // would its own), a point one, a triangle three. drawGs / drawGsKeyed take whole primitives of that size.
+    inline uint32_t gsPrimitiveVertices(const GsMaterial &material)
+    {
+        switch (material.prim.type)
+        {
+        case GS_PRIM_SPRITE:
+        case GS_PRIM_LINE:
+            return 2u;
+        case GS_PRIM_POINT:
+            return 1u;
+        default:
+            return 3u;
+        }
+    }
+
     using GsDrawHook = void (*)(uint64_t group, const GsDrawTarget &target);
 
     inline std::atomic<GsDrawHook> g_gsDrawHook{nullptr};
