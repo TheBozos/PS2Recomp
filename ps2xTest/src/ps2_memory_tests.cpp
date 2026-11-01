@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/native/native_gs_hook.h"
 #include "runtime/native/native_vif1.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <atomic>
 #include <thread>
 #include <vector>
@@ -1714,6 +1716,46 @@ void register_ps2_memory_tests()
             }
             t.IsTrue(firstOk, "first queued PATH3 packet should flush in-order");
             t.IsTrue(secondOk, "second queued PATH3 packet should flush in-order");
+        });
+
+        tc.Run("GIF chain marker reached between the PATH3 packets around it", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kChain = 0x00030000u;
+            constexpr uint64_t kMarker = 0x4D41524B00000007ull;
+            uint8_t *rdram = mem.getRDRAM();
+            const auto put = [&](uint32_t at, uint64_t lo, uint64_t hi)
+            {
+                std::memcpy(rdram + at, &lo, 8);
+                std::memcpy(rdram + at + 8u, &hi, 8);
+            };
+            put(kChain + 0x00u, 0x10000001ull, 0u);             // CNT 1
+            put(kChain + 0x10u, 0x1111111111111111ull, 0x11ull); // packet A
+            put(kChain + 0x20u, 0x10000000ull, kMarker);         // CNT 0: the marker
+            put(kChain + 0x30u, 0x10000000ull, 0x1234ull);       // CNT 0, not a marker
+            put(kChain + 0x40u, 0x70000001ull, 0u);             // END 1
+            put(kChain + 0x50u, 0x2222222222222222ull, 0x22ull); // packet B
+
+            ps2x::native::setGifChainMarkGate([](uint64_t upper) -> uint64_t { return (upper >> 32) == 0x4D41524Bu ? upper : 0u; });
+            std::vector<std::string> events;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                for (uint32_t q = 0; q + 16u <= sizeBytes; q += 16u)
+                    events.push_back(data[q] == 0x11u ? "A" : data[q] == 0x22u ? "B" : "?");
+            });
+            mem.setGifMarkCallback([&](uint64_t key) { events.push_back(key == kMarker ? "marker" : "other marker"); });
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kChain), "write TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x20u, 0u), "write QWC should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR (chain, STR) should succeed");
+            mem.processPendingTransfers();
+            ps2x::native::setGifChainMarkGate(nullptr);
+
+            const std::vector<std::string> expected{"A", "marker", "B"};
+            t.IsTrue(events == expected, "the marker should come between packet A and packet B, once");
         });
 
         tc.Run("GIF arbiter continues a GIF tag across DMA transfers", [](TestCase &t)
