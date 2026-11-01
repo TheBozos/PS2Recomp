@@ -83,6 +83,36 @@ void main()
 }
 )";
 
+        // postEffect's blur: one direction of a Gaussian (uStep a texel along it), the colour first brightened by uGain
+        // and clamped; sigma 0: the brightened copy alone.
+        const char *kBlurShader = R"(#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+uniform sampler2D texture0;
+uniform vec2 uStep;
+uniform float uSigma;
+uniform float uGain;
+out vec4 finalColor;
+void main()
+{
+    if (uSigma <= 0.0)
+    {
+        finalColor = vec4(min(texture(texture0, fragTexCoord).rgb * uGain, vec3(1.0)), 1.0);
+        return;
+    }
+    int radius = int(ceil(uSigma * 3.0));
+    vec3 sum = vec3(0.0);
+    float weights = 0.0;
+    for (int k = -radius; k <= radius; ++k)
+    {
+        float w = exp(-0.5 * float(k * k) / (uSigma * uSigma));
+        sum += w * min(texture(texture0, fragTexCoord + uStep * float(k)).rgb * uGain, vec3(1.0));
+        weights += w;
+    }
+    finalColor = vec4(sum / weights, 1.0);
+}
+)";
+
         constexpr int kGlUnsignedByte = 0x1401;
         constexpr int kGlFloat = 0x1406;
         constexpr int kGlSrcAlpha = 0x0302;
@@ -100,6 +130,11 @@ void main()
         size_t vboBytes = 0;
         RenderTexture2D target{};
         int targetWidth = 0, targetHeight = 0;
+        // postEffect: its shader and two work textures of the effect's size.
+        Shader blur{};
+        int locStep = -1, locSigma = -1, locGain = -1;
+        RenderTexture2D post[2]{};
+        int postWidth = 0, postHeight = 0;
         struct GpuTexture
         {
             unsigned int id = 0;
@@ -126,6 +161,78 @@ void main()
             locTextureAlpha = rlGetLocationUniform(shader, "uTextureAlpha");
             vao = rlLoadVertexArray();
             return true;
+        }
+
+        // A postEffect over the target (w x h), called between texture modes on the target: shrink, brighten and blur
+        // horizontally, blur vertically, then mix back over the target at the far depth (or everywhere).
+        void postPass(const Renderer::PostEffect &e, int w, int h)
+        {
+            const int pw = std::max(1, e.width), ph = std::max(1, e.height);
+            if (blur.id == 0)
+            {
+                blur = LoadShaderFromMemory(nullptr, kBlurShader);
+                locStep = GetShaderLocation(blur, "uStep");
+                locSigma = GetShaderLocation(blur, "uSigma");
+                locGain = GetShaderLocation(blur, "uGain");
+            }
+            if (postWidth != pw || postHeight != ph)
+            {
+                for (RenderTexture2D &t : post)
+                {
+                    if (t.id != 0)
+                        UnloadRenderTexture(t);
+                    t = LoadRenderTexture(pw, ph);
+                    SetTextureFilter(t.texture, TEXTURE_FILTER_BILINEAR);
+                    SetTextureWrap(t.texture, TEXTURE_WRAP_CLAMP);
+                }
+                postWidth = pw;
+                postHeight = ph;
+            }
+            SetTextureFilter(target.texture, TEXTURE_FILTER_BILINEAR);
+            const auto pass = [&](const Texture2D &source, int sw, int sh, RenderTexture2D &into, float stepX, float stepY, float sigma, float gain) {
+                BeginTextureMode(into);
+                ClearBackground(BLANK);
+                BeginShaderMode(blur);
+                const float step[2] = {stepX, stepY};
+                SetShaderValue(blur, locStep, step, SHADER_UNIFORM_VEC2);
+                SetShaderValue(blur, locSigma, &sigma, SHADER_UNIFORM_FLOAT);
+                SetShaderValue(blur, locGain, &gain, SHADER_UNIFORM_FLOAT);
+                DrawTexturePro(source, Rectangle{0, 0, static_cast<float>(sw), -static_cast<float>(sh)},
+                               Rectangle{0, 0, static_cast<float>(pw), static_cast<float>(ph)}, Vector2{0, 0}, 0.0f, WHITE);
+                EndShaderMode();
+                EndTextureMode();
+            };
+            pass(target.texture, w, h, post[1], 0.0f, 0.0f, 0.0f, e.gain);               // shrink, brighten
+            pass(post[1].texture, pw, ph, post[0], 1.0f / pw, 0.0f, e.sigma, 1.0f);        // horizontal blur
+            pass(post[0].texture, pw, ph, post[1], 0.0f, 1.0f / ph, e.sigma, 1.0f);        // vertical blur
+            // Back over the target: a quad at the far plane passes the depth test only where nothing was drawn nearer.
+            BeginTextureMode(target);
+            rlDrawRenderBatchActive();
+            if (e.farDepthOnly)
+                rlEnableDepthTest();
+            else
+                rlDisableDepthTest();
+            rlDisableDepthMask();
+            rlEnableColorBlend();
+            rlSetBlendMode(RL_BLEND_ALPHA);
+            const float z = e.farDepthOnly ? -0.99999f : 0.0f;
+            const unsigned char a = static_cast<unsigned char>(std::clamp(e.alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
+            rlSetTexture(post[1].texture.id);
+            rlBegin(RL_QUADS);
+            rlColor4ub(255, 255, 255, a);
+            rlTexCoord2f(0.0f, 1.0f);
+            rlVertex3f(0.0f, 0.0f, z);
+            rlTexCoord2f(0.0f, 0.0f);
+            rlVertex3f(0.0f, static_cast<float>(h), z);
+            rlTexCoord2f(1.0f, 0.0f);
+            rlVertex3f(static_cast<float>(w), static_cast<float>(h), z);
+            rlTexCoord2f(1.0f, 1.0f);
+            rlVertex3f(static_cast<float>(w), 0.0f, z);
+            rlEnd();
+            rlDrawRenderBatchActive();
+            rlSetTexture(0);
+            rlEnableDepthMask();
+            rlEnableDepthTest();
         }
 
         unsigned int texture(uint64_t key, const std::shared_ptr<const TextureCache::Texture> &source)
@@ -213,6 +320,15 @@ void main()
             m_building.batches.back().material.textured = textured && texture != nullptr;
             m_building.batches.back().texture = std::move(texture);
         }
+    }
+
+    void Renderer::postEffect(const PostEffect &effect)
+    {
+        Batch batch;
+        batch.post = static_cast<int>(m_building.posts.size());
+        batch.first = static_cast<uint32_t>(m_building.vertices.size());
+        m_building.posts.push_back(effect);
+        m_building.batches.push_back(std::move(batch));
     }
 
     void Renderer::endFrame()
@@ -390,6 +506,20 @@ void main()
         for (size_t index = 0; index < frame->batches.size(); ++index)
         {
             const Batch &batch = frame->batches[index];
+            if (batch.post >= 0)
+            {
+                // A postEffect here: leave the frame's drawing state, run it, take the state back.
+                rlDisableScissorTest();
+                scissored = false;
+                rlDisableVertexArray();
+                rlDisableShader();
+                rlDisableTexture();
+                EndTextureMode();
+                gpu.postPass(frame->posts[static_cast<size_t>(batch.post)], w, h);
+                rlDisableBackfaceCulling();
+                rlEnableDepthTest();
+                continue;
+            }
             const Material &m = batch.material;
             const Rect &clip = clips[index];
             if (clip.y1 < 0)
