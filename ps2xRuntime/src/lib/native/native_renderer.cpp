@@ -538,7 +538,14 @@ void main()
                     if (rt.id != 0 && (rt.texture.width != targetW[n] || rt.texture.height != targetH[n]))
                         UnloadRenderTexture(rt), rt = RenderTexture2D{};
                     if (rt.id == 0)
+                    {
                         rt = created(targetW[n], targetH[n]);
+                        // A target of the frame's size shares the frame's depth: a draw into it can be depth-tested against
+                        // the scene as drawn so far (DC's shadow pass marks its work texture behind the characters' depth).
+                        static const bool s_noSharedDepth = std::getenv("PS2X_NO_SHARED_DEPTH") != nullptr; // diagnosis
+                        if (!s_noSharedDepth && targetW[n] == w && targetH[n] == h && gpu.target.id != 0)
+                            rlFramebufferAttach(rt.id, gpu.target.depth.id, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_RENDERBUFFER, 0);
+                    }
                 }
             if (m.fromFrame != 0u && m.source == Material::kPreviousFrame && gpu.previousFrame.id == 0)
                 gpu.previousFrame = created(w, h);
