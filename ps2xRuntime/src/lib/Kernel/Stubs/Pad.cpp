@@ -1,3 +1,4 @@
+#include "runtime/ps2_input_bindings.h"
 #include "Common.h"
 #include "Pad.h"
 
@@ -97,7 +98,7 @@ namespace ps2_stubs
 
         void applyGamepadState(PadInputState &state)
         {
-            if (!IsWindowReady())
+            if (!IsWindowReady() || !ps2_input::hostInputAllowed())
             {
                 return;
             }
@@ -141,7 +142,7 @@ namespace ps2_stubs
 
         void applyKeyboardState(PadInputState &state, bool allowAnalog)
         {
-            if (!IsWindowReady())
+            if (!IsWindowReady() || !ps2_input::hostInputAllowed())
             {
                 return;
             }
