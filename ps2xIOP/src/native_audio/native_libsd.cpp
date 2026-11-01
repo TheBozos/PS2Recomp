@@ -28,7 +28,8 @@ namespace
     constexpr uint32_t kVolL = 0x0000u, kVolR = 0x0100u, kPitch = 0x0200u, kAdsr1 = 0x0300u, kAdsr2 = 0x0400u, kEnvX = 0x0500u,
                        kVolXL = 0x0600u, kVolXR = 0x0700u;
     // Core parameters (bit 7 set).
-    constexpr uint32_t kMVolL = 0x0980u, kMVolR = 0x0A80u, kEVolL = 0x0B80u, kEVolR = 0x0C80u;
+    constexpr uint32_t kMix = 0x0800u, kMVolL = 0x0980u, kMVolR = 0x0A80u, kEVolL = 0x0B80u, kEVolR = 0x0C80u,
+                       kAVolL = 0x0D80u, kAVolR = 0x0E80u;
     // Switches.
     constexpr uint32_t kKon = 0x1500u, kKoff = 0x1600u, kEndX = 0x1700u, kVMixL = 0x1800u, kVMixEL = 0x1900u, kVMixR = 0x1A00u,
                        kVMixER = 0x1B00u;
@@ -47,6 +48,7 @@ namespace
         };
         Callback transCallback[2], transHandler[2]; // per DMA channel
         uint32_t irqCallback = 0;
+        uint32_t blockBuffer[2] = {}, blockSize[2] = {}; // the block transfer playing as each core's input
         uint32_t effectEnd[2] = {0x1DFFFFu, 0x1FFFFFu}; // sceSdInit's effect end addresses
         struct Effect
         {
@@ -97,6 +99,9 @@ namespace
         case kMVolR: mixer().setMasterVolume(core, 1, v); return;
         case kEVolL: mixer().setEffectVolume(core, 0, v); return;
         case kEVolR: mixer().setEffectVolume(core, 1, v); return;
+        case kMix: mixer().setMix(core, v); return;
+        case kAVolL: mixer().setInputVolume(core, 0, v); return;
+        case kAVolR: mixer().setInputVolume(core, 1, v); return;
         default: g_state.params[entry] = value; return;
         }
     }
@@ -125,6 +130,9 @@ namespace
         case kMVolR: return mixer().masterVolume(core, 1);
         case kEVolL: return mixer().effectVolume(core, 0);
         case kEVolR: return mixer().effectVolume(core, 1);
+        case kMix: return mixer().mix(core);
+        case kAVolL: return mixer().inputVolume(core, 0);
+        case kAVolR: return mixer().inputVolume(core, 1);
         default:
         {
             const auto it = g_state.params.find(entry);
@@ -365,20 +373,62 @@ namespace
     {
         ret(e, 1u); // done
     }
-    // Block transfers (the sound data input, a PCM stream into the mix) are not rendered yet: accepted; a one-shot
-    // transfer ends at once (its callback runs), a looping one (mode bit 4) never reports its halves.
+    // sceSdBlockTrans(channel, mode, iop address, size[, start]): the sound data input of core channel, played from
+    // the driver's buffer as it lies in IOP memory (the driver refills the half that has played). Mode 0 writes from
+    // the start, 3 from start, | 0x10 loops; 2 stops and returns where it was. Writes only (mode 1, reading the
+    // output back, is not done). The end of each half is the channel's transfer interrupt.
+    uint32_t blockPosition(uint32_t channel)
+    {
+        const uint32_t offset = mixer().inputOffset(static_cast<int>(channel));
+        return g_state.blockBuffer[channel] + offset;
+    }
     void sdBlockTrans(Env &e)
     {
-        if ((arg(e, 1) & 3u) != 2u && (arg(e, 1) & 0x10u) == 0u)
-            transferDone(arg(e, 0) & 1u);
+        const uint32_t channel = arg(e, 0) & 1u, mode = arg(e, 1), iop = arg(e, 2), size = arg(e, 3);
         static int s_logged = 0;
-        if (s_logged++ < 20)
-            std::fprintf(stderr, "[audio] sceSdBlockTrans(%x, %x, %08x, %x, %x)\n", arg(e, 0), arg(e, 1), arg(e, 2), arg(e, 3), arg(e, 4));
-        ret(e, 0u);
+        if (logging() && s_logged++ < 20)
+            std::fprintf(stderr, "[audio] sceSdBlockTrans(%x, %x, %08x, %x, %x)\n", arg(e, 0), mode, iop, size, arg(e, 4));
+        switch (mode & 3u)
+        {
+        case 2u:
+        {
+            const uint32_t position = blockPosition(channel);
+            mixer().stopInput(static_cast<int>(channel));
+            ret(e, position);
+            return;
+        }
+        case 1u:
+            ret(e, 0u);
+            return;
+        default:
+        {
+            const uint32_t physical = iop & 0x1FFFFFu;
+            if (physical + size > e.ramBytes() || size < 1024u)
+            {
+                ret(e, 0xFFFFFFFFu);
+                return;
+            }
+            const uint32_t start = (mode & 3u) == 3u && arg(e, 4) >= iop ? arg(e, 4) - iop : 0u;
+            g_state.blockBuffer[channel] = iop;
+            g_state.blockSize[channel] = size;
+            mixer().startInput(static_cast<int>(channel), e.ramBase() + physical, size, start, (mode & 0x10u) != 0u);
+            ret(e, 0u);
+            return;
+        }
+        }
     }
+    // sceSdBlockTransStatus(channel, flag): where the input plays now, | 1 << 24 while in the second half.
     void sdBlockTransStatus(Env &e)
     {
-        ret(e, 0u);
+        const uint32_t channel = arg(e, 0) & 1u;
+        if (!mixer().inputPlaying(static_cast<int>(channel)))
+        {
+            ret(e, 0u);
+            return;
+        }
+        const uint32_t offset = mixer().inputOffset(static_cast<int>(channel));
+        const uint32_t second = offset >= g_state.blockSize[channel] / 2u ? 1u : 0u;
+        ret(e, (second << 24u) | (g_state.blockBuffer[channel] + offset));
     }
     void sdSetTransCallback(Env &e)
     {
@@ -461,6 +511,8 @@ namespace
         const char *value = std::getenv("PS2X_NATIVE_AUDIO");
         if (!(value && *value == '1'))
             return false;
+        // Each half of a block transfer played: the channel's transfer interrupt.
+        mixer().setInputHalfCallback([](int group, int) { transferDone(static_cast<uint32_t>(group)); });
         using ps2x::iop::native::overrideExport;
         overrideExport("libsd", 2u, &sdQuit);
         overrideExport("libsd", 4u, &sdInit);
