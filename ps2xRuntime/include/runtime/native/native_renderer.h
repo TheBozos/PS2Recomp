@@ -137,6 +137,17 @@ namespace ps2x::native
         // The port's frame is the whole picture: the window shows only what present() draws (its frame, the display's
         // circuit 2 picture, a movie's backdrop, the 2D), never the GS front end's frame.
         void setPresentsAlone(bool on) { m_presentsAlone = on; }
+        // The rectangle the next draws are clipped to, in GS primitive coordinates, until set again (a game's view in a
+        // split screen: where the GS scissor would have cut them); clearClip: none. A group's GS scissor, when the GS
+        // reached its marker, takes precedence.
+        void setClip(float x0, float y0, float x1, float y1)
+        {
+            m_clip[0] = x0;
+            m_clip[1] = y0;
+            m_clip[2] = x1;
+            m_clip[3] = y1;
+        }
+        void clearClip() { setClip(0, 0, 0, 0); }
         bool presentsAlone() const { return m_enabled && m_presentsAlone; }
         // A group has batches waiting (its GS marker is worth queueing): the VIF1 interpreter reaches a program after
         // the native port has drawn it (at the transfer's start), so a group without batches by then has none.
@@ -183,6 +194,7 @@ namespace ps2x::native
             uint32_t first = 0, count = 0;
             uint64_t group = 0; // beginGroup's (its clip at present: the GS scissor where that group's marker was)
             uint64_t key = 0; // setKey
+            float clip[4] = {0, 0, 0, 0}; // setClip's, in GS primitive coordinates (x0, y0, x1, y1); x1 <= x0: none
             // Taken from the texture cache when the batch is drawn (the game's thread, in stream order): games reuse
             // texture memory before the frame is presented. Null when its upload was not there yet (an upload in the
             // same VIF1 transfer reaches the cache when VIF1 gets to it): looked up again where the batch is drawn,
@@ -220,6 +232,7 @@ namespace ps2x::native
         Frame m_overlayBuilding;                  // game thread (drawOverlay)
         std::shared_ptr<Frame> m_overlayPublished; // under m_mutex
         bool m_presentsAlone = false;
+        float m_clip[4] = {0, 0, 0, 0};
         std::shared_ptr<Frame> m_backdrop;         // under m_mutex: one textured batch, its screen, its time
         std::mutex m_mutex;
         std::shared_ptr<Frame> m_published;

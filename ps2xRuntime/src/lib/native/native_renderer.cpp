@@ -218,6 +218,7 @@ void main()
         batch.first = static_cast<uint32_t>(m_building.vertices.size());
         batch.count = count;
         batch.key = m_key;
+        std::memcpy(batch.clip, m_clip, sizeof(batch.clip));
         batch.group = m_streamDraws ? m_group : 0u;
         m_building.lastGroup = std::max(m_building.lastGroup, batch.group);
         // Once the GS front end draws the GS-context batches itself (drawn into the GS frame), present() never draws
@@ -572,9 +573,17 @@ void main()
             for (size_t i = 0; i < frame->batches.size(); ++i)
             {
                 const uint64_t group = frame->batches[i].group;
-                const Clip &clip = m_clips[group % kClips];
+                Clip clip = m_clips[group % kClips];
                 if (group == 0u || clip.group != group)
-                    continue;
+                {
+                    const float *own = frame->batches[i].clip; // the port's (setClip)
+                    if (own[2] <= own[0])
+                        continue;
+                    clip.x0 = own[0];
+                    clip.y0 = own[1];
+                    clip.x1 = own[2];
+                    clip.y1 = own[3];
+                }
                 const float sx = static_cast<float>(w) / screen.width, sy = static_cast<float>(h) / screen.height;
                 // PS2X_NATIVE_LOG_CLIPS=1: now and then, a batch's clip.
                 static const bool s_logClips = std::getenv("PS2X_NATIVE_LOG_CLIPS") != nullptr;
