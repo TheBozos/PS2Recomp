@@ -12,6 +12,7 @@
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/gs/ps2_gs_psmt4.h"
 #include "runtime/gs/ps2_gs_psmt8.h"
+#include "runtime/native/native_display.h"
 #include "Stubs/Helpers/Support.h"
 #include "Stubs/GS.h"
 
