@@ -101,6 +101,11 @@ namespace ps2x::iop::native
     // cpu.gpr[2] the result and cpu.pc = cpu.gpr[31]. For drivers taken over at their API (libsd: native audio).
     void overrideExport(const char *library, uint32_t index, Function function);
 
+    // A native replacement of a function inside one module image, which no export table names: the module whose file
+    // hashes to fileHash (FNV-1a 64, as tools/iop_recomp.py prints it), at offset from its base. For a driver taken over
+    // at its API whose start-up still sets up the hardware it drove (libsd's SPU2 bus and DMA channels).
+    void overrideModuleFunction(uint64_t fileHash, uint32_t offset, Function function);
+
     // A guest function called as an interrupt handler would be (function(a0, a1), with the module's gp), delay IOP
     // cycles from now, once interrupts are enabled: the completion callbacks of a driver taken over at its API (libsd's
     // transfer callbacks after an upload). Any thread may queue one.

@@ -91,6 +91,23 @@ namespace ps2x::iop::native
         exportOverrides().push_back(ExportOverride{library, index, function});
     }
 
+    struct ModuleFunctionOverride
+    {
+        uint64_t fileHash;
+        uint32_t offset;
+        Function function;
+    };
+    std::vector<ModuleFunctionOverride> &moduleFunctionOverrides()
+    {
+        static std::vector<ModuleFunctionOverride> overrides;
+        return overrides;
+    }
+
+    void overrideModuleFunction(uint64_t fileHash, uint32_t offset, Function function)
+    {
+        moduleFunctionOverrides().push_back(ModuleFunctionOverride{fileHash, offset, function});
+    }
+
     struct InterruptCall
     {
         uint32_t function, a0, a1, gp, delay;
@@ -962,6 +979,22 @@ namespace ps2x::iop::detail
                     nativeBits[physical >> 8] |= 1ull << ((physical >> 2) & 63u);
                     std::fprintf(stderr, "[IOP] %s export %u (%08x) taken over natively\n", name, entry.index, function);
                 }
+            }
+        }
+
+        void applyModuleFunctionOverrides(const Module &module, std::span<const uint8_t> file)
+        {
+            if (native::moduleFunctionOverrides().empty())
+                return;
+            const uint64_t hash = fileHash(file);
+            for (const native::ModuleFunctionOverride &entry : native::moduleFunctionOverrides())
+            {
+                if (entry.fileHash != hash || entry.offset >= module.size)
+                    continue;
+                const uint32_t physical = physicalAddress(module.base + entry.offset);
+                nativeEntries[physical] = entry.function;
+                nativeBits[physical >> 8] |= 1ull << ((physical >> 2) & 63u);
+                std::fprintf(stderr, "[IOP] %s +0x%x taken over natively\n", module.name.c_str(), entry.offset);
             }
         }
 
@@ -1926,6 +1959,7 @@ namespace ps2x::iop::detail
             dumpModule(module, image);
             activateNative(module, image);
             applyExportOverrides(module);
+            applyModuleFunctionOverrides(module, image);
 
             // Like loadcore: start(argc, argv) with argv[0] the module path, then one entry per
             // NUL-separated argument. The block stays allocated, as resident modules may keep argv strings.
