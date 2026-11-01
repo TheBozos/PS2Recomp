@@ -606,20 +606,23 @@ void main()
             // and how many were shown by the 100 ms fallback.
             static const bool s_rate = [] { const char *v = std::getenv("PS2X_NATIVE_STATS"); return v && *v == '1'; }();
             static uint64_t s_presents = 0, s_new = 0, s_late = 0;
-            static double s_since = now;
+            static double s_since = now, s_lastNew = now, s_longest = 0.0;
             ++s_presents;
             if (next && next != m_shown && (!m_shown || next->time > m_shown->time))
             {
                 ++s_new;
+                s_longest = std::max(s_longest, now - s_lastNew); // the longest the picture stood still (a hitch)
+                s_lastNew = now;
                 s_late += (next == published && !reached(published) && !reached(before)) ? 1u : 0u;
                 m_shownPrevious = std::move(m_shown);
                 m_shown = std::move(next);
             }
             if (s_rate && now - s_since >= 5.0)
             {
-                std::fprintf(stderr, "[native] %.1f presents/s, %.1f new frames/s (%.1f by the 100 ms fallback)\n", s_presents / (now - s_since),
-                             s_new / (now - s_since), s_late / (now - s_since));
+                std::fprintf(stderr, "[native] %.1f presents/s, %.1f new frames/s (%.1f by the 100 ms fallback), longest still %.0f ms\n",
+                             s_presents / (now - s_since), s_new / (now - s_since), s_late / (now - s_since), s_longest * 1000.0);
                 s_presents = s_new = s_late = 0;
+                s_longest = 0.0;
                 s_since = now;
             }
         }
