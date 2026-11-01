@@ -58,6 +58,7 @@ private:
     };
     std::unique_ptr<Spu2Stream, Spu2StreamDeleter> m_spu2;
     bool m_audioReady = false;
+    bool m_audioKnown = false;
     std::mutex m_spu2MixerMutex;
     Spu2Mixer m_spu2Mixer;
     std::vector<int16_t> m_spu2MixBuffer;

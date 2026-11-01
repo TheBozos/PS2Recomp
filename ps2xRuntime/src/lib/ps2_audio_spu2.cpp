@@ -18,6 +18,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <thread>
+#include <vector>
 
 namespace
 {
@@ -119,6 +121,40 @@ struct PS2AudioBackend::Spu2Stream
         pulledFrames += frames;
     }
 
+#if !defined(PLATFORM_VITA)
+    std::thread nullSink;
+    std::atomic<bool> nullSinkStop{false};
+
+    void startNullSink()
+    {
+        if (nullSink.joinable())
+            return;
+        std::fprintf(stderr, "[spu2] no audio device: the output is taken on the host's clock and discarded\n");
+        nullSink = std::thread([this]
+                               {
+            std::vector<int16_t> scratch(static_cast<size_t>(kStreamBufferFrames) * 2u);
+            const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(static_cast<double>(kStreamBufferFrames) / kSampleRate));
+            auto next = std::chrono::steady_clock::now();
+            while (!nullSinkStop.load())
+            {
+                next += period;
+                const auto now = std::chrono::steady_clock::now();
+                if (next < now - 4 * period)
+                    next = now;
+                std::this_thread::sleep_until(next);
+                pull(scratch.data(), kStreamBufferFrames);
+            } });
+    }
+
+    ~Spu2Stream()
+    {
+        nullSinkStop.store(true);
+        if (nullSink.joinable())
+            nullSink.join();
+    }
+#endif
+
     void closeWav()
     {
         if (!wav.is_open())
@@ -180,13 +216,16 @@ void PS2AudioBackend::openSpu2Stream()
             m_spu2->playing = true;
         }
     }
+    if (!m_spu2->playing && m_audioKnown)
+        m_spu2->startNullSink();
 #endif
 }
 
 void PS2AudioBackend::setAudioReady(bool ready)
 {
     m_audioReady = ready;
-    if (ready && m_spu2)
+    m_audioKnown = true;
+    if (m_spu2)
         openSpu2Stream();
 }
 
