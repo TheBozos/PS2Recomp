@@ -1,3 +1,4 @@
+#include <cfloat>
 #include "Common.h"
 #include "VU.h"
 
@@ -116,12 +117,37 @@ namespace ps2_stubs
             out[15] = in[15];
         }
 
+        // libvu0's sine and cosine for its rotations (sceVu0RotMatrixX/Y/Z, through _sceVu0ecossin): the angle folded to
+        // x = pi/2 - |angle|, cos = x - x^3/6 ... (its own degree-9 polynomial, summed in its order), sin = +-sqrt(1 -
+        // cos^2) with the angle's sign. Inside +-pi it is within 5e-4 of the true values; tiny angles (below about 2e-4)
+        // give no rotation, and past +-pi it turns the other way or wildly, as the game saw on the console.
+        void libvu0SinCos(float angle, float &sn, float &cs)
+        {
+            constexpr float kHalfPi = 1.57079637f; // 0x3FC90FDB
+            constexpr float c9 = 2.60188699e-06f, c7 = -1.98074136e-04f, c5 = 8.33302550e-03f, c3 = -1.66666567e-01f;
+            const bool negative = angle < 0.0f;
+            const float x = negative ? kHalfPi + angle : kHalfPi - angle;
+            const float x2 = x * x;
+            float t3 = c3 * x, t5 = c5 * x, t7 = c7 * x, t9 = c9 * x;
+            t3 *= x2; t5 *= x2; t7 *= x2; t9 *= x2;
+            t5 *= x2; t7 *= x2; t9 *= x2;
+            t7 *= x2; t9 *= x2;
+            t9 *= x2;
+            float c = x + t3;
+            c += t5;
+            c += t7;
+            c += t9;
+            const float q = std::sqrt(std::fabs(1.0f - c * c));
+            cs = c;
+            sn = negative ? -q : q;
+        }
+
         void axisRotateMatrix(const float (&in)[16], float angle, int axis, float (&out)[16])
         {
             float rot[16]{};
             makeIdentityMatrix(rot);
-            const float cs = std::cos(angle);
-            const float sn = std::sin(angle);
+            float cs = 0.0f, sn = 0.0f;
+            libvu0SinCos(angle, sn, cs);
             if (axis == 2)
             {
                 rot[0] = cs;
@@ -146,11 +172,14 @@ namespace ps2_stubs
             mulVuMatrix(in, rot, out);
         }
 
+        int32_t vuFtoi(float v);
+        float vuScaleByInverse(float value, float divisor);
+
         // Applies the matrix to the vertex, perspective-divides xyz by w
-        // (w==0 maps to a zero divide rather than Inf/NaN), then converts
+        // (w == 0: the VU's largest float, saturating), then converts
         // x/y to 12.4 fixed point (x16) unconditionally. z/w take the same
-        // x16 conversion when fullFtoi4 is set; otherwise they are plain
-        // integer-truncated (FTOI0) after the divide instead.
+        // x16 conversion when fullFtoi4 is set (libvu0's mode 0); otherwise
+        // they are plain integer-truncated (FTOI0) after the divide instead.
         void rotTransPersOne(const float (&m)[16], const float (&v)[4], bool fullFtoi4, int32_t (&out)[4])
         {
             float t[4];
@@ -158,32 +187,52 @@ namespace ps2_stubs
             t[1] = (m[1] * v[0]) + (m[5] * v[1]) + (m[9] * v[2]) + (m[13] * v[3]);
             t[2] = (m[2] * v[0]) + (m[6] * v[1]) + (m[10] * v[2]) + (m[14] * v[3]);
             t[3] = (m[3] * v[0]) + (m[7] * v[1]) + (m[11] * v[2]) + (m[15] * v[3]);
-            const float q = (t[3] != 0.0f) ? (1.0f / t[3]) : 0.0f;
-            t[0] *= q;
-            t[1] *= q;
-            t[2] *= q;
-            out[0] = static_cast<int32_t>(t[0] * 16.0f);
-            out[1] = static_cast<int32_t>(t[1] * 16.0f);
-            out[2] = fullFtoi4 ? static_cast<int32_t>(t[2] * 16.0f) : static_cast<int32_t>(t[2]);
-            out[3] = fullFtoi4 ? static_cast<int32_t>(t[3] * 16.0f) : static_cast<int32_t>(t[3]);
+            t[0] = vuScaleByInverse(t[0], t[3]);
+            t[1] = vuScaleByInverse(t[1], t[3]);
+            t[2] = vuScaleByInverse(t[2], t[3]);
+            out[0] = vuFtoi(t[0] * 16.0f);
+            out[1] = vuFtoi(t[1] * 16.0f);
+            out[2] = fullFtoi4 ? vuFtoi(t[2] * 16.0f) : vuFtoi(t[2]);
+            out[3] = fullFtoi4 ? vuFtoi(t[3] * 16.0f) : vuFtoi(t[3]);
         }
 
-        // Guard-band proxy for the COP2 sticky clip flags: nonzero => the
-        // vertex is offscreen. Not the hardware per-plane flag layout.
-        constexpr float kScreenClipGuard = 4096.0f;
+        // The VU's float to integer conversions saturate (0x7FFFFFFF / 0x80000000); C++'s cast does not.
+        int32_t vuFtoi(float v)
+        {
+            if (!(v == v))
+                return 0;
+            if (v >= 2147483520.0f)
+                return INT32_MAX;
+            if (v <= -2147483648.0f)
+                return INT32_MIN;
+            return static_cast<int32_t>(v);
+        }
+        // A VU division (Q = 1 / divisor) by zero gives the largest float of the divisor's sign; a product with it
+        // saturates there too (the VU has no infinity), and 0 times it is 0.
+        float vuScaleByInverse(float value, float divisor)
+        {
+            if (divisor != 0.0f)
+                return value * (1.0f / divisor);
+            if (value == 0.0f)
+                return 0.0f;
+            return (std::signbit(value) != std::signbit(divisor)) ? -FLT_MAX : FLT_MAX;
+        }
+        // sceVu0ClipScreen's test: 0 when 0 < x < 4096, 0 < y < 4096 and w > 0 (strictly), else its sticky MAC flags
+        // (0x40 a zero difference, 0x80 a negative one).
         int32_t screenClipCode(const float (&v)[4])
         {
-            int32_t code = 0;
-            if (v[0] > kScreenClipGuard)
-                code |= 0x1;
-            if (v[0] < -kScreenClipGuard)
-                code |= 0x2;
-            if (v[1] > kScreenClipGuard)
-                code |= 0x4;
-            if (v[1] < -kScreenClipGuard)
-                code |= 0x8;
-            return code;
+            int32_t flags = 0;
+            const float differences[5] = {v[0], v[1], v[3], 4096.0f - v[0], 4096.0f - v[1]};
+            for (float d : differences)
+            {
+                if (d == 0.0f)
+                    flags |= 0x40;
+                else if (d < 0.0f)
+                    flags |= 0x80;
+            }
+            return flags;
         }
+
     }
 
     void sceVpu0Reset(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -247,10 +296,12 @@ namespace ps2_stubs
             };
             auto normalize = [](const float (&s)[4], float (&o)[4])
             {
-                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]) + (s[3] * s[3]));
-                const float inv = (len > 1.0e-6f) ? (1.0f / len) : 0.0f;
-                for (int i = 0; i < 4; ++i)
+                // libvu0's sceVu0Normalize (CameraMatrix calls it): xyz, w = 0.
+                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]));
+                const float inv = (len > 0.0f) ? (1.0f / len) : 0.0f;
+                for (int i = 0; i < 3; ++i)
                     o[i] = s[i] * inv;
+                o[3] = 0.0f;
             };
             float rawCross[4]{}, row0[4]{}, row1[4]{}, row2[4]{};
             cross(up, fwd, rawCross);
@@ -319,9 +370,10 @@ namespace ps2_stubs
                 const float tx = (m[0] * v[0]) + (m[4] * v[1]) + (m[8] * v[2]) + (m[12] * v[3]);
                 const float ty = (m[1] * v[0]) + (m[5] * v[1]) + (m[9] * v[2]) + (m[13] * v[3]);
                 const float tw = (m[3] * v[0]) + (m[7] * v[1]) + (m[11] * v[2]) + (m[15] * v[3]);
-                const bool outsideX = (tx < lo[0] * tw) || (tx > hi[0] * tw);
-                const bool outsideY = (ty < lo[1] * tw) || (ty > hi[1] * tw);
-                if (!outsideX && !outsideY)
+                // libvu0: every difference strictly positive (w between min.w and max.w included).
+                const bool inside = (tx - lo[0] * tw) > 0.0f && (ty - lo[1] * tw) > 0.0f && (tw - lo[3]) > 0.0f &&
+                                    (hi[0] * tw - tx) > 0.0f && (hi[1] * tw - ty) > 0.0f && (hi[3] - tw) > 0.0f;
+                if (inside)
                 {
                     result = 0;
                     break;
@@ -413,10 +465,9 @@ namespace ps2_stubs
         float src[4]{}, out[4]{};
         if (readVuVec4f(rdram, srcAddr, src))
         {
-            const float q = (divisor != 0.0f) ? (1.0f / divisor) : 0.0f;
             for (int i = 0; i < 4; ++i)
             {
-                out[i] = src[i] * q;
+                out[i] = vuScaleByInverse(src[i], divisor);
             }
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
@@ -431,10 +482,9 @@ namespace ps2_stubs
         float src[4]{}, out[4]{};
         if (readVuVec4f(rdram, srcAddr, src))
         {
-            const float q = (divisor != 0.0f) ? (1.0f / divisor) : 0.0f;
-            out[0] = src[0] * q;
-            out[1] = src[1] * q;
-            out[2] = src[2] * q;
+            out[0] = vuScaleByInverse(src[0], divisor);
+            out[1] = vuScaleByInverse(src[1], divisor);
+            out[2] = vuScaleByInverse(src[2], divisor);
             out[3] = src[3];
             (void)writeVuVec4f(rdram, dstAddr, out);
         }
@@ -506,7 +556,9 @@ namespace ps2_stubs
     {
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const float angle = ctx ? ctx->f[12] : 0.0f;
-        float out[4] = {std::cos(angle), std::sin(angle), 0.0f, 0.0f};
+        float sn = 0.0f, cs = 0.0f;
+        libvu0SinCos(angle, sn, cs);
+        float out[4] = {cs, sn, 0.0f, 0.0f};
         (void)writeVuVec4f(rdram, dstAddr, out);
         setReturnS32(ctx, 0);
     }
@@ -521,7 +573,7 @@ namespace ps2_stubs
         {
             for (int i = 0; i < 4; ++i)
             {
-                out[i] = static_cast<int32_t>(src[i]);
+                out[i] = vuFtoi(src[i]);
             }
             (void)writeVuVec4i(rdram, dstAddr, out);
         }
@@ -538,7 +590,7 @@ namespace ps2_stubs
         {
             for (int i = 0; i < 4; ++i)
             {
-                out[i] = static_cast<int32_t>(src[i] * 16.0f);
+                out[i] = vuFtoi(src[i] * 16.0f);
             }
             (void)writeVuVec4i(rdram, dstAddr, out);
         }
@@ -763,10 +815,12 @@ namespace ps2_stubs
         {
             auto negNormalize = [](const float (&s)[4], float (&o)[4])
             {
-                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]) + (s[3] * s[3]));
-                const float inv = (len > 1.0e-6f) ? (1.0f / len) : 0.0f;
-                for (int i = 0; i < 4; ++i)
+                // libvu0: ScaleVector(-1), then Normalize (xyz, w = 0).
+                const float len = std::sqrt((s[0] * s[0]) + (s[1] * s[1]) + (s[2] * s[2]));
+                const float inv = (len > 0.0f) ? (1.0f / len) : 0.0f;
+                for (int i = 0; i < 3; ++i)
                     o[i] = -s[i] * inv;
+                o[3] = 0.0f;
             };
             float r0[4]{}, r1[4]{}, r2[4]{};
             negNormalize(l0, r0);
@@ -833,8 +887,8 @@ namespace ps2_stubs
         if (readVuMatrix4f(rdram, srcAddr, src))
         {
             makeIdentityMatrix(rot);
-            const float cs = std::cos(angle);
-            const float sn = std::sin(angle);
+            float cs = 0.0f, sn = 0.0f;
+            libvu0SinCos(angle, sn, cs);
             rot[5] = cs;
             rot[6] = sn;
             rot[9] = -sn;
@@ -854,8 +908,8 @@ namespace ps2_stubs
         if (readVuMatrix4f(rdram, srcAddr, src))
         {
             makeIdentityMatrix(rot);
-            const float cs = std::cos(angle);
-            const float sn = std::sin(angle);
+            float cs = 0.0f, sn = 0.0f;
+            libvu0SinCos(angle, sn, cs);
             rot[0] = cs;
             rot[2] = -sn;
             rot[8] = sn;
@@ -875,8 +929,8 @@ namespace ps2_stubs
         if (readVuMatrix4f(rdram, srcAddr, src))
         {
             makeIdentityMatrix(rot);
-            const float cs = std::cos(angle);
-            const float sn = std::sin(angle);
+            float cs = 0.0f, sn = 0.0f;
+            libvu0SinCos(angle, sn, cs);
             rot[0] = cs;
             rot[1] = sn;
             rot[4] = -sn;
@@ -892,7 +946,7 @@ namespace ps2_stubs
         const uint32_t dstAddr = getRegU32(ctx, 4);
         const uint32_t matAddr = getRegU32(ctx, 5);
         const uint32_t vAddr = getRegU32(ctx, 6);
-        const bool fullFtoi4 = (getRegU32(ctx, 7) != 0);
+        const bool fullFtoi4 = (getRegU32(ctx, 7) == 0); // libvu0: mode 0 converts all four x16
         float m[16]{}, v[4]{};
         if (readVuMatrix4f(rdram, matAddr, m) && readVuVec4f(rdram, vAddr, v))
         {
@@ -909,7 +963,7 @@ namespace ps2_stubs
         const uint32_t matAddr = getRegU32(ctx, 5);
         uint32_t vAddr = getRegU32(ctx, 6);
         const int32_t count = static_cast<int32_t>(getRegU32(ctx, 7));
-        const bool fullFtoi4 = (getRegU32(ctx, 8) != 0);
+        const bool fullFtoi4 = (getRegU32(ctx, 8) == 0); // libvu0: mode 0 converts all four x16
         float m[16]{};
         if (readVuMatrix4f(rdram, matAddr, m))
         {
