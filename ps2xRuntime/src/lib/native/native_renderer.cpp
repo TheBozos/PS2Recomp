@@ -38,7 +38,10 @@ void main()
     float w = c.w;
     vec2 s = c.xy / c.w;
     vec2 ndc = vec2((s.x - uScreen.x) / uScreen.z * 2.0 - 1.0, 1.0 - (s.y - uScreen.y) / uScreen.w * 2.0);
-    float z = clamp(c.z / c.w / uDepthMax, 0.0, 1.0);
+    // GS Z as XYZF2 holds it: past the Z buffer's range it wraps (24 bits kept), as on the GS, rather than clamps.
+    float gz = c.z / c.w;
+    gz -= (uDepthMax + 1.0) * floor(gz / (uDepthMax + 1.0));
+    float z = clamp(gz / uDepthMax, 0.0, 1.0);
     gl_Position = vec4(ndc * w, (1.0 - 2.0 * z) * w, w);
     vUv = aUv;
     vCol = aCol;
