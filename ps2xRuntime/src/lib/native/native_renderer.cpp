@@ -121,6 +121,10 @@ void main()
         constexpr int kGlFuncAdd = 0x8006;
     }
 
+    // native_renderer_gs.cpp (raw GL): depth function ALWAYS (a material without its depth test still writes its depth),
+    // else LEQUAL.
+    void setDepthAlways(bool always);
+
     struct Renderer::Gpu
     {
         unsigned int shader = 0;
@@ -208,6 +212,7 @@ void main()
             // Back over the target: a quad at the far plane passes the depth test only where nothing was drawn nearer.
             BeginTextureMode(target);
             rlDrawRenderBatchActive();
+            setDepthAlways(false);
             if (e.farDepthOnly)
                 rlEnableDepthTest();
             else
@@ -549,6 +554,7 @@ void main()
                 rlEnableDepthMask();
             else
                 rlDisableDepthMask();
+            setDepthAlways(!m.depthTest);
             rlEnableShader(gpu.shader);
             rlEnableVertexArray(gpu.vao);
             rlSetUniform(gpu.locScreen, screenRect, RL_SHADER_UNIFORM_VEC4, 1);
@@ -614,6 +620,7 @@ void main()
             rlDrawVertexArray(static_cast<int>(batch.first), static_cast<int>(batch.count));
         }
         rlDisableScissorTest();
+        setDepthAlways(false);
         if (secondsNow() - m_depthWantedAt.load(std::memory_order_relaxed) < 1.0)
         {
             std::vector<float> depth;
