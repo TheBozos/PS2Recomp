@@ -28,6 +28,7 @@ deadline, or the session dies. Nothing has to be cleaned up by hand.
   benchlock ask --id ID -e MIN -w WHY  (for a waiter) ask the waiters ahead to let it pass; lapses in 10 min
   benchlock yield --id MINE --to ID    (for a waiter ahead of ID) let ID pass
   benchlock config [--comp-slots N]    show or set this box's comp slot limit (0: unlimited)
+  benchlock --self-test                run the unit tests (tools/benchlock/test_benchlock.py)
 
 -e is the holder's honest estimate in minutes, shown so other sessions know when the box frees up. -d is the hard
 deadline (default: twice the estimate, at least 5 min more), capped per mode. A waiter that asked to pass holds the
@@ -748,10 +749,18 @@ def cmd_config(args):
     return 0
 
 
+def self_test():
+    import unittest
+    here = os.path.dirname(os.path.abspath(__file__))
+    suite = unittest.defaultTestLoader.discover(here, pattern="test_benchlock.py", top_level_dir=here)
+    return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
+
+
 def parser():
     p = argparse.ArgumentParser(prog="benchlock", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = p.add_subparsers(dest="action", required=True)
+    p.add_argument("--self-test", action="store_true", help="run the unit tests and exit")
+    sub = p.add_subparsers(dest="action")
     for name in ("run", "take"):
         s = sub.add_parser(name)
         s.add_argument("-t", "--tag", required=True)
@@ -789,7 +798,12 @@ def main():
     if len(sys.argv) == 3 and sys.argv[1] == "_hold":
         hold(argparse.Namespace(**json.loads(sys.argv[2])), os.dup(sys.stdout.fileno()))
         return 0
-    args = parser().parse_args()
+    p = parser()
+    args = p.parse_args()
+    if args.self_test:
+        return self_test()
+    if not args.action:
+        p.error("an action is required")
     if getattr(args, "cmd", None) and args.cmd[0] == "--":
         args.cmd = args.cmd[1:]
     return {"run": cmd_run, "take": cmd_take, "release": cmd_release, "status": cmd_status, "wait": cmd_wait,
