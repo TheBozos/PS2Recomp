@@ -3987,6 +3987,26 @@ void PS2Runtime::run()
                 ExportImage(image, path);
                 UnloadImage(image);
             }
+            // F9 starts and stops a burst: the window every tenth of a second as burst_<milliseconds>.png (turning the
+            // camera around a spot, say).
+            static bool s_burst = false;
+            static double s_burstNext = 0.0;
+            if (IsKeyPressed(KEY_F9))
+            {
+                s_burst = !s_burst;
+                s_burstNext = elapsed;
+                std::fprintf(stderr, "[run] capture burst %s at %.1f s\n", s_burst ? "started" : "stopped", elapsed);
+            }
+            if (s_burst && elapsed >= s_burstNext)
+            {
+                s_burstNext = elapsed + 0.1;
+                rlDrawRenderBatchActive();
+                Image image = LoadImageFromScreen();
+                char path[1024];
+                std::snprintf(path, sizeof(path), "%s/burst_%08d.png", s_windowCaptureDir, static_cast<int>(elapsed * 1000.0));
+                ExportImage(image, path);
+                UnloadImage(image);
+            }
         }
         EndDrawing();
 
