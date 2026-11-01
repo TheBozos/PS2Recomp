@@ -3857,7 +3857,8 @@ void PS2Runtime::run()
             const char *value = std::getenv("PS2X_NATIVE_VIEW");
             return value && std::string_view(value) == "only";
         }();
-        if (!(s_nativeOnly && ps2x::native::Renderer::instance().enabled() && ps2x::native::Renderer::instance().hasDraws()))
+        if (!ps2x::native::Renderer::instance().presentsAlone() &&
+            !(s_nativeOnly && ps2x::native::Renderer::instance().enabled() && ps2x::native::Renderer::instance().hasDraws()))
             DrawTexturePro(shownTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
         // raylib batches its draws: sent now, before the native renderer's own GL calls change the state they need
         // (without the debug window, nothing else sent them before the end of the frame, and the window was black).

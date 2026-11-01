@@ -134,6 +134,10 @@ namespace ps2x::native
         // draws around it, and present() leaves the frame to the GS; otherwise present() draws as before.
         void setStreamDraws(bool on);
         void beginGroup(uint64_t group) { m_group = group; }
+        // The port's frame is the whole picture: the window shows only what present() draws (its frame, the display's
+        // circuit 2 picture, a movie's backdrop, the 2D), never the GS front end's frame.
+        void setPresentsAlone(bool on) { m_presentsAlone = on; }
+        bool presentsAlone() const { return m_enabled && m_presentsAlone; }
         // A group has batches waiting (its GS marker is worth queueing): the VIF1 interpreter reaches a program after
         // the native port has drawn it (at the transfer's start), so a group without batches by then has none.
         bool hasGroup(uint64_t group);
@@ -215,6 +219,7 @@ namespace ps2x::native
         Frame m_building;
         Frame m_overlayBuilding;                  // game thread (drawOverlay)
         std::shared_ptr<Frame> m_overlayPublished; // under m_mutex
+        bool m_presentsAlone = false;
         std::shared_ptr<Frame> m_backdrop;         // under m_mutex: one textured batch, its screen, its time
         std::mutex m_mutex;
         std::shared_ptr<Frame> m_published;

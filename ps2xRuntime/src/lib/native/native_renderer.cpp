@@ -1,4 +1,5 @@
 #include "runtime/native/native_renderer.h"
+#include "runtime/native/native_movie.h"
 
 #include "raylib.h"
 #include "rlgl.h"
@@ -100,6 +101,8 @@ void main()
         // The overlay's textures, their alpha from the GS's (0x80 is 1.0) to 255: raylib's own shader draws them.
         // By the texture's key when it has one (a picture that changes: one slot, its image replaced), else its address.
         std::unordered_map<uint64_t, GpuTexture> overlayTextures;
+        unsigned int displayPicture = 0; // the display's circuit 2 picture (ps2x::native::displayPicture), its version
+        uint64_t displayPictureVersion = 0;
         unsigned int overlayTexture(const std::shared_ptr<const TextureCache::Texture> &source)
         {
             GpuTexture &slot = overlayTextures[source->key != 0u ? source->key : reinterpret_cast<uintptr_t>(source.get())];
@@ -472,8 +475,10 @@ void main()
         }
         if (backdrop && std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count() - backdrop->time > 0.2)
             backdrop = nullptr;
-        // The GS frame has the native draws already (drawn into it in the GS stream): only the port's 2D over it.
-        const bool overlayOnly = m_drewIntoGs.load(std::memory_order_relaxed) && ((overlay && !overlay->batches.empty()) || backdrop);
+        // The GS frame has the native draws already (drawn into it in the GS stream): only the port's 2D over it. The
+        // same when the native renderer presents its own frame but has none yet (a movie, a level's loading bar).
+        const bool overlayOnly = (m_drewIntoGs.load(std::memory_order_relaxed) || (!m_streamDraws && !m_shown)) &&
+                                 ((overlay && !overlay->batches.empty()) || backdrop);
         if (!m_enabled || (!overlayOnly && (!m_shown || m_drewIntoGs.load(std::memory_order_relaxed))))
             return false;
         if (overlayOnly)
@@ -752,11 +757,43 @@ void main()
             }
         }
 
+        // Under the frame, as the display merges it: the picture the game shows through circuit 2 (a menu's movie frame,
+        // where the frame's alpha is 0), then a movie's backdrop.
+        {
+            const DisplayPicture picture = displayPicture();
+            if (picture.rgba && picture.width != 0u && picture.height != 0u)
+            {
+                if (gpu.displayPictureVersion != picture.version || gpu.displayPicture == 0u)
+                {
+                    if (gpu.displayPicture != 0u)
+                        rlUnloadTexture(gpu.displayPicture);
+                    std::vector<uint32_t> rgba(*picture.rgba);
+                    for (uint32_t &c : rgba)
+                        c = (c & 0xffffffu) | 0xff000000u;
+                    gpu.displayPicture = rlLoadTexture(rgba.data(), static_cast<int>(picture.width), static_cast<int>(picture.height),
+                                                       RL_PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+                    rlTextureParameters(gpu.displayPicture, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                    rlTextureParameters(gpu.displayPicture, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                    gpu.displayPictureVersion = picture.version;
+                }
+                const Texture2D texture{gpu.displayPicture, static_cast<int>(picture.width), static_cast<int>(picture.height), 1,
+                                        PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                DrawTexturePro(texture, Rectangle{0, 0, static_cast<float>(picture.width), static_cast<float>(picture.height)},
+                               Rectangle{x, y, width, height}, Vector2{0, 0}, 0.0f, WHITE);
+                rlDrawRenderBatchActive();
+            }
+        }
+        if (backdrop)
+            drawOverlay(*backdrop, x, y, width, height);
         // Render textures are stored bottom-up.
         BeginBlendMode(BLEND_ALPHA_PREMULTIPLY);
         DrawTexturePro(gpu.target.texture, Rectangle{0, 0, static_cast<float>(w), -static_cast<float>(h)},
                        Rectangle{x, y, width, height}, Vector2{0, 0}, 0.0f, WHITE);
         EndBlendMode();
+        rlDrawRenderBatchActive();
+        // Over it, the port's 2D.
+        if (overlay)
+            drawOverlay(*overlay, x, y, width, height);
         return true;
     }
 }
