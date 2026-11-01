@@ -1,4 +1,5 @@
 #include "runtime/ee_scheduler.h"
+#include "runtime/native/native_display.h"
 
 #include "ps2_log.h"
 #include "ps2_runtime_macros.h"
@@ -184,7 +185,10 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_gsVSyncCallback = 0;
     m_gsVSyncCallbackGp = 0;
     m_gsVSyncCallbackSp = 0;
-    m_runtime.memory().gs().vsyncTick.store(0u, std::memory_order_release);
+    if (ps2x::native::gsFrontEndAbsent())
+        ps2x::native::displayVblank(0u);
+    else
+        m_runtime.memory().gs().vsyncTick.store(0u, std::memory_order_release);
     m_runtime.memory().resetEeTimers();
 
     GuestThread main{};
@@ -1805,6 +1809,13 @@ void EeScheduler::bindMainContextForSyscall(R5900Context &ctx, uint8_t *rdram)
 
 void EeScheduler::latchGuestFrame()
 {
+    if (!m_runtime.hasGs()) // no GS front end: the native renderer shows the frame the port ended; counted for the FPS
+    {
+        PS2X_GS_TOUCH("display: frame ended (presentGuestFrame)");
+        ps2x::native::displayFrameEnded();
+        return;
+    }
+    PS2X_GS_TOUCH("gs: presentation latch (latchGuestFrame)");
     PS2Memory &memory = m_runtime.memory();
     if (memory.gsLag())
     {
@@ -2398,14 +2409,24 @@ void EeScheduler::processEvent(const EeEvent &event)
             m_runtime.advanceIopEeCycles(target - m_iopEeCycles);
             m_iopEeCycles = target;
         }
-        m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
-        if ((m_vsyncTick & 1u) != 0u)
+        if (ps2x::native::gsFrontEndAbsent())
         {
-            m_runtime.memory().gs().csr.fetch_or(0x2000ull, std::memory_order_acq_rel);
+            // The field the display shows (CSR.FIELD as the game reads it) from this vblank count: native display.
+            PS2X_GS_TOUCH("display: vblank (field from the vblank count)");
+            ps2x::native::displayVblank(m_vsyncTick);
         }
         else
         {
-            m_runtime.memory().gs().csr.fetch_and(~0x2000ull, std::memory_order_acq_rel);
+            PS2X_GS_TOUCH("gs: vblank, GS CSR.FIELD and vsyncTick written");
+            m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
+            if ((m_vsyncTick & 1u) != 0u)
+            {
+                m_runtime.memory().gs().csr.fetch_or(0x2000ull, std::memory_order_acq_rel);
+            }
+            else
+            {
+                m_runtime.memory().gs().csr.fetch_and(~0x2000ull, std::memory_order_acq_rel);
+            }
         }
         writeGuestU32(m_vsyncFlagAddress, 1u);
         if (m_vsyncTickAddress != 0u)

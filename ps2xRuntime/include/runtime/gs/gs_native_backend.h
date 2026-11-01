@@ -144,6 +144,10 @@ private:
     // A target's pages [first, end) written into GS memory: on the GPU copy, or through the CPU (diagnostics).
     void resolveTargetPages(RenderTarget &target, uint32_t firstPage, uint32_t endPage);
     bool resolveTargetPagesGpu(RenderTarget &target, uint32_t firstPage, uint32_t endPage);
+    // A target's depth written into the GPU copy of GS memory as its ZBUF format stores it, for the pages of
+    // firstPage..endPage its Z buffer covers (a host read of Z pages: TMB tests its lens flares' occlusion that way).
+    void resolveDepthPages(RenderTarget &target, uint32_t firstPage, uint32_t endPage);
+    uint32_t m_depthResolveProgram = 0;
     // The target's pages drawn again from what GS memory holds, in its format (a sprite per page sampling memory).
     void reloadTargetPages(RenderTarget &target, const std::vector<uint32_t> &pages);
     // A texture sampled straight from a render target (its base, format layout and width); null when the read goes
@@ -263,6 +267,8 @@ private:
         bool opaque = false; // CT24: no alpha (0x80)
     };
     bool circuitSource(int circuit, uint64_t dispfb, uint64_t display, bool fieldMode, CircuitSource &out);
+    uint32_t m_displayPictureTexture = 0; // circuit 2 from the port's picture (ps2x::native::setDisplayPicture)
+    uint64_t m_displayPictureVersion = 0;
     // The internal scale (PS2X_GS_SCALE=<n>, 1 to 4, default 1): render targets are n times the GS's size each way,
     // draws land on them with their viewport and scissor scaled, and whatever goes back to GS memory or the CPU
     // (resolves, read backs, a Z buffer read as a texture) is read from a 1x copy (readFramebufferAt1x).

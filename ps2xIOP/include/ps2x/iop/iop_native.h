@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace ps2x::iop::native
 {
@@ -53,6 +54,10 @@ namespace ps2x::iop::native
                        (static_cast<uint32_t>(ram[physical + 2u]) << 16) | (static_cast<uint32_t>(ram[physical + 3u]) << 24);
             return read32(address);
         }
+        // The IOP's RAM itself (a stream a driver refills in place, read as it plays).
+        const uint8_t *ramBase() const { return ram; }
+        uint32_t ramBytes() const { return ramSize; }
+
         // Writes go through the IOP (it tracks which RAM a module has written, and hardware registers have effects).
         void w8(uint32_t address, uint8_t value) { write8(address, value); }
         void w16(uint32_t address, uint16_t value) { write16(address, value); }
@@ -89,6 +94,21 @@ namespace ps2x::iop::native
         uint32_t pc;
         Function function;
     };
+
+    // A native replacement of one function a module exports: when a module whose export table names library loads,
+    // its export number index runs function instead (recompiled or interpreted module alike). The function gets the
+    // call as the guest makes it (a0-a3 in cpu.gpr[4..7], the rest on the stack at sp + 0x10) and returns with
+    // cpu.gpr[2] the result and cpu.pc = cpu.gpr[31]. For drivers taken over at their API (libsd: native audio).
+    void overrideExport(const char *library, uint32_t index, Function function);
+
+    // A guest function called as an interrupt handler would be (function(a0, a1), with the module's gp), delay IOP
+    // cycles from now, once interrupts are enabled: the completion callbacks of a driver taken over at its API (libsd's
+    // transfer callbacks after an upload). Any thread may queue one.
+    void queueInterruptCall(uint32_t function, uint32_t a0, uint32_t a1, uint32_t gp, uint32_t delay);
+
+    // What reached the SPU2 emulation so far, in one line: "absent" (native audio, PS2X_NATIVE_AUDIO=1: the SPU2 is
+    // never set up) or "emulated", its register and DMA register accesses, the samples it mixed, its advances with work.
+    std::string spu2Reached();
 
     // Generated code: one per module, at namespace scope (static initialization).
     struct Registration

@@ -97,14 +97,24 @@ namespace ps2x::iop::detail
         [[nodiscard]] bool wallClock() const noexcept { return m_wallClock; }
         void pull(int16_t *frames, size_t count);
 
+        // Absent (a port whose sound drivers are taken over at their API: native_libsd.cpp, PS2X_NATIVE_AUDIO=1): no
+        // sound RAM, no mixing, no DMA, no interrupts, never scheduled. A register or DMA access is counted and
+        // ignored (reads give 0): ps2x::iop::native::spu2Reached() says what reached it.
+        void setAbsent();
+        [[nodiscard]] bool absent() const noexcept { return m_absent; }
+
         [[nodiscard]] const Stats &stats() const noexcept { return m_stats; }
         // The last DMA events (start, AutoDMA start, finish, stop by software), printed when an IOP thread is found
         // waiting for a transfer that does not end.
         void printDmaHistory() const;
         [[nodiscard]] std::vector<std::string> describe() const;
         // Sound RAM, 16-bit words.
-        [[nodiscard]] uint16_t ramWord(uint32_t address) const noexcept { return m_ram[address & (RamWords - 1u)]; }
-        void setRamWord(uint32_t address, uint16_t value) noexcept { m_ram[address & (RamWords - 1u)] = value; }
+        [[nodiscard]] uint16_t ramWord(uint32_t address) const noexcept { return m_absent ? 0u : m_ram[address & (RamWords - 1u)]; }
+        void setRamWord(uint32_t address, uint16_t value) noexcept
+        {
+            if (!m_absent)
+                m_ram[address & (RamWords - 1u)] = value;
+        }
 
     private:
         // The interrupts the mixing raised on the wall clock, for the IOP's thread (deliverDeferred).
@@ -117,6 +127,7 @@ namespace ps2x::iop::detail
         uint64_t m_mixedSamples = 0;
         size_t m_pullFrames = 0;
         uint64_t m_wallCyclesPerSample = CyclesPerSample;
+        bool m_absent = false;
         std::recursive_mutex m_mutex;
         std::atomic<uint32_t> m_deferredIrqs{0};
 

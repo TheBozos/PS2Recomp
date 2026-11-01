@@ -13,6 +13,7 @@
 #include "runtime/native/native_texture_cache.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -53,6 +54,10 @@ namespace ps2x::native
         bool clampU = false, clampV = false; // CLAMP's WMS / WMT: the texture's edge past 0..1 (else it repeats)
         uint64_t region = 0; // CLAMP, for a REGION_REPEAT window (TextureCache::regionWindow): the texture is that window
         bool fog = false;           // PRIM.FGE: the colour goes toward fogColour by 1 - Vertex::fog, after texturing
+        // The texture is the target being drawn into, as it is when this batch is drawn (a game's screen distortion:
+        // heat haze sampling the frame through TEX0 = the frame buffer); u, v in the target's GS pixels. Stream draws
+        // only (the GS pass): the frame is not in GS memory for the texture cache to decode.
+        bool sampleTarget = false;
         uint32_t fogColour = 0;     // FOGCOL, R in the low byte
         // The GS state where the draw's group sits in the stream (a stream draw, beginGroup) gives tex0, texa, blend,
         // the alpha and depth tests, clampU / clampV and fogColour, for games whose meshes take their material from
@@ -89,6 +94,31 @@ namespace ps2x::native
         // Triangles (three vertices each) with an object-to-screen matrix: column c is matrix[4c..4c+3], screen
         // point = M * (x, y, z, 1), then divided by w (as a VU's projection).
         void draw(const Material &material, const float matrix[16], const Vertex *vertices, uint32_t count);
+        // The same with the texture handed over, decoded by the port from its game's own data (its texture assets in EE
+        // RAM): no texture cache lookup for this batch (material.textured still says whether it is textured; material.tex0
+        // keys its GPU copy, so each asset needs its own value there).
+        void draw(const Material &material, const float matrix[16], const Vertex *vertices, uint32_t count,
+                  std::shared_ptr<const TextureCache::Texture> texture);
+        // A port's 2D drawn natively (its HUD, text, menus, from the game's own routines): screen-space triangles (x, y
+        // the GS's primitive coordinates over 16, as a draw with no matrix gets them) over the frame, in submission order,
+        // without depth; publishOverlay at the game frame's end shows them from the next present() on, over the frame
+        // (the GS's, or this renderer's own) until the next publish.
+        void drawOverlay(const Material &material, const Vertex *vertices, uint32_t count,
+                         std::shared_ptr<const TextureCache::Texture> texture);
+        void publishOverlay();
+        // The same, the overlay's GS coordinates mapped to the window by this screen (the game's own view) instead of the
+        // frame being built's.
+        void publishOverlay(const Screen &screen);
+        // A picture under the overlay (a movie frame), at (x, y, width, height) in the screen's GS coordinates; shown while
+        // set again within a fifth of a second, or, held, until clearBackdrop or the next one (a picture the game left in
+        // its display buffers and draws its menus over: a movie's last frame).
+        void setBackdrop(std::shared_ptr<const TextureCache::Texture> picture, const Screen &screen, float x, float y, float width,
+                         float height, bool held = false);
+        void clearBackdrop();
+        // The GS's TEXA as the game last wrote it (GS front end): a draw whose material sets no TEXA of its own (texa
+        // 0, not fromGsContext) decodes its texture with it, as the GS would (16- and 24-bit texels take their alpha
+        // from it; a game may write TEXA once, outside the stream a port reads).
+        void setGsTexa(uint64_t texa) { m_gsTexa.store(texa, std::memory_order_relaxed); }
         void endFrame();
         // Depth a game reads back from the GS (a visibility test: TMB's lens flares sample the Z buffer, which the
         // native frame is not in). While asked for (wantDepth, again within a second), present() copies the native
@@ -105,6 +135,23 @@ namespace ps2x::native
         // draws around it, and present() leaves the frame to the GS; otherwise present() draws as before.
         void setStreamDraws(bool on);
         void beginGroup(uint64_t group) { m_group = group; }
+        // The port's frame is the whole picture: the window shows only what present() draws (its frame, the display's
+        // circuit 2 picture, a movie's backdrop, the 2D), never the GS front end's frame.
+        void setPresentsAlone(bool on) { m_presentsAlone = on; }
+        // The rectangle the next draws are clipped to, in GS primitive coordinates, until set again (a game's view in a
+        // split screen: where the GS scissor would have cut them); clearClip: none. A group's GS scissor, when the GS
+        // reached its marker, is used only for draws without one.
+        void setClip(float x0, float y0, float x1, float y1)
+        {
+            m_clip[0] = x0;
+            m_clip[1] = y0;
+            m_clip[2] = x1;
+            m_clip[3] = y1;
+        }
+        void clearClip() { setClip(0, 0, 0, 0); }
+        // What the frame starts from presenting alone (the game's clear: a background or fog colour, R in the low byte).
+        void setClearColour(uint32_t rgb) { m_clearColour.store(rgb, std::memory_order_relaxed); }
+        bool presentsAlone() const { return m_enabled && m_presentsAlone; }
         // A group has batches waiting (its GS marker is worth queueing): the VIF1 interpreter reaches a program after
         // the native port has drawn it (at the transfer's start), so a group without batches by then has none.
         bool hasGroup(uint64_t group);
@@ -141,6 +188,11 @@ namespace ps2x::native
         // The latest published frame has something to draw (not a menu or a movie the native port does not draw yet),
         // and present() draws it (the GS frame does not already have it).
         bool hasDraws();
+        // Present thread: waits up to timeout seconds for a frame (or a movie picture: setBackdrop) published after the
+        // one counted in seen, and counts it there. With no GS front end the window then shows each game frame once, on
+        // the game's own clock: with a 60 Hz timer of its own as well, the two clocks drift and every few seconds one
+        // frame shows twice and the next not at all (a stutter). (DC_Recomp's fcb3ebe.)
+        bool waitForFrame(uint64_t &seen, double timeout);
         void setEnabled(bool on)
         {
             m_enabled = on;
@@ -155,6 +207,7 @@ namespace ps2x::native
             uint32_t first = 0, count = 0;
             uint64_t group = 0; // beginGroup's (its clip at present: the GS scissor where that group's marker was)
             uint64_t key = 0; // setKey
+            float clip[4] = {0, 0, 0, 0}; // setClip's, in GS primitive coordinates (x0, y0, x1, y1); x1 <= x0: none
             // Taken from the texture cache when the batch is drawn (the game's thread, in stream order): games reuse
             // texture memory before the frame is presented. Null when its upload was not there yet (an upload in the
             // same VIF1 transfer reaches the cache when VIF1 gets to it): looked up again where the batch is drawn,
@@ -172,6 +225,7 @@ namespace ps2x::native
         };
 
     private:
+        std::atomic<uint64_t> m_gsTexa{0};
         Renderer();
         ~Renderer();
         struct Gpu;
@@ -185,11 +239,20 @@ namespace ps2x::native
         };
         static void gsDraw(uint64_t group, const GsDrawTarget &target);
         void drawGroups(uint64_t group, const GsDrawTarget &target);
+        void drawOverlay(const Frame &overlay, float x, float y, float width, float height); // present thread
 
         Frame m_building;
+        Frame m_overlayBuilding;                  // game thread (drawOverlay)
+        std::shared_ptr<Frame> m_overlayPublished; // under m_mutex
+        bool m_presentsAlone = false;
+        float m_clip[4] = {0, 0, 0, 0};
+        std::atomic<uint32_t> m_clearColour{0};
+        std::shared_ptr<Frame> m_backdrop;         // under m_mutex: one textured batch, its screen, its time
         std::mutex m_mutex;
         std::shared_ptr<Frame> m_published;
         std::shared_ptr<Frame> m_previous; // the one before m_published (interpolation)
+        uint64_t m_publishes = 0;          // frames and backdrops published, under m_mutex (waitForFrame)
+        std::condition_variable m_publishedChanged;
         uint64_t m_key = 0;
         int m_gsFrame[4] = {}; // id, width, height, pixel format
         std::unique_ptr<Gpu> m_gpu; // present thread only
@@ -218,6 +281,18 @@ namespace ps2x::native
         static constexpr size_t kClips = 1u << 14;
         std::unique_ptr<Clip[]> m_clips{new Clip[kClips]};
         std::atomic<uint64_t> m_markedGroup{0}; // the latest group whose marker the GS reached
+        // Depth probes with stream draws (depthAt): the points asked for, read on the GS thread from the frame's target
+        // once its last group is drawn (the first group of the next frame), their GS Z kept for the next asks.
+        struct ProbeTarget
+        {
+            uint32_t framebuffer = 0, width = 0, height = 0, scale = 1, xOffset = 0, yOffset = 0;
+            double zScale = 0.0;
+        };
+        std::mutex m_probeMutex;
+        std::unordered_map<uint64_t, uint32_t> m_probeWanted, m_probeResults; // (x << 16 | y) in GS pixels -> GS Z
+        std::deque<uint64_t> m_frameLastGroups; // each published frame's last group, oldest first
+        ProbeTarget m_probeTarget;              // GS thread: the target the last group drew into
+        void readProbes();                      // GS thread
         std::shared_ptr<Frame> m_shown, m_shownPrevious; // present thread: the frame drawn and the one before it
         std::atomic<double> m_depthWantedAt{-10.0};      // wantDepth()'s time (seconds)
         std::mutex m_depthMutex;

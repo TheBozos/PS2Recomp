@@ -390,6 +390,9 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_audio_spu2.cpp
     src/lib/gs/ps2_gs_memory.cpp
     src/lib/native/native_texture_cache.cpp
+    src/lib/native/native_texture_pack.cpp
+    src/lib/native/native_mesh_pack.cpp
+    src/lib/native/native_mesh_draw.cpp
     src/lib/native/native_renderer.cpp
     src/lib/native/native_renderer_gs.cpp
     src/lib/native/native_vif1.cpp

@@ -2,6 +2,7 @@
 #include <cstdio>
 #include "iop_emulator.h"
 #include "ps2x/iop/iop_native.h"
+#include "ps2x/iop/native_mixer.h"
 #include "imports/iop_cdvd.h"
 #include "core/iop_cpu.h"
 #include "imports/iop_heaplib.h"
@@ -23,6 +24,8 @@
 #include "iop_emulator_const.h"
 
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <unordered_map>
 #include <cstddef>
 #include <array>
@@ -40,6 +43,11 @@
 #include <utility>
 #include <vector>
 
+
+namespace ps2x::audio
+{
+    bool nativeLibsd(); // native_libsd.cpp
+}
 
 namespace ps2x::iop::native
 {
@@ -64,6 +72,38 @@ namespace ps2x::iop::native
     Registration::Registration(const char *name, uint64_t fileHash, uint32_t base, uint32_t size, const Entry *entries, size_t count)
     {
         registeredModules().push_back(RegisteredModule{name, fileHash, base, size, entries, count});
+    }
+
+    struct ExportOverride
+    {
+        std::string library;
+        uint32_t index;
+        Function function;
+    };
+    std::vector<ExportOverride> &exportOverrides()
+    {
+        static std::vector<ExportOverride> overrides;
+        return overrides;
+    }
+
+    void overrideExport(const char *library, uint32_t index, Function function)
+    {
+        exportOverrides().push_back(ExportOverride{library, index, function});
+    }
+
+    struct InterruptCall
+    {
+        uint32_t function, a0, a1, gp, delay;
+    };
+    std::mutex g_interruptCallsMutex;
+    std::vector<InterruptCall> g_interruptCalls;
+    std::atomic<bool> g_interruptCallsPending{false};
+
+    void queueInterruptCall(uint32_t function, uint32_t a0, uint32_t a1, uint32_t gp, uint32_t delay)
+    {
+        std::lock_guard<std::mutex> lock(g_interruptCallsMutex);
+        g_interruptCalls.push_back(InterruptCall{function, a0, a1, gp, delay});
+        g_interruptCallsPending.store(true, std::memory_order_release);
     }
 }
 
@@ -208,7 +248,20 @@ namespace ps2x::iop::detail
             uint32_t function = 0u;
             uint32_t gp = 0u;
             uint32_t argument = 0u;
+            uint32_t argument2 = 0u;
         };
+
+        // native::queueInterruptCall's calls, into the scheduled callbacks.
+        void takeInterruptCalls()
+        {
+            if (!native::g_interruptCallsPending.load(std::memory_order_acquire))
+                return;
+            std::lock_guard<std::mutex> lock(native::g_interruptCallsMutex);
+            for (const native::InterruptCall &call : native::g_interruptCalls)
+                pendingGuestCallbacks.emplace(totalCycles + call.delay, ScheduledGuestCallback{call.function, call.gp, call.a0, call.a1});
+            native::g_interruptCalls.clear();
+            native::g_interruptCallsPending.store(false, std::memory_order_release);
+        }
 
         // EE -> IOP SIF command waiting for its IOP handler (sceSifAddCmdHandler).
         struct PendingSifCommand
@@ -242,10 +295,37 @@ namespace ps2x::iop::detail
             spu2.setClock(&totalCycles);
             spu2.setInterruptSink([this](int irq)
                                   { pendingDmaInterrupts[irq] = totalCycles; });
-            if (spu2.wallClock())
+            timrman.setInterruptSink([this](int irq)
+                                     {
+                                         const bool taken = intrman.dispatchInterrupt(irq, *this);
+                                         if (taken)
+                                             noteInterrupt(irq, "timrman");
+                                         return taken;
+                                     });
+            // PS2X_NATIVE_AUDIO=1: libsd is taken over and the native mixer is the sound (native_mixer.h); the SPU2 is
+            // absent (no sound RAM, never scheduled, its registers and DMA channels counted and ignored).
+            if (ps2x::audio::nativeLibsd())
+            {
+                spu2.setAbsent();
+                host.setAudioSource([](int16_t *frames, size_t count) { ps2x::audio::NativeMixer::instance().render(frames, count); });
+            }
+            else if (spu2.wallClock())
                 host.setAudioSource([this](int16_t *frames, size_t count) { spu2.pull(frames, count); });
             spu2.setOutputSink([this](const int16_t *frames, size_t count)
                                { host.submitAudio(frames, count); });
+            memory.setHardwareObserver([this](uint32_t address, bool write) { noteHardware(address, write); });
+            // PS2X_IOP_HARDWARE=0: no IOP device behind the hardware registers (read as the IOP is constructed, so a
+            // game override can set it). Every module reaches the IOP through its imports (the kernel, SIF, cdvdman,
+            // timrman, vblank, intrman answered natively); what a module still writes or reads at a register address
+            // is kept as plain storage, counted ([iop:hw]) and has no effect: no SIO2 and its DualShock 2 / memory
+            // card exchanges, no INTC register semantics (intrman keeps its own state), no DMA channel starts and
+            // their interrupts. With native audio the SPU2 is absent as well (setAbsent above).
+            if (const char *value = std::getenv("PS2X_IOP_HARDWARE"); value && *value == '0')
+            {
+                hardwareAbsent = true;
+                memory.setHardwareAbsent(true);
+                memory.setSio2(nullptr);
+            }
             for (int port = 0; port < 2; ++port)
                 sio2.setPadStateReader(port, [this, port](uint8_t *state, size_t size)
                                        { return host.readPadState(port, state, size); });
@@ -346,7 +426,7 @@ namespace ps2x::iop::detail
         ~Impl()
         {
             // The host's audio callback must not call into a SPU2 that is gone.
-            if (spu2.wallClock())
+            if (spu2.wallClock() || ps2x::audio::nativeLibsd())
                 host.setAudioSource({});
         }
 
@@ -409,6 +489,8 @@ namespace ps2x::iop::detail
 
         ImportDisposition dispatchImport(const IopImportCall &call, CpuState &cpu)
         {
+            if (reachDetail)
+                ++reach.imports[call.library];
             const uint32_t a0 = cpu.gpr[4];
             auto setV0 = [&](uint32_t value)
             {
@@ -538,6 +620,181 @@ namespace ps2x::iop::detail
             return ImportDisposition::Missing;
         }
 
+        // What of the IOP reaches a hardware model ([iop:hw], one line every 10 s of IOP clock): accesses to hardware
+        // registers by device, guest instructions interpreted (not recompiled), interrupts raised by a device model
+        // (SIO2's transfers, the emulated SPU2's DMA) as opposed to the API's own callbacks (timrman, vblank, cdvdman,
+        // sifman, the native audio's transfer callbacks), and whether the hardware is absent (PS2X_IOP_HARDWARE=0:
+        // registers are plain storage, no device behind any). PS2X_IOP_REACH_DETAIL=1 adds, per period, the code
+        // behind each device's accesses (module + offset), where the interpreter was entered and ran, and the
+        // imports the IOP answered natively by library.
+        struct Reach
+        {
+            std::map<std::pair<const char *, uint32_t>, uint64_t> hardware; // device, pc -> accesses (detail)
+            std::map<const char *, std::pair<uint64_t, uint64_t>> devices;  // device -> reads, writes
+            std::map<uint32_t, uint64_t> interpreted;                       // pc -> instructions (detail)
+            std::map<std::pair<uint32_t, uint32_t>, uint64_t> interpretEntries; // (pc, native code before) -> times
+            uint64_t interpretedTotal = 0;
+            std::map<std::string, uint64_t> interrupts;                     // "irq N (source)" -> dispatches
+            std::map<std::string, uint64_t> imports;                        // library -> calls (detail)
+            std::map<std::string, uint64_t> events;                         // device-model events
+            uint64_t callbacks = 0;                                         // API callbacks run (not device reach)
+        };
+        Reach reach, reachTotal;
+        bool interpreting = true;
+        uint32_t enteredFrom = 0u;
+        uint64_t reachNextReport = 0;
+        static constexpr uint64_t kReachPeriodCycles = 36'864'000ull * 10ull;
+        const bool reachDetail = []
+        {
+            const char *value = std::getenv("PS2X_IOP_REACH_DETAIL");
+            return value && *value == '1';
+        }();
+
+        static const char *deviceOf(uint32_t phys)
+        {
+            if (phys >= 0x1F801070u && phys < 0x1F801080u)
+                return "INTC";
+            if ((phys >= 0x1F801080u && phys < 0x1F801100u) || (phys >= 0x1F801500u && phys < 0x1F801580u) ||
+                (phys >= 0x1F8015F0u && phys < 0x1F801600u))
+                return "DMA";
+            if ((phys >= 0x1F801100u && phys < 0x1F801130u) || (phys >= 0x1F801480u && phys < 0x1F8014B0u))
+                return "root-counters";
+            if (phys >= 0x1F808200u && phys < 0x1F808300u)
+                return "SIO2";
+            if (phys >= 0x1F801040u && phys < 0x1F801060u)
+                return "SIO0";
+            if (phys >= 0x1F402000u && phys < 0x1F402100u)
+                return "CDVD";
+            if (phys >= 0x1D000000u && phys < 0x1D001000u)
+                return "SIF";
+            if (phys >= 0x1F900000u && phys < 0x1FA00000u)
+                return "SPU2";
+            if ((phys >= 0x1F801000u && phys < 0x1F801070u) || (phys >= 0x1F801400u && phys < 0x1F801480u))
+                return "memory-control";
+            if (phys >= 0x1F801600u && phys < 0x1F801700u)
+                return "USB";
+            return "other";
+        }
+
+        std::string where(uint32_t pc) const
+        {
+            const uint32_t physical = pc & 0x1FFFFFu;
+            for (const auto &[id, module] : modules)
+                if (physical >= module.base && physical < module.base + module.size)
+                {
+                    char text[96];
+                    std::snprintf(text, sizeof(text), "%s+0x%x", module.name.c_str(), physical - module.base);
+                    return text;
+                }
+            char text[32];
+            std::snprintf(text, sizeof(text), "0x%x", pc);
+            return text;
+        }
+
+        void noteHardware(uint32_t address, bool write)
+        {
+            const char *device = deviceOf(physicalAddress(address));
+            auto &counts = reach.devices[device];
+            (write ? counts.second : counts.first) += 1u;
+            if (reachDetail)
+                ++reach.hardware[{device, activeCpu ? activeCpu->pc : 0u}];
+        }
+
+        void noteInterrupt(int irq, const char *source)
+        {
+            char key[64];
+            std::snprintf(key, sizeof(key), "irq %d (%s)", irq, source);
+            ++reach.interrupts[key];
+        }
+
+        void noteEvent(const char *what) { ++reach.events[what]; }
+
+        static uint64_t sumAccesses(const std::map<const char *, std::pair<uint64_t, uint64_t>> &devices)
+        {
+            uint64_t total = 0;
+            for (const auto &[device, rw] : devices)
+                total += rw.first + rw.second;
+            return total;
+        }
+
+        static std::string devicesText(const std::map<const char *, std::pair<uint64_t, uint64_t>> &devices)
+        {
+            std::string text = std::to_string(sumAccesses(devices));
+            if (devices.empty())
+                return text;
+            text += " (";
+            for (const auto &[device, rw] : devices)
+                text += std::string(device) + " " + std::to_string(rw.first) + "r/" + std::to_string(rw.second) + "w, ";
+            text.resize(text.size() - 2u);
+            return text + ")";
+        }
+
+        static std::string countsText(const std::map<std::string, uint64_t> &counts)
+        {
+            if (counts.empty())
+                return "0";
+            std::string text;
+            for (const auto &[key, count] : counts)
+                text += key + " " + std::to_string(count) + ", ";
+            text.resize(text.size() - 2u);
+            return text;
+        }
+
+        void reportReach()
+        {
+            if (totalCycles < reachNextReport)
+                return;
+            const bool first = reachNextReport == 0u;
+            reachNextReport = totalCycles + kReachPeriodCycles;
+            if (first)
+                return;
+            for (const auto &[device, rw] : reach.devices)
+            {
+                reachTotal.devices[device].first += rw.first;
+                reachTotal.devices[device].second += rw.second;
+            }
+            reachTotal.interpretedTotal += reach.interpretedTotal;
+            for (const auto &[k, v] : reach.interrupts)
+                reachTotal.interrupts[k] += v;
+            for (const auto &[k, v] : reach.events)
+                reachTotal.events[k] += v;
+            reachTotal.callbacks += reach.callbacks;
+            std::fprintf(stderr, "[iop:hw] hardware %s; 10 s: register accesses %s, interpreted instructions %llu, device "
+                                 "interrupts %s, device events %s (API callbacks %llu); whole run: register accesses %s, "
+                                 "interpreted %llu, device interrupts %s, device events %s\n",
+                         hardwareAbsent ? "absent" : "modelled", devicesText(reach.devices).c_str(),
+                         static_cast<unsigned long long>(reach.interpretedTotal), countsText(reach.interrupts).c_str(),
+                         countsText(reach.events).c_str(), static_cast<unsigned long long>(reach.callbacks),
+                         devicesText(reachTotal.devices).c_str(), static_cast<unsigned long long>(reachTotal.interpretedTotal),
+                         countsText(reachTotal.interrupts).c_str(), countsText(reachTotal.events).c_str());
+            if (reachDetail)
+            {
+                std::fprintf(stderr, "[iop:hw]   imports answered natively, by library: %s\n", countsText(reach.imports).c_str());
+                std::vector<std::pair<uint64_t, std::string>> rows;
+                for (const auto &[key, count] : reach.hardware)
+                    rows.emplace_back(count, std::string(key.first) + " from " + where(key.second));
+                std::sort(rows.rbegin(), rows.rend());
+                for (size_t i = 0; i < rows.size() && i < 30u; ++i)
+                    std::fprintf(stderr, "[iop:hw]     %llu %s\n", static_cast<unsigned long long>(rows[i].first), rows[i].second.c_str());
+                std::vector<std::pair<uint64_t, std::pair<uint32_t, uint32_t>>> entries;
+                for (const auto &[key, count] : reach.interpretEntries)
+                    entries.emplace_back(count, key);
+                std::sort(entries.rbegin(), entries.rend());
+                for (size_t i = 0; i < entries.size() && i < 20u; ++i)
+                    std::fprintf(stderr, "[iop:hw]     interpreter entered %llu times at %s after native %s\n",
+                                 static_cast<unsigned long long>(entries[i].first), where(entries[i].second.first).c_str(),
+                                 where(entries[i].second.second).c_str());
+                std::vector<std::pair<uint64_t, uint32_t>> code;
+                for (const auto &[pc, count] : reach.interpreted)
+                    code.emplace_back(count, pc);
+                std::sort(code.rbegin(), code.rend());
+                for (size_t i = 0; i < code.size() && i < 40u; ++i)
+                    std::fprintf(stderr, "[iop:hw]     interpreted %llu at %s\n", static_cast<unsigned long long>(code[i].first),
+                                 where(code[i].second).c_str());
+            }
+            reach = Reach{};
+        }
+
         bool step(CpuState &cpu)
         {
             if (cpu.stopped)
@@ -598,6 +855,14 @@ namespace ps2x::iop::detail
                 return !cpu.stopped;
             }
 
+            ++reach.interpretedTotal;
+            if (reachDetail)
+            {
+                ++reach.interpreted[cpu.pc];
+                if (!interpreting)
+                    ++reach.interpretEntries[{cpu.pc, enteredFrom}];
+                interpreting = true;
+            }
             const bool running = cpuCore.executeInstruction(cpu);
             schedulePendingDma();
             ++totalInstructions;
@@ -650,6 +915,53 @@ namespace ps2x::iop::detail
                 }
                 std::fprintf(stderr, "[IOP] native: %s (%zu entries)\n", module.name.c_str(), registered.count);
                 return;
+            }
+        }
+
+        // native::overrideExport: the module's export tables (magic 0x41C00000, then version, name[8] at + 12 and the
+        // function addresses from + 20 up to a 0) for the libraries overridden.
+        void applyExportOverrides(const Module &module)
+        {
+            // PS2X_IOP_LOG_EXPORTS=1 (diagnosis): each module's export tables once loaded (the addresses relocated).
+            static const bool s_logExports = [] { const char *v = std::getenv("PS2X_IOP_LOG_EXPORTS"); return v && *v == '1'; }();
+            if (s_logExports)
+                for (uint32_t at = module.base; at + 24u <= module.base + module.size; at += 4u)
+                {
+                    if (memory.read32(at) != 0x41C00000u)
+                        continue;
+                    char name[9] = {};
+                    for (uint32_t k = 0; k < 8u; ++k)
+                        name[k] = static_cast<char>(memory.read8(at + 12u + k));
+                    std::fprintf(stderr, "[IOP] exports %s:", name);
+                    uint32_t index = 0;
+                    for (uint32_t slot = at + 20u, function; (function = memory.read32(slot)) != 0u && index < 64u; slot += 4u, ++index)
+                        std::fprintf(stderr, " %u=%x", index, function);
+                    std::fprintf(stderr, "\n");
+                }
+            if (native::exportOverrides().empty())
+                return;
+            for (uint32_t at = module.base; at + 24u <= module.base + module.size; at += 4u)
+            {
+                if (memory.read32(at) != 0x41C00000u)
+                    continue;
+                char name[9] = {};
+                for (uint32_t k = 0; k < 8u; ++k)
+                    name[k] = static_cast<char>(memory.read8(at + 12u + k));
+                for (const native::ExportOverride &entry : native::exportOverrides())
+                {
+                    if (entry.library != name)
+                        continue;
+                    uint32_t index = 0;
+                    uint32_t function = 0;
+                    for (uint32_t slot = at + 20u; (function = memory.read32(slot)) != 0u && index < entry.index; slot += 4u)
+                        ++index;
+                    if (function == 0u || index != entry.index)
+                        continue;
+                    const uint32_t physical = physicalAddress(function);
+                    nativeEntries[physical] = entry.function;
+                    nativeBits[physical >> 8] |= 1ull << ((physical >> 2) & 63u);
+                    std::fprintf(stderr, "[IOP] %s export %u (%08x) taken over natively\n", name, entry.index, function);
+                }
             }
         }
 
@@ -740,6 +1052,8 @@ namespace ps2x::iop::detail
                     cpu.gpr[cpu.pendingLoadReg] = cpu.pendingLoadValue;
                 cpu.pendingLoad = false;
             }
+            interpreting = false;
+            enteredFrom = cpu.pc;
             NativeEnv env(*this, cpu);
             env.budget = sliceEnd > totalInstructions ? sliceEnd - totalInstructions : 1u;
             const uint32_t entered = cpu.pc;
@@ -748,6 +1062,9 @@ namespace ps2x::iop::detail
             if (env.executed == 0u && cpu.pc == entered)
             {
                 // No progress (not an entry after all): interpret the instruction instead.
+                ++reach.interpretedTotal;
+                if (reachDetail)
+                    ++reach.interpreted[cpu.pc];
                 cpuCore.executeInstruction(cpu);
                 ++totalInstructions;
                 ++totalCycles;
@@ -887,6 +1204,7 @@ namespace ps2x::iop::detail
                     continue;
                 if (!servicingDmaInterrupts && !pendingDmaInterrupts.empty())
                     servicePendingDmaInterrupts();
+                takeInterruptCalls();
                 if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty())
                     servicePendingGuestCallbacks();
             }
@@ -1027,6 +1345,7 @@ namespace ps2x::iop::detail
                 spu2.advanceTo(totalCycles);
                 servicePendingDmaInterrupts();
                 servicePendingSifCommands();
+                takeInterruptCalls();
                 servicePendingGuestCallbacks();
                 timrman.serviceDue(totalCycles, *this);
                 vblank.serviceDue(totalCycles, *this);
@@ -1350,7 +1669,8 @@ namespace ps2x::iop::detail
                     }
                     if (traceDma)
                         std::fprintf(stderr, "[iop:dma] irq %d dispatched at %llu\n", irq, static_cast<unsigned long long>(totalCycles));
-                    (void)intrman.dispatchInterrupt(irq, *this);
+                    if (intrman.dispatchInterrupt(irq, *this))
+                        noteInterrupt(irq, "device model");
                 }
             }
             catch (...)
@@ -1384,9 +1704,10 @@ namespace ps2x::iop::detail
                 {
                     if (callback.function != 0u)
                     {
+                        ++reach.callbacks;
                         (void)callFunction(callback.function,
                                            callback.argument,
-                                           0u,
+                                           callback.argument2,
                                            0u,
                                            0u,
                                            callback.gp,
@@ -1418,6 +1739,13 @@ namespace ps2x::iop::detail
                 cpu.gpr[2] = 1u;
                 return;
             case 32: // dmac_transfer(channel)
+                if (channel == IopSio2::DmaInChannel || channel == IopSio2::DmaOutChannel)
+                    noteEvent("SIO2 DMA");
+                if (hardwareAbsent)
+                {
+                    cpu.gpr[2] = 0u;
+                    return;
+                }
                 if (channel == IopSio2::DmaInChannel)
                     sio2.dmaToDevice(dmaRequests[channel].address, dmaRequests[channel].bytes);
                 else if (channel == IopSio2::DmaOutChannel)
@@ -1494,6 +1822,7 @@ namespace ps2x::iop::detail
             try
             {
                 paidCycles += cycles;
+                reportReach();
                 if (totalCycles > paidCycles + kMaxLeadCycles)
                     paidCycles = totalCycles - kMaxLeadCycles;
                 const uint64_t target = paidCycles;
@@ -1596,6 +1925,7 @@ namespace ps2x::iop::detail
                 findNativeFunctions(module.base, module.size);
             dumpModule(module, image);
             activateNative(module, image);
+            applyExportOverrides(module);
 
             // Like loadcore: start(argc, argv) with argv[0] the module path, then one entry per
             // NUL-separated argument. The block stays allocated, as resident modules may keep argv strings.
@@ -1739,6 +2069,7 @@ namespace ps2x::iop::detail
         std::deque<PendingSifCommand> pendingSifCommands;
         uint32_t sifCommandBuffer = 0u;
         bool servicingSifCommands = false;
+        bool hardwareAbsent = false;
         uint32_t nextModuleId = 1;
         uint32_t moduleCursor = kModuleLoadBase;
         uint64_t totalCycles = 0;

@@ -16,7 +16,7 @@ namespace ps2_stubs
         constexpr int32_t kPadStateExecCmd = 5;
         constexpr int32_t kPadStateStable = 6;
         constexpr size_t kPadPortCount = 2;
-        constexpr size_t kPadSlotCount = 1;
+        constexpr size_t kPadSlotCount = 4; // a multitap's
 
         constexpr uint16_t kPadBtnSelect = 1u << 0;
         constexpr uint16_t kPadBtnL3 = 1u << 1;
@@ -66,7 +66,7 @@ namespace ps2_stubs
         std::mutex g_padStateMutex;
         bool g_padOverrideEnabled = false;
         PadInputState g_padOverrideState{};
-        PadPortState g_padPorts[kPadPortCount]{};
+        PadPortState g_padPorts[kPadPortCount][kPadSlotCount]{};
         int g_padReadLogCount = 0;
 
         uint8_t axisToByte(float axis)
@@ -196,10 +196,9 @@ namespace ps2_stubs
 
         void resetPadStateLocked()
         {
-            for (PadPortState &portState : g_padPorts)
-            {
-                portState = PadPortState{};
-            }
+            for (auto &slots : g_padPorts)
+                for (PadPortState &portState : slots)
+                    portState = PadPortState{};
         }
 
         PadPortState *lookupPadPortStateLocked(int port, int slot)
@@ -212,7 +211,7 @@ namespace ps2_stubs
             {
                 return nullptr;
             }
-            return &g_padPorts[port];
+            return &g_padPorts[port][slot];
         }
 
         // Real pads open DIGITAL (CURID=4, mode 0x41) until the player presses ANALOG, which a PC controller has no
@@ -321,6 +320,8 @@ namespace ps2_stubs
                     state.ly = backendData[7];
                     usedBackend = true;
                 }
+                else if (slot != 0)
+                    return false; // a multitap's empty slot
                 else
                 {
                     applyGamepadState(state);
@@ -459,8 +460,8 @@ namespace ps2_stubs
     {
         (void)rdram;
         (void)runtime;
-        // Most games use one slot unless multitap is active.
-        setReturnS32(ctx, 1);
+        // One slot, four on port 0 with a multitap (PSPadBackend::setMultitap).
+        setReturnS32(ctx, runtime && getRegU32(ctx, 4) == 0u && runtime->padBackend().multitap() ? 4 : 1);
     }
 
     void scePadGetState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -471,7 +472,8 @@ namespace ps2_stubs
         PadPortState *portState = lookupPadPortStateLocked(static_cast<int>(getRegU32(ctx, 4)),
                                                            static_cast<int>(getRegU32(ctx, 5)));
         int32_t state = kPadStateDisconnected;
-        if (portState && portState->open)
+        const int slot = static_cast<int>(getRegU32(ctx, 5));
+        if (portState && portState->open && (slot == 0 || (runtime && runtime->padBackend().connected(static_cast<int>(getRegU32(ctx, 4)), slot))))
         {
             if (portState->transientState != 0u)
             {
@@ -837,7 +839,7 @@ namespace ps2_stubs
             {
                 for (size_t slot = 0; slot < kPadDebugSlotCount; ++slot)
                 {
-                    const PadPortState &src = g_padPorts[port];
+                    const PadPortState &src = g_padPorts[port][slot];
                     PadDebugPortSnapshot &dst = snapshot.ports[port][slot];
                     dst.open = src.open;
                     dst.analogMode = src.analogMode;

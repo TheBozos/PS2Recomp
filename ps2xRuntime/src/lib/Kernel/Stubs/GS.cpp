@@ -4,6 +4,8 @@
 #include "runtime/gs/ps2_gs_common.h"
 #include "runtime/gs/ps2_gs_psmct16.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/native/native_display.h"
+#include "runtime/native/native_gs_hook.h"
 
 namespace ps2_stubs
 {
@@ -89,10 +91,16 @@ namespace ps2_stubs
 
         void applyGsClearPacket(PS2Runtime *runtime, const GsClearMem &clear)
         {
+            if (ps2x::native::gsFrontEndAbsent()) // no GS to clear: the native renderer clears its own frame
+            {
+                PS2X_GS_TOUCH("display: libgraph clear packet not sent (no GS)");
+                return;
+            }
             if (!runtime->syncCoreSubsystems() || !hasSeededGsClearPacket(clear))
             {
                 return;
             }
+            PS2X_GS_TOUCH("gs: libgraph clear packet written to the GS (GS::writeRegister)");
 
             runtime->gs().writeRegister(static_cast<uint8_t>(clear.testa.reg & 0xFFu), clear.testa.value);
             runtime->gs().writeRegister(static_cast<uint8_t>(clear.prim.reg & 0xFFu), clear.prim.value);
@@ -544,8 +552,17 @@ namespace ps2_stubs
 
     void sceGsExecLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsExecLoadImage");
         uint32_t imgAddr = getRegU32(ctx, 4);
         uint32_t srcAddr = getRegU32(ctx, 5);
+
+        // Nothing sent to the GS (ps2x::native::setGsDmaSkipped, or no GS at all): the port's native textures come from
+        // the game's assets.
+        if (ps2x::native::gsDmaSkipped() || ps2x::native::gsFrontEndAbsent())
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
 
         GsImageMem img{};
         if (!runtime || !runtime->syncCoreSubsystems() || !readGsImage(rdram, imgAddr, img, false))
@@ -630,11 +647,28 @@ namespace ps2_stubs
 
     void sceGsExecStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsExecStoreImage");
         uint32_t imgAddr = getRegU32(ctx, 4);
         uint32_t dstAddr = getRegU32(ctx, 5);
 
         GsImageMem img{};
-        if (!runtime || !runtime->syncCoreSubsystems() || !readGsImage(rdram, imgAddr, img, true))
+        if (!runtime || !readGsImage(rdram, imgAddr, img, true))
+        {
+            setReturnS32(ctx, -1);
+            return;
+        }
+        // Nothing sent to the GS (ps2x::native::setGsDmaSkipped), no GS memory to read back: the image reads as zeros
+        // (a port with readbacks it needs answers them from its own renderer, as TMB's lens flares do).
+        if (ps2x::native::gsDmaSkipped() || ps2x::native::gsFrontEndAbsent())
+        {
+            const uint32_t bytes = bytesForPixels(img.psm, static_cast<uint32_t>(img.width)) * static_cast<uint32_t>(img.height);
+            const uint32_t at = dstAddr & PS2_RAM_MASK;
+            if (uint8_t *dst = getMemPtr(rdram, dstAddr))
+                std::memset(dst, 0, std::min<uint32_t>(bytes, PS2_RAM_SIZE - std::min<uint32_t>(at, PS2_RAM_SIZE)));
+            setReturnS32(ctx, 0);
+            return;
+        }
+        if (!runtime->syncCoreSubsystems())
         {
             setReturnS32(ctx, -1);
             return;
@@ -717,12 +751,14 @@ namespace ps2_stubs
 
     void sceGsGetGParam(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsGetGParam");
         uint32_t addr = writeGsGParamToScratch(runtime);
         setReturnU32(ctx, addr);
     }
 
     void sceGsPutDispEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsPutDispEnv");
         uint32_t envAddr = getRegU32(ctx, 4);
         GsDispEnvMem env{};
         if (!readGsDispEnv(rdram, envAddr, env))
@@ -742,11 +778,17 @@ namespace ps2_stubs
     // address applied the giftag itself as a register, dropped TEST_1, and never ran the clear.
     void sceGsPutDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsPutDrawEnv");
         const uint32_t giftagAddr = getRegU32(ctx, 4);
         const uint8_t *tag = getConstMemPtr(rdram, giftagAddr);
         if (!runtime || !tag)
         {
             setReturnS32(ctx, -1);
+            return;
+        }
+        if (ps2x::native::gsDmaSkipped() || ps2x::native::gsFrontEndAbsent()) // nothing sent (setGsDmaSkipped), or no GS
+        {
+            setReturnS32(ctx, 0);
             return;
         }
         uint64_t tagLo = 0;
@@ -770,6 +812,7 @@ namespace ps2_stubs
 
     void sceGsResetGraph(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsResetGraph");
         uint32_t mode = getRegU32(ctx, 4);
         uint32_t interlace = getRegU32(ctx, 5);
         uint32_t omode = getRegU32(ctx, 6);
@@ -794,6 +837,19 @@ namespace ps2_stubs
                 runtime->eeScheduler().setFieldRate(g_gparam.omode == kGsModePal ? EeScheduler::kPalFieldRate
                                                                                    : EeScheduler::kNtscFieldRate);
             }
+            // No GS front end: the mode is the native display's (runtime/native/native_display.h), nothing is sent.
+            if (ps2x::native::gsFrontEndAbsent())
+            {
+                PS2X_GS_TOUCH("display: display mode set (sceGsResetGraph)");
+                ps2x::native::DisplayMode displayMode;
+                displayMode.interlace = (interlace & 0x1u) != 0u;
+                displayMode.frameMode = (ffmode & 0x1u) != 0u;
+                displayMode.pal = omode == 3u;
+                ps2x::native::setDisplayMode(displayMode);
+                setReturnS32(ctx, 0);
+                return;
+            }
+            PS2X_GS_TOUCH("gs: sceGsResetGraph, GS display registers and a GIF packet");
             uint64_t pmode = makePmode(1, 0, 0, 0, 0, 0x80);
             uint64_t smode2 = (interlace & 0x1) | ((ffmode & 0x1) << 1);
             // SMODE2 is privileged: no GIF packet address reaches it (0x41/0x42 are SCISSOR_2/ALPHA_1).
@@ -863,6 +919,7 @@ namespace ps2_stubs
 
     void sceGsResetPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsResetPath");
         setReturnS32(ctx, 0);
     }
 
@@ -875,6 +932,7 @@ namespace ps2_stubs
     // the frame and Z buffer uncleared (2D text with Z = max survived under every later 3D frame).
     void sceGsSetDefClear(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsSetDefClear");
         (void)runtime;
         const uint32_t clearAddr = getRegU32(ctx, 4);
         const uint32_t ztest = getRegU32(ctx, 5) & 0x3u;
@@ -908,6 +966,7 @@ namespace ps2_stubs
 
     void sceGsSetDefDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsSetDefDBuffDc");
         const uint32_t envAddr = getRegU32(ctx, 4);
         uint32_t psm = getRegU32(ctx, 5);
         uint32_t w = getRegU32(ctx, 6);
@@ -979,6 +1038,7 @@ namespace ps2_stubs
 
     void sceGsSetDefDBuff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsSetDefDBuff");
         const uint32_t envAddr = getRegU32(ctx, 4);
         uint32_t psm = getRegU32(ctx, 5);
         uint32_t w = getRegU32(ctx, 6);
@@ -1043,6 +1103,7 @@ namespace ps2_stubs
 
     void sceGsSetDefDispEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsSetDefDispEnv");
         uint32_t envAddr = getRegU32(ctx, 4);
         uint32_t psm = getRegU32(ctx, 5);
         uint32_t w = getRegU32(ctx, 6);
@@ -1065,7 +1126,9 @@ namespace ps2_stubs
         // Jade Cocoon 2 does: with SMODE2 still 0 its 224-line display got DH 223 instead of 447, and the
         // presenter showed the top 112 lines at twice the height.
         constexpr uint64_t kDefaultPmode = 0x66u;
-        const uint64_t smode2 = (g_gparam.interlace & 0x1u) | ((g_gparam.ffmode & 0x1u) << 1u);
+        const uint64_t smode2 = ps2x::native::gsFrontEndAbsent()
+                                    ? ps2x::native::displaySmode2()
+                                    : (g_gparam.interlace & 0x1u) | ((g_gparam.ffmode & 0x1u) << 1u);
         // Like libgraph: scale to the 2560-clock line (MAGH) and offset from the standard origin (NTSC DX 652,
         // DY 50; PAL DX 656, DY 72, as in VP2's libgraph; half DY without interlace).
         constexpr uint32_t kGsModePal = 3u;
@@ -1086,6 +1149,7 @@ namespace ps2_stubs
 
     void sceGsSetDefDrawEnv(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsSetDefDrawEnv");
         uint32_t envAddr = getRegU32(ctx, 4);
         uint32_t param_2 = getRegU32(ctx, 5);
         int32_t w = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 6) & 0xFFFF));
@@ -1129,6 +1193,7 @@ namespace ps2_stubs
 
     void sceGsSetDefDrawEnv2(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsSetDefDrawEnv2");
         uint32_t envAddr = getRegU32(ctx, 4);
         uint32_t param_2 = getRegU32(ctx, 5);
         int32_t w = static_cast<int32_t>(static_cast<int16_t>(getRegU32(ctx, 6) & 0xFFFF));
@@ -1172,6 +1237,7 @@ namespace ps2_stubs
 
     void sceGsSetDefLoadImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsSetDefLoadImage");
         uint32_t imgAddr = getRegU32(ctx, 4);
         const GsSetDefImageArgs args = decodeGsSetDefImageArgs(rdram, ctx);
 
@@ -1190,6 +1256,7 @@ namespace ps2_stubs
 
     void sceGsSetDefStoreImage(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsSetDefStoreImage");
         uint32_t imgAddr = getRegU32(ctx, 4);
         const GsSetDefImageArgs args = decodeGsSetDefImageArgs(rdram, ctx);
 
@@ -1208,6 +1275,7 @@ namespace ps2_stubs
 
     void sceGsSwapDBuffDc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsSwapDBuffDc");
         const uint32_t envAddr = getRegU32(ctx, 4);
         const uint32_t which = getRegU32(ctx, 5) & 1u;
 
@@ -1242,7 +1310,7 @@ namespace ps2_stubs
         {
             applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw01), 8u);
             applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw02), 8u);
-            if (hasSeededGsClearPacket(db.clear0))
+            if (hasSeededGsClearPacket(db.clear0) && runtime->hasGs())
             {
                 const uint32_t clearContext = static_cast<uint32_t>((db.clear0.prim.value >> 9) & 0x1u);
                 runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear0.rgbaq.value));
@@ -1253,7 +1321,7 @@ namespace ps2_stubs
         {
             applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw11), 8u);
             applyGsRegPairs(runtime, reinterpret_cast<const GsRegPairMem *>(&db.draw12), 8u);
-            if (hasSeededGsClearPacket(db.clear1))
+            if (hasSeededGsClearPacket(db.clear1) && runtime->hasGs())
             {
                 const uint32_t clearContext = static_cast<uint32_t>((db.clear1.prim.value >> 9) & 0x1u);
                 runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear1.rgbaq.value));
@@ -1266,6 +1334,7 @@ namespace ps2_stubs
 
     void sceGsSwapDBuff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsSwapDBuff");
         const uint32_t envAddr = getRegU32(ctx, 4);
         const uint32_t which = getRegU32(ctx, 5) & 1u;
 
@@ -1291,6 +1360,7 @@ namespace ps2_stubs
 
     void sceGsSyncPath(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsSyncPath");
         int32_t mode = static_cast<int32_t>(getRegU32(ctx, 4));
         auto &mem = runtime->memory();
 
@@ -1372,6 +1442,7 @@ namespace ps2_stubs
 
     void sceGsSyncV(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsSyncV");
         ps2_syscalls::WaitVSyncTick(rdram,
                                     ctx,
                                     runtime,
@@ -1380,6 +1451,7 @@ namespace ps2_stubs
 
     void sceGsSyncVCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: sceGsSyncVCallback");
         const uint32_t newCallback = getRegU32(ctx, 4);
         const uint32_t callerPc = ctx ? ctx->pc : 0u;
         const uint32_t callerRa = ctx ? getRegU32(ctx, 31) : 0u;
@@ -1456,6 +1528,7 @@ namespace ps2_stubs
 
     void Ps2SwapDBuff(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        PS2X_GS_TOUCH("call: Ps2SwapDBuff");
         static int logCount = 0;
         if (logCount < 8)
         {

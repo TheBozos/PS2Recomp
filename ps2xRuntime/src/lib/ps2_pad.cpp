@@ -1,3 +1,4 @@
+#include <atomic>
 #include "runtime/ps2_pad.h"
 #include "ps2_host_backend.h"
 #include "runtime/ps2_input_bindings.h"
@@ -260,12 +261,31 @@ uint16_t ps2PadLiveInputButtonsAt(const char *lines, double addedAt, double seco
 
 namespace
 {
-    uint16_t pad2ScriptedButtonsDown()
+    // The scripts of players 2 to 4: PS2X_PAD2_SCRIPT, PS2X_PAD3_SCRIPT, PS2X_PAD4_SCRIPT.
+    const std::vector<ScriptedPress> &playerScript(int player)
     {
-        static const std::vector<ScriptedPress> script = parsePadScript(std::getenv("PS2X_PAD2_SCRIPT"));
+        static const std::vector<ScriptedPress> scripts[3] = {parsePadScript(std::getenv("PS2X_PAD2_SCRIPT")),
+                                                              parsePadScript(std::getenv("PS2X_PAD3_SCRIPT")),
+                                                              parsePadScript(std::getenv("PS2X_PAD4_SCRIPT"))};
+        return scripts[std::clamp(player, 1, 3) - 1];
+    }
+
+    uint16_t playerScriptedButtonsDown(int player)
+    {
+        const std::vector<ScriptedPress> &script = playerScript(player);
         if (script.empty())
             return 0;
         return buttonsDownAt(script, padClockSeconds());
+    }
+
+    std::atomic<bool> g_multitap{false};
+
+    // The player a pad is: with a multitap on port 0 its slots are players 1 to 4; else port 1 is player 2.
+    int playerOf(int port, int slot)
+    {
+        if (port == 0)
+            return g_multitap.load(std::memory_order_relaxed) ? std::clamp(slot, 0, 3) : (slot == 0 ? 0 : -1);
+        return port == 1 && slot == 0 && !g_multitap.load(std::memory_order_relaxed) ? 1 : -1;
     }
 }
 
@@ -311,18 +331,35 @@ namespace
 
 bool PSPadBackend::connected(int port) const
 {
-    if (port == 0)
-        return true;
-    static const bool pad2Script = std::getenv("PS2X_PAD2_SCRIPT") != nullptr;
-    return port == 1 && (pad2Script || gamepadForPort(1) >= 0);
+    return connected(port, 0);
 }
 
-bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
+bool PSPadBackend::connected(int port, int slot) const
+{
+    const int player = playerOf(port, slot);
+    if (player < 0)
+        return false;
+    return player == 0 || !playerScript(player).empty() || gamepadForPort(player) >= 0;
+}
+
+void PSPadBackend::setMultitap(bool on)
+{
+    if (g_multitap.exchange(on) != on)
+        std::fprintf(stderr, "[pad] multitap on port 0 %s\n", on ? "connected" : "removed");
+}
+
+bool PSPadBackend::multitap() const
+{
+    return g_multitap.load(std::memory_order_relaxed);
+}
+
+bool PSPadBackend::readState(int port, int slot, uint8_t *data, size_t size)
 {
     if (!data || size < 32)
         return false;
-    if (port != 0 && !connected(port))
+    if (!connected(port, slot))
         return false;
+    const int player = playerOf(port, slot);
 
     std::memset(data, 0, 32);
     data[0] = 0x01;
@@ -338,15 +375,20 @@ bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
     uint16_t btns = 0xFFFFu;
     if (!s_noHost)
     {
-        const ps2_input::PadState state = ps2_input::padState(port == 1 ? 1 : 0, gamepadForPort(port));
-        btns = state.buttons;
-        data[4] = state.rx;
-        data[5] = state.ry;
-        data[6] = state.lx;
-        data[7] = state.ly;
+        // Players 3 and 4 only on a gamepad of their own (player 2's bindings), never the keyboard.
+        const int gamepad = gamepadForPort(player);
+        if (player < 2 || gamepad >= 0)
+        {
+            const ps2_input::PadState state = ps2_input::padState(player == 0 ? 0 : 1, gamepad);
+            btns = state.buttons;
+            data[4] = state.rx;
+            data[5] = state.ry;
+            data[6] = state.lx;
+            data[7] = state.ly;
+        }
     }
 
-    if (port == 0)
+    if (player == 0)
     {
         // The left stick is recorded as directions when pushed past half way (a replay pushes it fully).
         uint16_t recorded = static_cast<uint16_t>(~btns);
@@ -360,7 +402,7 @@ bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
             recorded |= PAD_DOWN;
         recordPhysicalButtons(recorded);
     }
-    const uint16_t scripted = port == 1 ? pad2ScriptedButtonsDown() : scriptedButtonsDown();
+    const uint16_t scripted = player != 0 ? playerScriptedButtonsDown(player) : scriptedButtonsDown();
     btns &= static_cast<uint16_t>(~scripted);
     // Scripted directions push the left stick too, as the movement keys do: a recorded keyboard session moved
     // with them where the game reads only the stick (VP2's battles).
