@@ -10,6 +10,7 @@
 #include "ps2_runtime.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ps2_input_bindings.h"
+#include "runtime/ps2_video_settings.h"
 #include "ps2_log.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
@@ -1636,15 +1637,11 @@ bool PS2Runtime::initialize(const char *title)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
         SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-        // PS2X_WINDOW_SIZE=<width>x<height>: the window's size when it opens (it can be resized after).
-        int windowWidth = HOST_WINDOW_WIDTH, windowHeight = HOST_WINDOW_HEIGHT;
-        if (const char *size = std::getenv("PS2X_WINDOW_SIZE"); size && *size)
-        {
-            int w = 0, h = 0;
-            if (std::sscanf(size, "%dx%d", &w, &h) == 2 && w >= 160 && h >= 120)
-                windowWidth = w, windowHeight = h;
-        }
-        InitWindow(windowWidth, windowHeight, title);
+        // The window's size and mode from video.ini, PS2X_WINDOW_SIZE=<width>x<height> and PS2X_WINDOW_MODE over it
+        // (runtime/ps2_video_settings.h; the Video tab of the settings window, F2, changes them while playing).
+        ps2_video::loadAtStartup(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT);
+        InitWindow(ps2_video::current().width, ps2_video::current().height, title);
+        ps2_video::applyAtStartup();
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
 #endif
@@ -3939,6 +3936,9 @@ void PS2Runtime::run()
             shownTex.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
         }
 
+#if !defined(PLATFORM_VITA)
+        ps2_video::frameUpdate(); // F11 / Alt+Enter, the Video tab's changes: between two frames
+#endif
         BeginDrawing();
         ps2_input::frameUpdate(); // the mouse and the wheel, for the pad bindings (input.ini)
         ClearBackground(BLACK);

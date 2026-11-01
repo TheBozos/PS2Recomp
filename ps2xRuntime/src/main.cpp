@@ -214,6 +214,8 @@ int main(int argc, char *argv[])
             },
             &debugPanel);
 #endif
+        // The ELF's folder before the window opens: video.ini is read from there (as input.ini later).
+        PS2Runtime::configureIoPathsFromElf(filePathStr);
         if (!runtime.initialize(windowTitle.c_str()))
         {
             std::cerr << "Failed to initialize PS2 runtime" << std::endl;

@@ -12,6 +12,7 @@
 #include "runtime/native/native_gs_hook.h"
 #include "runtime/native/native_texture_cache.h"
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -171,6 +172,10 @@ namespace ps2x::native
 
         // Present thread: draws the latest frame into the given window rectangle; false when there is none yet.
         bool present(float x, float y, float width, float height);
+        // The 3D's own resolution against the window rectangle's (the Video settings' render scale, 0.25 to 4): drawn
+        // at that many times its size each way, then filtered to it (2: four samples a window pixel).
+        void setRenderScale(float scale) { m_renderScale.store(std::clamp(scale, 0.25f, 4.0f), std::memory_order_relaxed); }
+        float renderScale() const { return m_renderScale.load(std::memory_order_relaxed); }
         // The GS frame shown with the native one (a GL texture): PS2X_NATIVE_CAPTURE_DIR saves it with each capture.
         void setGsFrame(unsigned int textureId, int width, int height, int format)
         {
@@ -242,6 +247,7 @@ namespace ps2x::native
         bool m_presentsAlone = false;
         float m_clip[4] = {0, 0, 0, 0};
         std::atomic<uint32_t> m_clearColour{0};
+        std::atomic<float> m_renderScale{1.0f};
         std::shared_ptr<Frame> m_backdrop;         // under m_mutex: one textured batch, its screen, its time
         std::mutex m_mutex;
         std::shared_ptr<Frame> m_published;
