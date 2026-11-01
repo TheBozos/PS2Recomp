@@ -56,11 +56,13 @@ namespace ps2x::native
         std::atomic<uint64_t> gsIrqs{0};                   // GS interrupts (SIGNAL / FINISH) raised to the EE
         std::atomic<uint64_t> vif1Runs{0}, vif1Bytes{0}; // PS2Memory::processVIF1Data (the VIF1 interpreter)
         std::atomic<uint64_t> vif0Runs{0};                 // PS2Memory::processVIF0Data (VU0's code and data, not the GS's)
+        std::atomic<uint64_t> vu0Interpreter{0};           // VU0 microprograms run on VU0's interpreter (not the port's Vu0Hle)
+        std::atomic<uint64_t> vu0NotRun{0};                // ... not run at all: VIF0 unread (setVif0Skipped), no code
         std::atomic<uint64_t> chainWalks{0};               // PS2Memory::readDmaSourceChain, VIF1 / GIF (DMA tags followed)
         std::atomic<uint64_t> path3{0};                    // GIF channel transfers handed to the GIF arbiter
         std::atomic<uint64_t> hostGif{0};                  // libgraph HLE packets (sceGsExecLoadImage, sceGsPutDrawEnv...)
         std::atomic<uint64_t> kicks[10]{};                 // DMA channel starts
-        std::atomic<uint64_t> unread[10]{};                // ... completed without reading their data (setGsDmaSkipped)
+        std::atomic<uint64_t> unread[10]{};                // ... completed without reading their data (setGsDmaSkipped, setVif0Skipped)
     };
     inline PacketStats g_packetStats;
     inline PacketStats &packetStats() { return g_packetStats; }

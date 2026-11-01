@@ -3,6 +3,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/native/native_vif1.h"
 #include "runtime/native/native_gs_hook.h"
+#include "runtime/native/native_vu0_hle.h"
 #include "ps2_log.h"
 #include <atomic>
 #include <cstdlib>
@@ -109,6 +110,7 @@ namespace
 
     constexpr uint32_t kGsCsrRegOffset = 0x1000u;
     constexpr uint32_t kGsCsrReset = 1u << 9;
+    constexpr uint32_t kVif0Channel = 0x10008000u;
     constexpr uint32_t kVif1Channel = 0x10009000u;
     constexpr uint32_t kVif1Stat = 0x10003C00u;
     constexpr uint32_t kVif1StatFdr = 1u << 23;
@@ -1677,6 +1679,23 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 m_ioRegisters[channelBase + 0x20u] = 0u;
                 completeDmacChannel(channelBase, channelBase == kGifChannel ? 2u : 1u);
                 return true;
+            }
+
+            // VIF0: the port is told of each kick (ps2x::native::setVif0Kick), the registers the game wrote, before the
+            // transfer. With ps2x::native::setVif0Skipped the transfer ends at once unread, as VIF1's and the GIF's above:
+            // no DMA tag, VIFcode, MPG or UNPACK read; the port writes VU0's data itself from the kick.
+            if (channelBase == kVif0Channel)
+            {
+                const bool unread = ps2x::native::vif0Skipped();
+                if (const ps2x::native::Vif0Kick kick = ps2x::native::vif0Kick())
+                    kick(m_rdram, m_vu0Data, value, madr, m_ioRegisters[channelBase + 0x30u], qwc, unread);
+                if (unread)
+                {
+                    ps2x::native::packetStats().unread[0].fetch_add(1, std::memory_order_relaxed);
+                    m_ioRegisters[channelBase + 0x20u] = 0u;
+                    completeDmacChannel(channelBase, 0u);
+                    return true;
+                }
             }
 
             if (tryProcessScratchpadDma(channelBase, value))

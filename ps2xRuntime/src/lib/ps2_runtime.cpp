@@ -47,6 +47,9 @@
 #include <thread>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
+#include <bit>
+#include <mutex>
 #include <sstream>
 #include <string_view>
 
@@ -2452,23 +2455,30 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
                 m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE, vu0Data, PS2_VU0_DATA_SIZE, m_gs, &m_memory, startPC, 0u,
                               ctx->vu0_itop, 4096, true);
                 copyVu0StateToContext(m_vu0.state(), ctx);
-                // Per program: calls, and the worst relative difference of each register (and of data memory).
+                // Per program: calls, those differing by more than 1e-4 relative, those not bit-exact (any bit of a
+                // register or of data memory), and the worst relative difference of each register (and of data memory).
                 struct Report
                 {
-                    uint64_t calls = 0, differing = 0;
+                    uint64_t calls = 0, differing = 0, inexact = 0;
                     float worst = 0.0f;
                     char what[160] = {};
+                    char firstInexact[160] = {};
                 };
                 static std::unordered_map<uint32_t, Report> s_reports;
                 static uint64_t s_calls = 0;
                 Report &report = s_reports[startPC];
                 ++report.calls;
                 float worst = 0.0f;
+                bool anyBit = false;
                 char what[160] = {};
                 const auto note = [&](float a, float b, const char *name, int index, int lane)
                 {
                     if (std::memcmp(&a, &b, 4) == 0)
                         return;
+                    if (!anyBit && report.inexact == 0u)
+                        std::snprintf(report.firstInexact, sizeof(report.firstInexact), "%s%d.%c native %#x interpreter %#x",
+                                      name, index, "xyzw"[lane], std::bit_cast<uint32_t>(a), std::bit_cast<uint32_t>(b));
+                    anyBit = true;
                     const float scale = std::max({std::fabs(a), std::fabs(b), 1e-3f});
                     const float d = std::isfinite(a) && std::isfinite(b) ? std::fabs(a - b) / scale : 1e9f;
                     if (d > worst)
@@ -2486,6 +2496,8 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
                         note(a[l], b[l], "vf", r, l);
                 }
                 for (int r = 1; r < 16; ++r)
+                    anyBit = anyBit || native.vi[r] != ctx->vi[r];
+                for (int r = 1; r < 16; ++r)
                     if (native.vi[r] != ctx->vi[r] && worst < 1e9f)
                     {
                         worst = 1e9f;
@@ -2498,6 +2510,7 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
                     std::memcpy(&b, vu0Data + at, 4);
                     note(a, b, "data@", static_cast<int>(at / 16u), static_cast<int>((at / 4u) & 3u));
                 }
+                report.inexact += anyBit ? 1u : 0u;
                 if (worst > 1e-4f)
                 {
                     ++report.differing;
@@ -2511,13 +2524,27 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
                 }
                 if (++s_calls % 50000u == 0u)
                     for (const auto &[pc, r] : s_reports)
-                        std::fprintf(stderr, "[vu0:hle] pc %#x: %llu calls, %llu differ (worst %s)\n", pc,
+                        std::fprintf(stderr, "[vu0:hle] pc %#x: %llu calls, %llu differ (worst %s), %llu not bit-exact (first: %s)\n", pc,
                                      static_cast<unsigned long long>(r.calls), static_cast<unsigned long long>(r.differing),
-                                     r.differing ? r.what : "-");
+                                     r.differing ? r.what : "-", static_cast<unsigned long long>(r.inexact),
+                                     r.inexact ? r.firstInexact : "-");
                 return;
             }
         }
     }
+
+    // VIF0 unread (ps2x::native::setVif0Skipped): VU0's code memory was never filled, nothing to interpret.
+    if (ps2x::native::vif0Skipped())
+    {
+        ps2x::native::packetStats().vu0NotRun.fetch_add(1, std::memory_order_relaxed);
+        static std::mutex s_reportedMutex;
+        static std::unordered_set<uint32_t> s_reported;
+        std::lock_guard<std::mutex> lock(s_reportedMutex);
+        if (s_reported.insert(startPC).second)
+            std::fprintf(stderr, "[vu0] microprogram at pc %#x not run: no native version, and VIF0 unread (no code)\n", startPC);
+        return;
+    }
+    ps2x::native::packetStats().vu0Interpreter.fetch_add(1, std::memory_order_relaxed);
 
     // PS2X_VU0_CHECK=1: every microprogram also runs through the interpreter from the same state; a difference
     // with the compiled run is reported and the interpreter's result kept.
