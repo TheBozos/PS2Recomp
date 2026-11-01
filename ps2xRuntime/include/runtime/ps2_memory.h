@@ -245,6 +245,9 @@ public:
     // A VIF1 MARK whose group the native port drew (ps2x::native::setVif1MarkGate).
     using Vif1MarkCallback = std::function<void(uint64_t group)>;
     void setVif1MarkCallback(Vif1MarkCallback cb) { m_vif1MarkCallback = std::move(cb); }
+    // A GIF chain marker (ps2x::native::setGifChainMarkGate) reached in PATH3 order: the port's draws for its key.
+    using GifMarkCallback = std::function<void(uint64_t key)>;
+    void setGifMarkCallback(GifMarkCallback cb) { m_gifMarkCallback = std::move(cb); }
     // VIF0 MSCAL/MSCALF (start pc in bytes) and MSCNT (~0u: continue at the current pc).
     using Vu0MscalCallback = std::function<void(uint32_t startPC)>;
     void setVu0MscalCallback(Vu0MscalCallback cb) { m_vu0MscalCallback = std::move(cb); }
@@ -407,6 +410,7 @@ public:
     Vu1MscalCallback m_vu1MscalCallback;
     Vu1SkipCallback m_vu1SkipCallback;
     Vif1MarkCallback m_vif1MarkCallback;
+    GifMarkCallback m_gifMarkCallback;
     Vu0MscalCallback m_vu0MscalCallback;
     Vu1MscntCallback m_vu1MscntCallback;
 
@@ -434,6 +438,11 @@ public:
         uint32_t chcr = 0;
         bool last = false;
     };
+    struct DmaMarker
+    {
+        uint32_t offset = 0;
+        uint64_t key = 0;
+    };
     struct PendingTransfer
     {
         bool fromScratchpad = false;
@@ -442,6 +451,7 @@ public:
         std::vector<uint8_t> chainData;
         std::vector<DmaSegment> segments;
         bool observe = false;
+        std::vector<DmaMarker> markers; // GIF chain markers, by their offset in chainData
     };
     struct DmaSignalStall
     {
@@ -558,6 +568,13 @@ public:
     std::atomic<uint64_t> m_timerSpinCycles{0u};
     std::vector<uint8_t> readDmaSourceChain(uint32_t channelBase, uint32_t chcr, std::vector<DmaSegment> *segments = nullptr,
                                             uint32_t pendingQwc = 0, bool pendingEnds = false);
+    std::vector<DmaMarker> m_chainMarkers; // the GIF chain markers the last readDmaSourceChain found
+    std::vector<uint64_t> m_path3MaskedMarkers; // keys of the markers held with the masked PATH3 packets (empty packets there)
+    void submitGifMarker(uint64_t key);
+    // PATH3 data from a GIF chain, its markers reached between the packets around them: to the GS now, or to the VIF1
+    // worker's queue (queued), up to `size` bytes from `from` into chainData.
+    void submitPath3Chain(const std::vector<uint8_t> &chainData, const std::vector<DmaMarker> &markers, uint32_t from, uint32_t size,
+                          bool queued);
     bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
     LocalToHostReader m_localToHostReader;
     std::vector<uint8_t> m_vif1DownloadFifo;

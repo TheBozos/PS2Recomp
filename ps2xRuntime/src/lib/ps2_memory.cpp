@@ -1839,6 +1839,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         pt.observe = observeLater;
                         pt.chainData = std::move(chainBuf);
                         pt.segments = std::move(segments);
+                        if (channelBase == kGifChannel)
+                            pt.markers = std::move(m_chainMarkers);
                         if (channelBase == 0x1000A000)
                         {
                             m_pendingGifTransfers.push_back(std::move(pt));
@@ -2002,6 +2004,8 @@ std::vector<uint8_t> PS2Memory::readDmaSourceChain(uint32_t channelBase, uint32_
     const int kMaxChainTags = 1 << 20;
     const size_t kMaxChainBytes = size_t{256} << 20;
     std::vector<uint8_t> chainBuf;
+    m_chainMarkers.clear();
+    const ps2x::native::GifChainMarkGate markGate = channelBase == kGifChannel ? ps2x::native::gifChainMarkGate() : nullptr;
 
     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
     {
@@ -2189,6 +2193,10 @@ std::vector<uint8_t> PS2Memory::readDmaSourceChain(uint32_t channelBase, uint32_
 
         if (irq && tieEnabled)
             endChain = true;
+
+        if (markGate && id == 1u && tagQwc == 0u)
+            if (const uint64_t key = markGate(loadScalar<uint64_t>(tp, 8, 16, "dma chain tag", currentTagAddr)); key != 0u)
+                m_chainMarkers.push_back(DmaMarker{static_cast<uint32_t>(chainBuf.size()), key});
 
         if (transferTagData)
             appendVifTagData(currentTagAddr);
@@ -2574,6 +2582,8 @@ void PS2Memory::resumeDmaChannel(const DmaSignalStall &stall)
     pt.chainData = readDmaSourceChain(channelBase, chcr, &pt.segments, m_ioRegisters[channelBase + 0x20u] & 0xFFFFu,
                                       stall.last || !chain);
     if (channelBase == kGifChannel)
+        pt.markers = std::move(m_chainMarkers);
+    if (channelBase == kGifChannel)
         m_pendingGifTransfers.push_back(std::move(pt));
     else
         m_pendingVif1Transfers.push_back(std::move(pt));
@@ -2647,7 +2657,9 @@ void PS2Memory::processPendingTransfers()
             m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
             const uint32_t size = static_cast<uint32_t>(p.chainData.size());
             const uint32_t stop = findSignalStall(m_path3Scan, p.chainData.data(), size, kGifChannel, p.segments, 0u);
-            if (stop != 0u)
+            if (!p.markers.empty())
+                submitPath3Chain(p.chainData, p.markers, 0u, stop, false);
+            else if (stop != 0u)
                 submitGifPacket(GifPathId::Path3, p.chainData.data(), stop, false, false, true);
             if (stop < size)
             {
@@ -2660,6 +2672,11 @@ void PS2Memory::processPendingTransfers()
         {
             m_seenGifCopy = true;
             m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
+            if (!p.markers.empty())
+            {
+                submitPath3Chain(p.chainData, p.markers, 0u, static_cast<uint32_t>(p.chainData.size()), queueGif);
+                continue;
+            }
             if (queueGif)
             {
                 Vif1Job job;
@@ -2976,15 +2993,79 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
             m_gifPacketCallback(packetData, packetSize);
     };
 
+    size_t marker = 0;
     for (const auto &packet : m_path3MaskedFifo)
     {
-        if (packet.size() >= 16u)
+        if (packet.empty() && marker < m_path3MaskedMarkers.size())
+        {
+            if (m_gifArbiter)
+                m_gifArbiter->drain();
+            if (m_gifMarkCallback)
+                m_gifMarkCallback(m_path3MaskedMarkers[marker]);
+            ++marker;
+        }
+        else if (packet.size() >= 16u)
             emit(packet.data(), static_cast<uint32_t>(packet.size()));
     }
     m_path3MaskedFifo.clear();
+    m_path3MaskedMarkers.clear();
 
     if (m_gifArbiter && drainImmediately)
         m_gifArbiter->drain();
+}
+
+void PS2Memory::submitGifMarker(uint64_t key)
+{
+    waitForVif1();
+    if (m_path3Masked)
+    {
+        m_path3MaskedFifo.emplace_back();
+        m_path3MaskedMarkers.push_back(key);
+        return;
+    }
+    flushMaskedPath3Packets(false);
+    if (m_gifArbiter)
+        m_gifArbiter->drain();
+    if (m_gifMarkCallback)
+        m_gifMarkCallback(key);
+}
+
+void PS2Memory::submitPath3Chain(const std::vector<uint8_t> &chainData, const std::vector<DmaMarker> &markers, uint32_t from, uint32_t size,
+                                 bool queued)
+{
+    const auto send = [&](uint32_t begin, uint32_t end)
+    {
+        if (end <= begin)
+            return;
+        if (!queued)
+        {
+            submitGifPacket(GifPathId::Path3, chainData.data() + begin, end - begin, false, false, true);
+            return;
+        }
+        Vif1Job job;
+        job.kind = Vif1Job::Kind::Path3;
+        job.data.assign(chainData.begin() + begin, chainData.begin() + end);
+        queueVif1Job(std::move(job));
+    };
+    uint32_t at = from;
+    for (const DmaMarker &marker : markers)
+    {
+        if (marker.offset < at || marker.offset > size)
+            continue;
+        send(at, marker.offset);
+        at = marker.offset;
+        if (!queued)
+        {
+            submitGifMarker(marker.key);
+            continue;
+        }
+        Vif1Job job;
+        job.kind = Vif1Job::Kind::Callback;
+        const uint64_t key = marker.key;
+        job.callback = [this, key]() { submitGifMarker(key); };
+        queueVif1Job(std::move(job));
+    }
+    send(at, size);
 }
 
 void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately, bool path2DirectHl,

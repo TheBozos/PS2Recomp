@@ -77,6 +77,17 @@ namespace ps2x::native
     inline void setGsDrawHook(GsDrawHook hook) { g_gsDrawHook.store(hook, std::memory_order_release); }
     inline GsDrawHook gsDrawHook() { return g_gsDrawHook.load(std::memory_order_acquire); }
 
+    // A port that draws part of a frame from the game's own variables at its builders while the rest of the frame still
+    // reaches the GS front end on PATH3 leaves a DMA tag in the game's GIF chain where those draws belong: a CNT with
+    // QWC 0, its upper 64 bits (unused by the GIF channel) a value the port recognises. Asked as the GIF chain is read,
+    // with those 64 bits: the key of the port's draws there (Renderer::drawGsKeyed), or 0 for a tag that is not the
+    // port's. At that point of the PATH3 stream the GS front end draws the key's batches (GS::queueKeyedDraw).
+    using GifChainMarkGate = uint64_t (*)(uint64_t tagUpper);
+
+    inline std::atomic<GifChainMarkGate> g_gifChainMarkGate{nullptr};
+    inline void setGifChainMarkGate(GifChainMarkGate gate) { g_gifChainMarkGate.store(gate, std::memory_order_release); }
+    inline GifChainMarkGate gifChainMarkGate() { return g_gifChainMarkGate.load(std::memory_order_acquire); }
+
     // A port whose native renderer draws and presents everything: the GS front end draws nothing. What the game sends
     // it only raises the events the CPU waits on (SIGNAL, FINISH, LABEL, at the time the GS would have reached them);
     // nothing is queued, drawn, uploaded or presented.
