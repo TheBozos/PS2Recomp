@@ -86,6 +86,9 @@ void main()
         constexpr int kGlFuncAdd = 0x8006;
     }
 
+    // native_renderer_gs.cpp (raw GL): glDepthFunc(GL_LEQUAL), which rlgl does not expose (its default is GL_LESS).
+    void glDepthFuncLequal();
+
     struct Renderer::Gpu
     {
         unsigned int shader = 0;
@@ -639,6 +642,15 @@ void main()
                 rlEnableDepthMask();
             else
                 rlDisableDepthMask();
+            // The GS's depth test is GEQUAL (larger nearer): here LEQUAL on 1 - z, so what lies at the far end (a sky at
+            // Z 0, a clear) passes against the cleared depth as on the GS; a draw without ZTE is not tested.
+            if (m.depthTest)
+            {
+                rlEnableDepthTest();
+                glDepthFuncLequal();
+            }
+            else
+                rlDisableDepthTest();
             rlEnableShader(gpu.shader);
             rlEnableVertexArray(gpu.vao);
             rlSetUniform(gpu.locScreen, screenRect, RL_SHADER_UNIFORM_VEC4, 1);

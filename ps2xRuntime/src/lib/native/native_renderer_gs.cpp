@@ -213,6 +213,11 @@ void main()
         }
     };
 
+    void glDepthFuncLequal()
+    {
+        glDepthFunc(GL_LEQUAL);
+    }
+
     bool readFramebufferDepth(int width, int height, std::vector<float> &out)
     {
         // Asynchronous: this frame's depth goes into one pixel buffer while the other, read the frame before, is
