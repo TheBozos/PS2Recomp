@@ -323,6 +323,7 @@ namespace ps2x::iop::detail
             // absent (no sound RAM, never scheduled, its registers and DMA channels counted and ignored).
             if (ps2x::audio::nativeLibsd())
             {
+                nativeAudio = true;
                 spu2.setAbsent();
                 host.setAudioSource([](int16_t *frames, size_t count) { ps2x::audio::NativeMixer::instance().render(frames, count); });
             }
@@ -895,6 +896,20 @@ namespace ps2x::iop::detail
             const char *value = std::getenv("PS2X_IOP_NATIVE");
             return value && *value == '1';
         }
+        // The sound's clock: the SPU2's events, or the native mixer's (native audio), mixed on the IOP's time.
+        bool nativeAudio = false;
+        uint64_t nextSoundEvent() const noexcept
+        {
+            return nativeAudio ? ps2x::audio::NativeMixer::instance().nextEventCycle() : spu2.nextEventCycle();
+        }
+        void advanceSound()
+        {
+            if (nativeAudio)
+                ps2x::audio::NativeMixer::instance().advance(totalCycles);
+            else
+                spu2.advanceTo(totalCycles);
+        }
+
         std::unordered_map<uint32_t, native::Function> nativeEntries;
         std::vector<uint64_t> nativeBits = std::vector<uint64_t>(kRamSize / 4u / 64u, 0u);
         uint64_t sliceEnd = ~0ull; // runCpu's: native code stops at its loop heads once there
@@ -1231,8 +1246,8 @@ namespace ps2x::iop::detail
                     profileSample(cpu.pc);
                 if (!step(cpu))
                     break;
-                if (totalCycles >= spu2.nextEventCycle())
-                    spu2.advanceTo(totalCycles);
+                if (totalCycles >= nextSoundEvent())
+                    advanceSound();
                 if (memory.interruptControl() == 0u)
                     continue;
                 if (!servicingDmaInterrupts && !pendingDmaInterrupts.empty())
@@ -1375,7 +1390,7 @@ namespace ps2x::iop::detail
             uint64_t nextDelayWake = UINT64_MAX;
             if (!next)
             {
-                spu2.advanceTo(totalCycles);
+                advanceSound();
                 servicePendingDmaInterrupts();
                 servicePendingSifCommands();
                 takeInterruptCalls();
@@ -1393,7 +1408,7 @@ namespace ps2x::iop::detail
                     nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
                 nextWake = timrman.nextEventCycle(nextWake);
                 nextWake = vblank.nextEventCycle(nextWake);
-                nextWake = std::min(nextWake, spu2.nextEventCycle());
+                nextWake = std::min(nextWake, nextSoundEvent());
                 // Only so far: the polling thread may be waiting for time alone.
                 totalCycles = std::max(totalCycles + 1u, std::min(nextWake, totalCycles + kDefaultSlice));
                 return;
@@ -1443,7 +1458,7 @@ namespace ps2x::iop::detail
                 uint64_t nextDelayWake = UINT64_MAX;
                 if (!next)
                 {
-                    spu2.advanceTo(totalCycles);
+                    advanceSound();
                     servicePendingDmaInterrupts();
                     servicePendingSifCommands();
                     servicePendingGuestCallbacks();
@@ -1462,7 +1477,7 @@ namespace ps2x::iop::detail
                         nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
                     nextWake = timrman.nextEventCycle(nextWake);
                     nextWake = vblank.nextEventCycle(nextWake);
-                    nextWake = std::min(nextWake, spu2.nextEventCycle());
+                    nextWake = std::min(nextWake, nextSoundEvent());
                     totalCycles = std::max(totalCycles + 1u, nextWake);
                     continue;
                 }
@@ -1865,7 +1880,7 @@ namespace ps2x::iop::detail
                     uint64_t nextDelayWake = UINT64_MAX;
                     if (!next)
                     {
-                        spu2.advanceTo(totalCycles);
+                        advanceSound();
                         servicePendingDmaInterrupts();
                         servicePendingSifCommands();
                         servicePendingGuestCallbacks();
@@ -1882,7 +1897,7 @@ namespace ps2x::iop::detail
                             nextWake = std::min(nextWake, pendingGuestCallbacks.begin()->first);
                         nextWake = timrman.nextEventCycle(nextWake);
                         nextWake = vblank.nextEventCycle(nextWake);
-                        nextWake = std::min(nextWake, spu2.nextEventCycle());
+                        nextWake = std::min(nextWake, nextSoundEvent());
                         totalCycles = std::max(totalCycles + 1u, std::min(target, nextWake));
                         continue;
                     }
