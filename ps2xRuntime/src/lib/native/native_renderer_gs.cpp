@@ -489,7 +489,9 @@ void main()
         glScissor(static_cast<GLint>(x0 * scale), static_cast<GLint>(y0 * scale),
                   static_cast<GLsizei>((x1 > x0 ? x1 - x0 : 0u) * scale), static_cast<GLsizei>((y1 > y0 ? y1 - y0 : 0u) * scale));
         glDisable(GL_CULL_FACE);
-        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        // FRAME.FBMSK: the alpha byte masked keeps the target's alpha (a game's display reads it: what a menu draws over a
+        // movie picture leaves the picture's); the colour bytes are not masked in practice.
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, (target.fbmsk >> 24) == 0xffu ? GL_FALSE : GL_TRUE);
         glUseProgram(pass.program);
         glBindVertexArray(pass.vao);
         glBindBuffer(GL_ARRAY_BUFFER, pass.vbo);
@@ -686,6 +688,7 @@ void main()
         glBindVertexArray(0);
         glUseProgram(0);
         glDepthMask(GL_TRUE);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDisable(GL_SCISSOR_TEST);
         glDisable(GL_BLEND);
     }

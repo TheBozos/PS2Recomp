@@ -30,6 +30,7 @@ namespace ps2x::native
         uint64_t tex0 = 0, texa = 0, alpha = 0, test = 0, clamp = 0;
         uint32_t fogcol = 0;
         bool zmask = false;
+        uint32_t fbmsk = 0; // FRAME's write mask (bits kept): a draw whose alpha byte is masked leaves the target's alpha
     };
 
     using GsDrawHook = void (*)(uint64_t group, const GsDrawTarget &target);

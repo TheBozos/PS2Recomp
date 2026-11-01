@@ -54,6 +54,7 @@ public:
         target.clamp = context.clamp;
         target.fogcol = context.fogcol;
         target.zmask = context.zbuf.zmask;
+        target.fbmsk = context.frame.fbmsk;
     }
 
     virtual void NativeDraw(uint64_t group, const GSContext &context)
