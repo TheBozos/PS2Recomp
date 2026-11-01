@@ -87,6 +87,7 @@ void main()
         constexpr int kGlSrcAlpha = 0x0302;
         constexpr int kGlOneMinusSrcAlpha = 0x0303;
         constexpr int kGlOne = 1;
+        constexpr int kGlZero = 0;
         constexpr int kGlFuncAdd = 0x8006;
     }
 
@@ -183,6 +184,8 @@ void main()
             return Material::Blend::Opaque;
         if (a == 0u && b == 2u && d == 1u)
             return c == 1u ? Material::Blend::AdditiveByDestination : Material::Blend::Additive;
+        if (a == 1u && b == 2u && c == 0u && d == 0u)
+            return Material::Blend::DestinationBySource;
         return Material::Blend::Alpha;
     }
 
@@ -660,6 +663,13 @@ void main()
             // array (even with nothing to draw), so they are bound after it.
             if (m.blend == Material::Blend::Opaque)
                 rlDisableColorBlend();
+            else if (m.blend == Material::Blend::DestinationBySource)
+            {
+                // Cd * As + Cs; the alpha written is the source's, as the GS writes it.
+                rlEnableColorBlend();
+                rlSetBlendFactorsSeparate(kGlOne, kGlSrcAlpha, kGlOne, kGlZero, kGlFuncAdd, kGlFuncAdd);
+                rlSetBlendMode(RL_BLEND_CUSTOM_SEPARATE);
+            }
             else
             {
                 rlEnableColorBlend();
