@@ -1,3 +1,4 @@
+#include "ps2_app.h"
 #include "ps2_debug_panel.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -2194,6 +2195,13 @@ void PS2DebugPanel::initialize()
     {
         rlImGuiSetup(true);
         m_initialized = true;
+        // The window layout in the per-user folder of a port that has one (ps2_app.h), not the working directory.
+        if (!ps2x::app::userDirectory().empty())
+        {
+            static const std::string s_iniPath = (ps2x::app::userDirectory() / "imgui.ini").string();
+            ImGui::GetIO().IniFilename = s_iniPath.c_str();
+            ImGui::LoadIniSettingsFromDisk(s_iniPath.c_str());
+        }
         if (const char *visible = std::getenv("PS2X_DEBUG_UI"); visible && std::strcmp(visible, "0") == 0)
         {
             m_visible = false;

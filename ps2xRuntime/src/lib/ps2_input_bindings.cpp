@@ -1,6 +1,7 @@
 #include "runtime/ps2_input_bindings.h"
 
 #include "ps2_runtime.h"
+#include "ps2_app.h"
 #include "raylib.h"
 
 #include <algorithm>
@@ -302,7 +303,9 @@ namespace ps2_input
     {
         if (const char *path = std::getenv("PS2X_INPUT_CONFIG"); path && *path)
             return path;
-        const std::filesystem::path dir = PS2Runtime::getIoPaths().elfDirectory;
+        // The per-user folder of a port that has one (ps2_app.h), else the ELF's.
+        const std::filesystem::path dir =
+            ps2x::app::userDirectory().empty() ? PS2Runtime::getIoPaths().elfDirectory : ps2x::app::userDirectory();
         return (dir.empty() ? std::filesystem::path("input.ini") : dir / "input.ini").string();
     }
 
