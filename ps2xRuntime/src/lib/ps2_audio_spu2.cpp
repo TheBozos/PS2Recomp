@@ -1,7 +1,10 @@
 // SPU2 output: the IOP emulator mixes 48 kHz stereo in emulated time; a raylib stream plays it in
 // real time. A time stretcher sits between the two, so that an emulation running slower or faster
 // than real time slows down or speeds up the sound (same pitch) instead of cutting it.
-// PS2X_SPU2_WAV=<path> also records the output to a WAV file. PS2X_SPU2_STATS=1 prints, every second, the frames
+// PS2X_AUDIO_RECORD=<path> (or PS2X_SPU2_WAV=<path>) also records the output to a WAV file, whichever mixes it (the
+// emulated SPU2 or the native mixer of native audio): what the device plays when the sound is pulled on the wall clock,
+// what the emulation produced otherwise. Its header is brought up to date every second of sound, so a run that is
+// killed leaves a readable file. PS2X_SPU2_STATS=1 prints, every second, the frames
 // the emulation produced and the device took, the stretcher's buffer fill and rate, underruns and dropped frames.
 
 #include "runtime/ps2_audio.h"
@@ -84,10 +87,22 @@ struct PS2AudioBackend::Spu2Stream
             pushedFrames += count;
             reportStats();
         }
-        if (wav.is_open())
+        record(frames, count);
+    }
+
+    void record(const int16_t *frames, size_t count)
+    {
+        if (!wav.is_open())
+            return;
+        wav.write(reinterpret_cast<const char *>(frames), static_cast<std::streamsize>(count * 4u));
+        const uint32_t before = wavBytes;
+        wavBytes += static_cast<uint32_t>(count * 4u);
+        if (before / (kSampleRate * 4u) != wavBytes / (kSampleRate * 4u))
         {
-            wav.write(reinterpret_cast<const char *>(frames), static_cast<std::streamsize>(count * 4u));
-            wavBytes += static_cast<uint32_t>(count * 4u);
+            wav.seekp(0);
+            writeWavHeader(wav, wavBytes);
+            wav.seekp(0, std::ios::end);
+            wav.flush();
         }
     }
 
@@ -97,11 +112,7 @@ struct PS2AudioBackend::Spu2Stream
         if (source)
         {
             source(out, frames);
-            if (wav.is_open())
-            {
-                wav.write(reinterpret_cast<const char *>(out), static_cast<std::streamsize>(frames * 4u));
-                wavBytes += static_cast<uint32_t>(frames * 4u);
-            }
+            record(out, frames);
         }
         else
             stretcher.pull(out, frames);
@@ -138,14 +149,17 @@ void PS2AudioBackend::Spu2StreamDeleter::operator()(Spu2Stream *stream) const
     delete stream;
 }
 
-// The SPU2's stream (and PS2X_SPU2_WAV) the first time it is needed, and its playback once the audio device is
+// The SPU2's stream (and PS2X_AUDIO_RECORD / PS2X_SPU2_WAV) the first time it is needed, and its playback once the audio device is
 // ready (the SPU2 on the wall clock asks for it as the IOP starts, before the window opens the device).
 void PS2AudioBackend::openSpu2Stream()
 {
     if (!m_spu2)
     {
         m_spu2.reset(new Spu2Stream());
-        if (const char *path = std::getenv("PS2X_SPU2_WAV"); path && *path)
+        const char *path = std::getenv("PS2X_AUDIO_RECORD");
+        if (!(path && *path))
+            path = std::getenv("PS2X_SPU2_WAV");
+        if (path && *path)
         {
             m_spu2->wav.open(path, std::ios::binary | std::ios::trunc);
             if (m_spu2->wav.is_open())
