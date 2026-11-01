@@ -48,10 +48,6 @@ void main()
     float gz = c.z / c.w * uGsZScale;
     gz -= 16777216.0 * floor(gz / 16777216.0);
     gl_Position = vec4(ndc * c.w, (2.0 * gz * uTargetZScale - 1.0) * c.w, c.w);
-    // Clipped in front of the eye (w > 0), as the games' microprograms clip: with GL_DEPTH_CLAMP the near plane no
-    // longer clips, and a triangle with a corner behind the camera (a large ground polygon seen from above) would be
-    // rasterized from its projection through w <= 0: lost, or smeared across the screen.
-    gl_ClipDistance[0] = c.w - 1.0e-4;
     vUv = aUv * uUvScale;
     vCol = aCol;
     vFog = aFog;
@@ -684,7 +680,6 @@ void main()
                 glDisable(GL_DEPTH_TEST);
             glDepthMask(m.depthWrite ? GL_TRUE : GL_FALSE);
             glEnable(GL_DEPTH_CLAMP); // depth beyond the target's range clamped, not clipped (see the vertex shader)
-            glEnable(GL_CLIP_DISTANCE0); // w > 0 instead (the vertex shader)
             glDrawArrays(GL_TRIANGLES, first, count);
             if (m.blend == Material::Blend::AdditiveByDestination) // DST_ALPHA is Ad / 255, half the GS's Ad / 128
             {
@@ -694,7 +689,6 @@ void main()
             first += count;
         }
         glDisable(GL_DEPTH_CLAMP);
-        glDisable(GL_CLIP_DISTANCE0);
         glBindSampler(0, static_cast<GLuint>(sampler));
         glBindVertexArray(0);
         glUseProgram(0);
