@@ -1475,13 +1475,11 @@ void register_code_generator_tests()
 
         tc.Run("VU0 macro mappings cover all S1/S2 enums", [](TestCase &t) {
             const std::vector<std::string> candidates = {
-                "ps2xRecomp/include/ps2recomp/instructions.h",
-                "../ps2xRecomp/include/ps2recomp/instructions.h",
-                "../../ps2xRecomp/include/ps2recomp/instructions.h"
+                std::string(PS2X_SOURCE_DIR) + "/ps2xRecomp/include/ps2recomp/instructions.h"
             };
 
             std::string text = readFileFromCandidates(candidates);
-            t.IsTrue(!text.empty(), "instructions.h should be readable from the test working directory");
+            t.IsTrue(!text.empty(), "instructions.h should be readable from the source tree");
 
             std::vector<uint32_t> s1 = parseEnumValues(text, "VU0_S1_");
             std::vector<uint32_t> s2 = parseEnumValues(text, "VU0_S2_");

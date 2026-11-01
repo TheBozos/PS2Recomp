@@ -58,6 +58,8 @@ target_include_directories(ps2_test_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib
 )
 
+target_compile_definitions(ps2_test_lib PRIVATE PS2X_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
+
 target_link_libraries(ps2_test_lib PRIVATE
     ps2_recomp_lib
     ps2_analyzer_lib
