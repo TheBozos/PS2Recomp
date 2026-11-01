@@ -123,7 +123,11 @@ namespace ps2x::native
     void MeshSubmitter::submit(const MeshDraw &drawn)
     {
         Renderer &renderer = Renderer::instance();
-        renderer.setKey(drawn.screenSpace ? 0u : drawn.key); // screen space: not interpolated
+        renderer.setKey(drawn.screenSpace ? 0u : drawn.key, drawn.keyBase); // screen space: by triangle (drawTracked) instead
+        if (!drawn.screenSpace && drawn.hasParts)
+            renderer.setParts(drawn.partCamera, drawn.partObject);
+        const bool tracked = drawn.screenSpace && drawn.key != 0u && renderer.interpolating();
+        uint64_t batchIndex = 0;
         static const float kScreenSpace[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         if (drawn.hasContext)
             gs.apply(drawn.context);
@@ -220,6 +224,18 @@ namespace ps2x::native
                              static_cast<unsigned long long>(gs.alpha), static_cast<unsigned long long>(gs.test), material.alphaTest, material.alphaRef,
                              material.depthWrite, batch.textured, batch.texture != nullptr, static_cast<unsigned long long>(batch.tex0), aMin, aMax,
                              batch.fogged);
+            }
+            if (tracked)
+            {
+                // A keyed sprite's or ribbon's triangles, each by its place in the object (the same next frame).
+                static thread_local std::vector<uint64_t> s_ids;
+                s_ids.resize(vertices->size() / 3u);
+                const uint64_t seed = (drawn.key ^ (++batchIndex * 0x9e3779b97f4a7c15ull)) * 0xff51afd7ed558ccdull;
+                for (size_t t = 0; t < s_ids.size(); ++t)
+                    s_ids[t] = (seed + t * 2u) | 1u;
+                renderer.drawTracked(material, vertices->data(), static_cast<uint32_t>(vertices->size()),
+                                     material.textured ? batch.texture : nullptr, s_ids.data());
+                continue;
             }
             renderer.draw(material, drawn.screenSpace ? kScreenSpace : drawn.matrix, vertices->data(), static_cast<uint32_t>(vertices->size()),
                           material.textured ? batch.texture : nullptr);

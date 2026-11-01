@@ -3871,25 +3871,62 @@ void PS2Runtime::run()
         // A game on native frame pacing sets the rate: the window follows its frame cap (0 = unlimited).
         {
             static int s_targetFps = 60;
-            // PS2X_PRESENT_FPS=<n>: the window's rate otherwise (0 = unlimited), e.g. above the game's with
-            // PS2X_NATIVE_INTERPOLATE=1.
+            // PS2X_PRESENT_FPS=<n>: the window's rate otherwise (0 = unlimited), for a game without native frames.
             static const int s_presentFps = []
             {
                 const char *value = std::getenv("PS2X_PRESENT_FPS");
                 return value && *value ? std::atoi(value) : 60;
             }();
+            // The Video tab's frame rate above the game's (Renderer::setFrameRate; video.ini frame_rate,
+            // PS2X_FRAME_RATE): the window runs on its own clock, at the monitor's refresh with vsync (-1) or at a set
+            // rate without (n), and the native renderer draws each present between the game's last two frames.
+            ps2x::native::Renderer &nativeRenderer = ps2x::native::Renderer::instance();
+            const int frameRate = nativeRenderer.frameRate();
+            const bool interpolate = nativeRenderer.interpolating() && m_eeScheduler && m_eeScheduler->nativeFrames();
             // No GS front end and native frames: the window shows each frame (or movie picture) the game publishes
             // once, when it is published, with no timer of its own (two 60 Hz clocks drift and a frame shows twice
             // every few seconds: a stutter; DC_Recomp's fcb3ebe). 100 ms at most, so the window stays responsive while
             // nothing is published (a load). Not with interpolation (the window then runs faster than the game).
-            static const bool s_interpolate = []
+            const bool followFrames = ps2x::native::gsFrontEndAbsent() && !interpolate && m_eeScheduler &&
+                                      m_eeScheduler->nativeFrames() && nativeRenderer.enabled();
+            // Vsync only for the monitor's rate (the default never waits on it: it follows the game's frames). Should
+            // the driver not honour it (presents well above the monitor's refresh), the window's own timer at that
+            // refresh takes over.
+            static bool s_vsync = false;
+            static int s_vsyncFallback = 0;
+            static double s_vsyncSince = 0.0;
+            static uint64_t s_vsyncPresents = 0;
+            const bool wantVsync = interpolate && frameRate < 0;
+            if (wantVsync != s_vsync)
             {
-                const char *value = std::getenv("PS2X_NATIVE_INTERPOLATE");
-                return value && *value == '1';
-            }();
-            const bool followFrames = ps2x::native::gsFrontEndAbsent() && !s_interpolate && m_eeScheduler &&
-                                      m_eeScheduler->nativeFrames() && ps2x::native::Renderer::instance().enabled();
+                if (wantVsync)
+                    SetWindowState(FLAG_VSYNC_HINT);
+                else
+                    ClearWindowState(FLAG_VSYNC_HINT);
+                s_vsync = wantVsync;
+                s_vsyncFallback = 0;
+                s_vsyncSince = GetTime();
+                s_vsyncPresents = 0;
+            }
+            if (wantVsync && s_vsyncFallback == 0)
+            {
+                ++s_vsyncPresents;
+                const double span = GetTime() - s_vsyncSince;
+                const int refresh = GetMonitorRefreshRate(GetCurrentMonitor());
+                if (span >= 2.0)
+                {
+                    if (refresh > 0 && s_vsyncPresents / span > refresh * 1.5)
+                    {
+                        s_vsyncFallback = refresh;
+                        std::fprintf(stderr, "[present] vsync not honoured (%.0f presents/s on a %d Hz monitor): the window's timer at %d\n",
+                                     s_vsyncPresents / span, refresh, refresh);
+                    }
+                    s_vsyncSince = GetTime();
+                    s_vsyncPresents = 0;
+                }
+            }
             const int targetFps = followFrames                                     ? 0
+                                  : interpolate                                    ? (frameRate > 0 ? frameRate : s_vsyncFallback)
                                   : m_eeScheduler && m_eeScheduler->nativeFrames() ? static_cast<int>(m_framePacer.cap())
                                                                                    : s_presentFps;
             if (targetFps != s_targetFps)
@@ -3982,6 +4019,62 @@ void PS2Runtime::run()
         rlDrawRenderBatchActive();
         if (m_gs)
             ps2x::native::Renderer::instance().setGsFrame(shownTex.id, shownTex.width, shownTex.height, shownTex.format);
+        // PS2X_CAPTURE_SEQUENCE=<n>: n consecutive presents of the window as seq<k>_<i>.png (in PS2X_CAPTURE_WINDOW_DIR, or
+        // PS2X_CAPTURE_SEQUENCE_DIR), with seq<k>.txt (each one's time, the game frames it was drawn between and how far),
+        // at PS2X_CAPTURE_SEQUENCE_AT=<seconds>[,<seconds>...] from the first present and on F8; kept in memory until the n
+        // are taken, so writing them does not hold the presents being taken. The native renderer logs the moving
+        // objects' origins over the same presents ([interp-trace]): motion between frames, interpolated or not.
+        struct SequenceShot
+        {
+            Image image;
+            ps2x::native::Renderer::PresentInfo info;
+        };
+        static std::vector<SequenceShot> s_sequence;
+        static int s_sequenceLeft = 0, s_sequenceCount = 0;
+        static const int s_sequenceLength = []
+        {
+            const char *value = std::getenv("PS2X_CAPTURE_SEQUENCE");
+            return value && *value ? std::clamp(std::atoi(value), 1, 600) : 0;
+        }();
+        static const char *s_sequenceDir = []
+        {
+            const char *dir = std::getenv("PS2X_CAPTURE_SEQUENCE_DIR");
+            return dir && *dir ? dir : std::getenv("PS2X_CAPTURE_WINDOW_DIR");
+        }();
+        if (s_sequenceLength > 0 && s_sequenceDir && *s_sequenceDir && s_sequenceLeft == 0)
+        {
+            static std::vector<double> s_sequenceAt = []
+            {
+                std::vector<double> at;
+                const char *value = std::getenv("PS2X_CAPTURE_SEQUENCE_AT");
+                for (const char *p = value; p && *p;)
+                {
+                    char *end = nullptr;
+                    const double seconds = std::strtod(p, &end);
+                    if (end == p)
+                        break;
+                    at.push_back(seconds);
+                    p = *end == ',' ? end + 1 : end;
+                }
+                std::sort(at.begin(), at.end(), std::greater<double>());
+                return at;
+            }();
+            static const double s_sequenceStart = GetTime();
+            bool start = IsKeyPressed(KEY_F8);
+            while (!s_sequenceAt.empty() && GetTime() - s_sequenceStart >= s_sequenceAt.back())
+            {
+                s_sequenceAt.pop_back();
+                start = true;
+            }
+            if (start)
+            {
+                s_sequenceLeft = s_sequenceLength;
+                ++s_sequenceCount;
+                ps2x::native::Renderer::instance().tracePresents(s_sequenceLength);
+                std::fprintf(stderr, "[run] capture sequence %d: %d presents from %.2f s\n", s_sequenceCount, s_sequenceLength,
+                             GetTime() - s_sequenceStart);
+            }
+        }
         ps2x::native::Renderer::instance().present(dstRect.x, dstRect.y, dstRect.width, dstRect.height);
         // The frames shown: the GS front end's display flips, or (none) the frames the game ended (native display).
         DrawFpsOverlay(gameFrames(), m_gs ? gsForPresentation().displayFlips() : ps2x::native::displayFrames(),
@@ -3993,6 +4086,37 @@ void PS2Runtime::run()
         // PS2X_CAPTURE_WINDOW_DIR=<folder>: the window as shown (whatever the GS renderer, native 3D included) as
         // window_<tenths of seconds>.png every PS2X_CAPTURE_INTERVAL seconds (default 5), from PS2X_CAPTURE_START seconds
         // on (default: the first interval); under a tenth of a second apart, window_<milliseconds>.png (a flicker's frames).
+        if (s_sequenceLeft > 0)
+        {
+            rlDrawRenderBatchActive();
+            s_sequence.push_back({LoadImageFromScreen(), ps2x::native::Renderer::instance().lastPresent()});
+            if (--s_sequenceLeft == 0)
+            {
+                const std::string base = std::string(s_sequenceDir) + "/seq" + std::to_string(s_sequenceCount);
+                if (FILE *list = std::fopen((base + ".txt").c_str(), "w"))
+                {
+                    std::fprintf(list, "# image  present time (s)  delta (ms)  from frame  to frame  alpha  interpolated / keyed batches\n");
+                    for (size_t i = 0; i < s_sequence.size(); ++i)
+                    {
+                        const auto &info = s_sequence[i].info;
+                        std::fprintf(list, "%zu %.4f %.2f %llu %llu %.3f %u/%u\n", i, info.time,
+                                     i ? (info.time - s_sequence[i - 1].info.time) * 1000.0 : 0.0, static_cast<unsigned long long>(info.from),
+                                     static_cast<unsigned long long>(info.to), info.alpha, info.interpolatedBatches, info.keyedBatches);
+                    }
+                    std::fclose(list);
+                }
+                for (size_t i = 0; i < s_sequence.size(); ++i)
+                {
+                    char suffix[32];
+                    std::snprintf(suffix, sizeof(suffix), "_%03zu.png", i);
+                    ExportImage(s_sequence[i].image, (base + suffix).c_str());
+                    UnloadImage(s_sequence[i].image);
+                }
+                std::fprintf(stderr, "[run] capture sequence %d written: %zu presents (%s_*.png)\n", s_sequenceCount, s_sequence.size(),
+                             base.c_str());
+                s_sequence.clear();
+            }
+        }
         static const char *s_windowCaptureDir = std::getenv("PS2X_CAPTURE_WINDOW_DIR");
         if (s_windowCaptureDir && *s_windowCaptureDir)
         {

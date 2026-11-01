@@ -58,6 +58,10 @@ namespace ps2_video
 
         void sanitize(Settings &settings)
         {
+            if (settings.frameRate > 0)
+                settings.frameRate = std::clamp(settings.frameRate, 30, 1000);
+            else if (settings.frameRate < 0)
+                settings.frameRate = -1;
             settings.renderScale = std::clamp(settings.renderScale, 0.25f, 4.0f);
             settings.gsScale = std::clamp(settings.gsScale, 1, 4);
         }
@@ -83,6 +87,8 @@ namespace ps2_video
                     settings.renderScale = static_cast<float>(std::atof(value.c_str()));
                 else if (name == "gs_scale")
                     settings.gsScale = std::atoi(value.c_str());
+                else if (name == "frame_rate")
+                    parseFrameRate(value.c_str(), settings.frameRate);
             }
         }
 
@@ -139,6 +145,25 @@ namespace ps2_video
         }
     }
 
+    bool parseFrameRate(const char *text, int &rate)
+    {
+        const std::string_view value(text);
+        if (value == "game" || value == "60" || value == "0")
+            rate = 0;
+        else if (value == "monitor")
+            rate = -1;
+        else if (const int n = std::atoi(text); n > 0)
+            rate = n;
+        else
+            return false;
+        return true;
+    }
+
+    std::string frameRateName(int rate)
+    {
+        return rate == 0 ? "game" : rate < 0 ? "monitor" : std::to_string(rate);
+    }
+
     const char *modeName(WindowMode mode)
     {
         switch (mode)
@@ -177,6 +202,14 @@ namespace ps2_video
             settings.renderScale = static_cast<float>(std::atof(scale));
         if (const char *scale = std::getenv("PS2X_GS_SCALE"); scale && *scale)
             settings.gsScale = std::atoi(scale);
+        // PS2X_NATIVE_INTERPOLATE=1 (the older switch): the monitor's rate, or PS2X_PRESENT_FPS's.
+        if (const char *old = std::getenv("PS2X_NATIVE_INTERPOLATE"); old && *old == '1')
+        {
+            const char *fps = std::getenv("PS2X_PRESENT_FPS");
+            settings.frameRate = fps && std::atoi(fps) > 0 ? std::atoi(fps) : -1;
+        }
+        if (const char *rate = std::getenv("PS2X_FRAME_RATE"); rate && *rate)
+            parseFrameRate(rate, settings.frameRate);
         sanitize(settings);
         // The GS back end reads its scale from the environment when it starts.
         if (settings.gsScale != 1 && !std::getenv("PS2X_GS_SCALE"))
@@ -199,9 +232,11 @@ namespace ps2_video
         if (target.mode != WindowMode::Windowed)
             applyWindow(g_current, target);
         ps2x::native::Renderer::instance().setRenderScale(target.renderScale);
+        ps2x::native::Renderer::instance().setFrameRate(target.frameRate);
         g_current = target;
-        std::fprintf(stderr, "[video] %dx%d %s, render scale %.2f, GS scale %d (%s)\n", g_current.width, g_current.height,
-                     modeName(g_current.mode), g_current.renderScale, g_current.gsScale, configPath().c_str());
+        std::fprintf(stderr, "[video] %dx%d %s, render scale %.2f, GS scale %d, frame rate %s (%s)\n", g_current.width, g_current.height,
+                     modeName(g_current.mode), g_current.renderScale, g_current.gsScale, frameRateName(g_current.frameRate).c_str(),
+                     configPath().c_str());
     }
 
     void frameUpdate()
@@ -278,9 +313,11 @@ namespace ps2_video
         if (g_edited.mode != g_current.mode || g_edited.width != g_current.width || g_edited.height != g_current.height)
             applyWindow(g_current, g_edited);
         ps2x::native::Renderer::instance().setRenderScale(g_edited.renderScale);
+        ps2x::native::Renderer::instance().setFrameRate(g_edited.frameRate);
         g_current = g_edited;
-        std::fprintf(stderr, "[video] applied %dx%d %s, render scale %.2f (window %dx%d)\n", g_current.width, g_current.height,
-                     modeName(g_current.mode), g_current.renderScale, GetScreenWidth(), GetScreenHeight());
+        std::fprintf(stderr, "[video] applied %dx%d %s, render scale %.2f, frame rate %s (window %dx%d)\n", g_current.width, g_current.height,
+                     modeName(g_current.mode), g_current.renderScale, frameRateName(g_current.frameRate).c_str(), GetScreenWidth(),
+                     GetScreenHeight());
     }
 
     bool save()
@@ -292,15 +329,18 @@ namespace ps2_video
         char scale[32];
         std::snprintf(scale, sizeof(scale), "%g", s.renderScale);
         file << "# The window (the Video tab of the settings window, F2, writes this file; PS2X_WINDOW_SIZE, PS2X_WINDOW_MODE,\n"
-                "# PS2X_RENDER_SCALE and PS2X_GS_SCALE override it). size: the window's, or the full-screen video mode's.\n"
-                "# mode: windowed, fullscreen (exclusive) or borderless (the monitor's size). render_scale: the 3D drawn at\n"
+                "# PS2X_RENDER_SCALE, PS2X_GS_SCALE and PS2X_FRAME_RATE override it). size: the window's, or the full-screen video\n"
+                "# mode's. mode: windowed, fullscreen (exclusive) or borderless (the monitor's size). render_scale: the 3D drawn at\n"
                 "# that many times the window's size each way (0.25 to 4). gs_scale: the GS renderer's internal scale (1 to 4,\n"
-                "# read at launch).\n"
+                "# read at launch). frame_rate: game (60, each game frame shown once), monitor (the monitor's refresh with vsync,\n"
+                "# the frames between the game's drawn interpolated, one game frame later) or a number (that many a second,\n"
+                "# interpolated, without vsync).\n"
                 "\n[video]\n"
              << "size = " << s.width << "x" << s.height << "\n"
              << "mode = " << modeName(s.mode) << "\n"
              << "render_scale = " << scale << "\n"
-             << "gs_scale = " << s.gsScale << "\n";
+             << "gs_scale = " << s.gsScale << "\n"
+             << "frame_rate = " << frameRateName(s.frameRate) << "\n";
         return static_cast<bool>(file);
     }
 

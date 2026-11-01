@@ -164,11 +164,54 @@ namespace ps2x::native
         // Returns whether batches up to `group` are left for the hook (GsDrawHook): none, and the GS front end needs
         // no target for this marker.
         bool takeGsContextBatches(uint64_t group, StreamVisitor visit, void *user);
-        // Frames faster than the game's (PS2X_NATIVE_INTERPOLATE=1): the native port keys each object's batches by
-        // something stable from one game frame to the next (its own data, not its place in the stream); present()
-        // then draws a key found in the previous frame too with its matrix between the two, by how far the window's
-        // time is into the current game frame (one game frame behind, as interpolation is). 0: not interpolated.
-        void setKey(uint64_t key) { m_key = key; }
+        // Frames faster than the game's (setFrameRate other than 0): the native port keys each object's batches by
+        // something stable from one game frame to the next (its own data and instance, not its place in the stream);
+        // present() then draws an object found in the previous frame too with its matrix between the two, by where
+        // the window's clock is between the two frames' times (one game frame behind, as interpolation is). 0: not
+        // interpolated (drawn as the latest frame has it). base: what the object is without telling alike ones apart
+        // (the key less its count among them, e.g. the same scenery model placed several times): such objects are
+        // matched to the nearest of the previous frame's alike ones rather than by their count, which changes when
+        // one of them is culled; 0: the key alone. setKey also ends the parts setParts gave.
+        void setKey(uint64_t key, uint64_t base = 0)
+        {
+            m_key = key;
+            m_keyBase = base != 0u ? base : key;
+            m_hasParts = false;
+        }
+        // The keyed batches that follow are camera x object (columns, as draw()'s matrix, which must be their product):
+        // interpolated apart, the camera's linearly and the object's rotation as a rotation (no shrinking on a fast
+        // turn), its scale and translation linearly. Until the next setKey.
+        void setParts(const float camera[16], const float object[16])
+        {
+            std::copy(camera, camera + 16, m_camera);
+            std::copy(object, object + 16, m_object);
+            m_hasParts = true;
+        }
+        // Screen-space triangles (identity matrix: sprites, particles) whose vertices move from frame to frame:
+        // triangle i is ids[i] (0: none, drawn as it is), a triangle with the same id in the previous frame is drawn
+        // with its corners between the two (the same corner order: a particle's quad is two ids).
+        void drawTracked(const Material &material, const Vertex *vertices, uint32_t count,
+                         std::shared_ptr<const TextureCache::Texture> texture, const uint64_t *ids);
+        // The window's frame rate: 0 the game's (each published frame shown once, as it comes: the default), -1 the
+        // monitor's (vsync; frames between the game's drawn interpolated), n > 0 that many a second (no vsync).
+        // Interpolation needs the port's own frame (presentsAlone, no stream draws); otherwise frames are shown as they
+        // come whatever the rate.
+        void setFrameRate(int rate) { m_frameRate.store(rate, std::memory_order_relaxed); }
+        int frameRate() const { return m_frameRate.load(std::memory_order_relaxed); }
+        bool interpolating() const { return frameRate() != 0 && m_presentsAlone && !m_streamDraws && m_enabled; }
+        // What the last present() drew: when, the two published frames (their serials, from = 0: none) and how far
+        // between them (1: the newer as it is).
+        struct PresentInfo
+        {
+            double time = 0.0;
+            uint64_t from = 0, to = 0;
+            float alpha = 1.0f;
+            uint32_t interpolatedBatches = 0, keyedBatches = 0;
+        };
+        PresentInfo lastPresent() const { return m_lastPresent; }
+        // The next `presents` present()s log the screen position of the origin of the keyed objects that moved most
+        // ([interp-trace]: the smoothness check, with the sequence capture).
+        void tracePresents(int presents) { m_tracePresents = presents; }
 
         // Present thread: draws the latest frame into the given window rectangle; false when there is none yet.
         bool present(float x, float y, float width, float height);
@@ -207,6 +250,10 @@ namespace ps2x::native
             uint32_t first = 0, count = 0;
             uint64_t group = 0; // beginGroup's (its clip at present: the GS scissor where that group's marker was)
             uint64_t key = 0; // setKey
+            uint64_t base = 0; // setKey's base (the key when none)
+            bool hasParts = false;           // setParts: matrix = camera x object
+            float camera[16], object[16];    // (set only with hasParts)
+            int32_t idFirst = -1;            // drawTracked: its triangles' ids from Frame::triangleIds[idFirst]
             float clip[4] = {0, 0, 0, 0}; // setClip's, in GS primitive coordinates (x0, y0, x1, y1); x1 <= x0: none
             // Taken from the texture cache when the batch is drawn (the game's thread, in stream order): games reuse
             // texture memory before the frame is presented. Null when its upload was not there yet (an upload in the
@@ -222,6 +269,15 @@ namespace ps2x::native
             double time = 0.0;                           // when it was published (seconds)
             std::unordered_map<uint64_t, uint32_t> keys; // key -> its first batch
             uint64_t lastGroup = 0;                      // its batches' latest group (0: none)
+            // Interpolation: the tracked triangles' ids (drawTracked) and, built at publishing, id -> its first vertex;
+            // the frame's number, its time on the smoothed clock the window follows, and whether it follows the one
+            // before it (false after a pause in publishing: a load, nothing to interpolate across).
+            std::vector<uint64_t> triangleIds;
+            std::unordered_map<uint64_t, uint32_t> tracked;
+            std::unordered_map<uint64_t, std::vector<uint32_t>> bases; // base -> each object's first batch
+            uint64_t serial = 0;
+            double pts = 0.0;
+            bool continuous = false;
         };
 
     private:
@@ -254,7 +310,40 @@ namespace ps2x::native
         std::shared_ptr<Frame> m_previous; // the one before m_published (interpolation)
         uint64_t m_publishes = 0;          // frames and backdrops published, under m_mutex (waitForFrame)
         std::condition_variable m_publishedChanged;
-        uint64_t m_key = 0;
+        uint64_t m_key = 0, m_keyBase = 0;
+        bool m_hasParts = false;
+        float m_camera[16] = {}, m_object[16] = {};
+        std::atomic<int> m_frameRate{0};
+        // Interpolation's frames (newest last, a few game frames' worth) and the clock they are placed on, under m_mutex.
+        std::deque<std::shared_ptr<Frame>> m_history;
+        uint64_t m_serial = 0;
+        double m_interval = 1.0 / 60.0; // the publishing interval, smoothed
+        double m_late = 0.0;            // how late frames come against their place on the clock, recent worst (decaying)
+        PresentInfo m_lastPresent;      // present thread
+        int m_tracePresents = 0;        // present thread
+        std::vector<uint64_t> m_traceKeys;
+        uint64_t m_traceSerial = 0; // the frame the traced keys are of (followed to the next frame by its match)
+        std::vector<Vertex> m_trackedScratch; // present thread: a tracked batch's vertices as drawn
+        // Present thread: picks the two frames to draw between and how far (interpolation); false: none yet.
+        bool pickInterpolated(std::shared_ptr<Frame> &from, std::shared_ptr<Frame> &to, float &alpha, double now);
+        // Present thread: which of the older frame's objects each keyed batch of the newer one is, once per pair of
+        // frames (matchFrames), and how it is drawn between them.
+        enum : uint8_t
+        {
+            kUnmatched = 0,
+            kLerp = 1,     // between the two
+            kSpin = 2,     // turned over 90 degrees (a wheel): its place between, its turn the newer frame's
+            kTeleport = 3, // moved too far (a respawn): as the newer frame has it
+        };
+        struct Match
+        {
+            uint64_t from = 0, to = 0;     // the frames' serials
+            std::vector<int32_t> previous; // per batch of the newer: the older's batch with its matrix (-1: none)
+            std::vector<uint8_t> kind;
+            std::vector<uint8_t> cut;      // its view cut away (the camera): as the newer frame has it
+            std::unordered_map<uint64_t, bool> cutViews;
+        } m_match;
+        void matchFrames(const Frame &from, const Frame &to);
         int m_gsFrame[4] = {}; // id, width, height, pixel format
         std::unique_ptr<Gpu> m_gpu; // present thread only
         bool m_enabled = false;

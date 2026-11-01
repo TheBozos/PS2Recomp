@@ -48,8 +48,13 @@ namespace ps2x::native
         // (|x|, |y| or |z| past |w|) is cut to it. hasClip: the object's program clips.
         float clip[16] = {};
         bool hasClip = false;
-        bool screenSpace = false; // vertices already in screen space (sprites): no matrix, no clip, no interpolation key
+        bool screenSpace = false; // vertices already in screen space (sprites): no matrix, no clip; interpolated by
+                                  // triangle (Renderer::drawTracked) when keyed
         uint64_t key = 0;         // Renderer::setKey
+        uint64_t keyBase = 0;     // its base (Renderer::setKey): alike objects told apart by where they are
+        // matrix = camera x object, for interpolation (Renderer::setParts): hasParts when the port knows them.
+        bool hasParts = false;
+        float partCamera[16] = {}, partObject[16] = {};
         std::vector<MeshBatch> batches;
         // The GS state a context block sets before the batches (ALPHA_1, TEST_1, ZBUF_1: its sets* fields).
         bool hasContext = false;

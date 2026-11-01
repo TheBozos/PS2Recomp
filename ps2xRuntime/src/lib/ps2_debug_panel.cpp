@@ -2354,10 +2354,34 @@ void PS2DebugPanel::drawVideoTab()
     envNote("PS2X_GS_SCALE");
     ImGui::TextDisabled("The GS renderer's internal resolution, times the PS2's (at the next launch).");
 
+    // The window's frame rate: the game's 60, or the monitor's with the frames between the game's interpolated (a set
+    // rate, from video.ini or PS2X_FRAME_RATE, is offered as it is).
+    const int refresh = GetMonitorRefreshRate(GetCurrentMonitor());
+    std::vector<std::pair<int, std::string>> rates = {{0, "60 (the game's)"},
+                                                      {-1, "Match the monitor (" + std::to_string(refresh) + " Hz), smoothed"}};
+    for (const int set : {current.frameRate, edited.frameRate})
+        if (set > 0 && std::none_of(rates.begin(), rates.end(), [&](const auto &r) { return r.first == set; }))
+            rates.emplace_back(set, std::to_string(set) + " a second, smoothed (no vsync)");
+    int rateIndex = 0;
+    for (size_t i = 0; i < rates.size(); ++i)
+        if (rates[i].first == edited.frameRate)
+            rateIndex = static_cast<int>(i);
+    ImGui::SetNextItemWidth(240.0f);
+    if (ImGui::BeginCombo("Frame rate", rates[static_cast<size_t>(rateIndex)].second.c_str()))
+    {
+        for (size_t i = 0; i < rates.size(); ++i)
+            if (ImGui::Selectable(rates[i].second.c_str(), static_cast<int>(i) == rateIndex))
+                edited.frameRate = rates[i].first;
+        ImGui::EndCombo();
+    }
+    envNote("PS2X_FRAME_RATE");
+    ImGui::TextDisabled("The game runs at 60. Above that, each frame is drawn between the game's two latest:");
+    ImGui::TextDisabled("smoother on a high-refresh monitor, one game frame (17 ms) more input lag. Applies at once.");
+
     ImGui::Separator();
-    ImGui::Text("Now: %d x %d, %s, render scale %d%%; window %d x %d", current.width, current.height,
+    ImGui::Text("Now: %d x %d, %s, render scale %d%%, frame rate %s; window %d x %d", current.width, current.height,
                 ps2_video::modeName(current.mode), static_cast<int>(std::lround(current.renderScale * 100.0f)),
-                GetScreenWidth(), GetScreenHeight());
+                ps2_video::frameRateName(current.frameRate).c_str(), GetScreenWidth(), GetScreenHeight());
     static std::string s_status;
     if (ImGui::Button("Apply"))
     {
