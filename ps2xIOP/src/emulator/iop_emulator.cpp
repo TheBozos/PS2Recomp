@@ -24,6 +24,8 @@
 #include "iop_emulator_const.h"
 
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <unordered_map>
 #include <cstddef>
 #include <array>
@@ -87,6 +89,21 @@ namespace ps2x::iop::native
     void overrideExport(const char *library, uint32_t index, Function function)
     {
         exportOverrides().push_back(ExportOverride{library, index, function});
+    }
+
+    struct InterruptCall
+    {
+        uint32_t function, a0, a1, gp, delay;
+    };
+    std::mutex g_interruptCallsMutex;
+    std::vector<InterruptCall> g_interruptCalls;
+    std::atomic<bool> g_interruptCallsPending{false};
+
+    void queueInterruptCall(uint32_t function, uint32_t a0, uint32_t a1, uint32_t gp, uint32_t delay)
+    {
+        std::lock_guard<std::mutex> lock(g_interruptCallsMutex);
+        g_interruptCalls.push_back(InterruptCall{function, a0, a1, gp, delay});
+        g_interruptCallsPending.store(true, std::memory_order_release);
     }
 }
 
@@ -231,7 +248,20 @@ namespace ps2x::iop::detail
             uint32_t function = 0u;
             uint32_t gp = 0u;
             uint32_t argument = 0u;
+            uint32_t argument2 = 0u;
         };
+
+        // native::queueInterruptCall's calls, into the scheduled callbacks.
+        void takeInterruptCalls()
+        {
+            if (!native::g_interruptCallsPending.load(std::memory_order_acquire))
+                return;
+            std::lock_guard<std::mutex> lock(native::g_interruptCallsMutex);
+            for (const native::InterruptCall &call : native::g_interruptCalls)
+                pendingGuestCallbacks.emplace(totalCycles + call.delay, ScheduledGuestCallback{call.function, call.gp, call.a0, call.a1});
+            native::g_interruptCalls.clear();
+            native::g_interruptCallsPending.store(false, std::memory_order_release);
+        }
 
         // EE -> IOP SIF command waiting for its IOP handler (sceSifAddCmdHandler).
         struct PendingSifCommand
@@ -961,6 +991,7 @@ namespace ps2x::iop::detail
                     continue;
                 if (!servicingDmaInterrupts && !pendingDmaInterrupts.empty())
                     servicePendingDmaInterrupts();
+                takeInterruptCalls();
                 if (!servicingGuestCallbacks && !pendingGuestCallbacks.empty())
                     servicePendingGuestCallbacks();
             }
@@ -1101,6 +1132,7 @@ namespace ps2x::iop::detail
                 spu2.advanceTo(totalCycles);
                 servicePendingDmaInterrupts();
                 servicePendingSifCommands();
+                takeInterruptCalls();
                 servicePendingGuestCallbacks();
                 timrman.serviceDue(totalCycles, *this);
                 vblank.serviceDue(totalCycles, *this);
@@ -1460,7 +1492,7 @@ namespace ps2x::iop::detail
                     {
                         (void)callFunction(callback.function,
                                            callback.argument,
-                                           0u,
+                                           callback.argument2,
                                            0u,
                                            0u,
                                            callback.gp,
