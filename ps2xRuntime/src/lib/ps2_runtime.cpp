@@ -3877,13 +3877,45 @@ void PS2Runtime::run()
                 const char *value = std::getenv("PS2X_PRESENT_FPS");
                 return value && *value ? std::atoi(value) : 60;
             }();
-            const int targetFps = m_eeScheduler && m_eeScheduler->nativeFrames()
-                                      ? static_cast<int>(m_framePacer.cap())
-                                      : s_presentFps;
+            // No GS front end and native frames: the window shows each frame (or movie picture) the game publishes
+            // once, when it is published, with no timer of its own (two 60 Hz clocks drift and a frame shows twice
+            // every few seconds: a stutter; DC_Recomp's fcb3ebe). 100 ms at most, so the window stays responsive while
+            // nothing is published (a load). Not with interpolation (the window then runs faster than the game).
+            static const bool s_interpolate = []
+            {
+                const char *value = std::getenv("PS2X_NATIVE_INTERPOLATE");
+                return value && *value == '1';
+            }();
+            const bool followFrames = ps2x::native::gsFrontEndAbsent() && !s_interpolate && m_eeScheduler &&
+                                      m_eeScheduler->nativeFrames() && ps2x::native::Renderer::instance().enabled();
+            const int targetFps = followFrames                                     ? 0
+                                  : m_eeScheduler && m_eeScheduler->nativeFrames() ? static_cast<int>(m_framePacer.cap())
+                                                                                   : s_presentFps;
             if (targetFps != s_targetFps)
             {
                 SetTargetFPS(targetFps);
                 s_targetFps = targetFps;
+            }
+            static uint64_t s_shownFrame = 0;
+            if (followFrames)
+            {
+                // PS2X_PRESENT_STATS=1: every 600 presents, how many showed a new frame, how many frames went unshown
+                // (published two at once) and how many waits timed out (nothing published: a load).
+                static const bool s_stats = std::getenv("PS2X_PRESENT_STATS") != nullptr;
+                static uint64_t s_presents = 0, s_skipped = 0, s_timeouts = 0;
+                const uint64_t before = s_shownFrame;
+                const bool fresh = ps2x::native::Renderer::instance().waitForFrame(s_shownFrame, 0.1);
+                if (s_stats)
+                {
+                    s_timeouts += fresh ? 0u : 1u;
+                    s_skipped += fresh && before != 0u && s_shownFrame > before + 1u ? s_shownFrame - before - 1u : 0u;
+                    if (++s_presents % 600u == 0u)
+                    {
+                        std::fprintf(stderr, "[present] 600 presents: %llu frames not shown, %llu waits timed out\n",
+                                     static_cast<unsigned long long>(s_skipped), static_cast<unsigned long long>(s_timeouts));
+                        s_skipped = s_timeouts = 0;
+                    }
+                }
             }
         }
         uint32_t presentWidth = FB_WIDTH;

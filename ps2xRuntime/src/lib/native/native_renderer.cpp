@@ -373,8 +373,12 @@ void main()
         }
         frame->vertices = {corners[0], corners[1], corners[2], corners[1], corners[3], corners[2]};
         frame->batches.push_back(batch);
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_backdrop = std::move(frame);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_backdrop = std::move(frame);
+            ++m_publishes; // a movie's picture: shown when it comes (waitForFrame), as a game frame is
+        }
+        m_publishedChanged.notify_all();
     }
 
     void Renderer::clearBackdrop()
@@ -399,9 +403,21 @@ void main()
             if (m_frameLastGroups.size() > 64u)
                 m_frameLastGroups.pop_front();
         }
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_previous = std::move(m_published);
-        m_published = std::move(frame);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_previous = std::move(m_published);
+            m_published = std::move(frame);
+            ++m_publishes;
+        }
+        m_publishedChanged.notify_all();
+    }
+
+    bool Renderer::waitForFrame(uint64_t &seen, double timeout)
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        const bool fresh = m_publishedChanged.wait_for(lock, std::chrono::duration<double>(timeout), [&] { return m_publishes != seen; });
+        seen = m_publishes;
+        return fresh;
     }
 
     bool Renderer::hasDraws()

@@ -13,6 +13,7 @@
 #include "runtime/native/native_texture_cache.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -182,6 +183,11 @@ namespace ps2x::native
         // The latest published frame has something to draw (not a menu or a movie the native port does not draw yet),
         // and present() draws it (the GS frame does not already have it).
         bool hasDraws();
+        // Present thread: waits up to timeout seconds for a frame (or a movie picture: setBackdrop) published after the
+        // one counted in seen, and counts it there. With no GS front end the window then shows each game frame once, on
+        // the game's own clock: with a 60 Hz timer of its own as well, the two clocks drift and every few seconds one
+        // frame shows twice and the next not at all (a stutter). (DC_Recomp's fcb3ebe.)
+        bool waitForFrame(uint64_t &seen, double timeout);
         void setEnabled(bool on)
         {
             m_enabled = on;
@@ -240,6 +246,8 @@ namespace ps2x::native
         std::mutex m_mutex;
         std::shared_ptr<Frame> m_published;
         std::shared_ptr<Frame> m_previous; // the one before m_published (interpolation)
+        uint64_t m_publishes = 0;          // frames and backdrops published, under m_mutex (waitForFrame)
+        std::condition_variable m_publishedChanged;
         uint64_t m_key = 0;
         int m_gsFrame[4] = {}; // id, width, height, pixel format
         std::unique_ptr<Gpu> m_gpu; // present thread only
