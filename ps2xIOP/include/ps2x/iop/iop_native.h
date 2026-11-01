@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace ps2x::iop::native
 {
@@ -104,6 +105,10 @@ namespace ps2x::iop::native
     // cycles from now, once interrupts are enabled: the completion callbacks of a driver taken over at its API (libsd's
     // transfer callbacks after an upload). Any thread may queue one.
     void queueInterruptCall(uint32_t function, uint32_t a0, uint32_t a1, uint32_t gp, uint32_t delay);
+
+    // What reached the SPU2 emulation so far, in one line: "absent" (native audio, PS2X_NATIVE_AUDIO=1: the SPU2 is
+    // never set up) or "emulated", its register and DMA register accesses, the samples it mixed, its advances with work.
+    std::string spu2Reached();
 
     // Generated code: one per module, at namespace scope (static initialization).
     struct Registration

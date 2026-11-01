@@ -1,6 +1,8 @@
 #include "ps2x/iop/native_mixer.h"
+#include "ps2x/iop/iop_native.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -125,6 +127,7 @@ namespace ps2x::audio
         std::lock_guard<std::mutex> lock(m_mutex);
         for (uint32_t i = 0; i < bytes; ++i)
             m_memory[(address + i) % kSoundMemory] = data[i];
+        m_stats.uploaded += bytes;
     }
 
     void NativeMixer::read(uint32_t address, uint8_t *data, uint32_t bytes) const
@@ -216,6 +219,7 @@ namespace ps2x::audio
             voice.loopSet = false;
             g.ended &= ~(1u << index);
             decode(voice);
+            ++m_stats.keyOns;
         }
     }
 
@@ -552,9 +556,43 @@ namespace ps2x::audio
         return value;
     }
 
+    void NativeMixer::report()
+    {
+        static const bool s_stats = [] { const char *v = std::getenv("PS2X_NATIVE_AUDIO_STATS"); return !(v && *v == '0'); }();
+        if (!s_stats)
+            return;
+        int playing = 0;
+        Stats stats;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            for (const Group &group : m_groups)
+                for (const Voice &voice : group.voices)
+                    playing += voice.phase != Voice::Phase::Off ? 1 : 0;
+            stats = m_stats;
+            m_stats.peak = 0;
+        }
+        std::fprintf(stderr, "[audio] native mixer: %.0f s mixed, key ons %llu, uploaded %llu bytes, input halves %llu, peak %d, voices playing %d; SPU2 %s\n",
+                     static_cast<double>(stats.frames) / kSampleRate, static_cast<unsigned long long>(stats.keyOns),
+                     static_cast<unsigned long long>(stats.uploaded), static_cast<unsigned long long>(stats.halves), stats.peak,
+                     playing, ps2x::iop::native::spu2Reached().c_str());
+    }
+
     void NativeMixer::render(int16_t *out, size_t frames)
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        bool due = false;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            const uint64_t before = m_stats.frames;
+            m_stats.frames += frames;
+            due = before / (10u * kSampleRate) != m_stats.frames / (10u * kSampleRate);
+            mix(out, frames);
+        }
+        if (due)
+            report();
+    }
+
+    void NativeMixer::mix(int16_t *out, size_t frames)
+    {
         for (size_t frame = 0; frame < frames; ++frame)
         {
             // Group 0's output goes into group 1 (as its external input, through group 1's master volume).
@@ -583,6 +621,7 @@ namespace ps2x::audio
                             in.position = 0u;
                             in.playing = in.loop;
                         }
+                        ++m_stats.halves;
                         if (m_inputHalf)
                             m_inputHalf(g, which);
                     }
@@ -669,6 +708,7 @@ namespace ps2x::audio
             }
             out[frame * 2u] = static_cast<int16_t>(clamp16(mixed[0]));
             out[frame * 2u + 1u] = static_cast<int16_t>(clamp16(mixed[1]));
+            m_stats.peak = std::max({m_stats.peak, std::abs(clamp16(mixed[0])), std::abs(clamp16(mixed[1]))});
         }
     }
 }

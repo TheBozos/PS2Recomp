@@ -1,16 +1,43 @@
 #include "iop_spu2.h"
 
 #include "iop_memory.h"
+#include "ps2x/iop/iop_native.h"
 
 #include <cstdio>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
 
+namespace ps2x::iop::native
+{
+    // What reached the SPU2 emulation (spu2Reached): register and DMA register accesses, samples mixed, advances
+    // that had work to do; and whether it is absent.
+    std::atomic<uint64_t> g_spu2RegisterAccesses{0}, g_spu2DmaAccesses{0}, g_spu2Samples{0}, g_spu2Advances{0};
+    std::atomic<bool> g_spu2Absent{false};
+
+    std::string spu2Reached()
+    {
+        char line[256];
+        std::snprintf(line, sizeof(line), "%s: register accesses %llu, DMA register accesses %llu, samples mixed %llu, advances %llu",
+                      g_spu2Absent.load() ? "absent" : "emulated",
+                      static_cast<unsigned long long>(g_spu2RegisterAccesses.load(std::memory_order_relaxed)),
+                      static_cast<unsigned long long>(g_spu2DmaAccesses.load(std::memory_order_relaxed)),
+                      static_cast<unsigned long long>(g_spu2Samples.load(std::memory_order_relaxed)),
+                      static_cast<unsigned long long>(g_spu2Advances.load(std::memory_order_relaxed)));
+        return line;
+    }
+}
+
 namespace ps2x::iop::detail
 {
+    using native::g_spu2Advances;
+    using native::g_spu2DmaAccesses;
+    using native::g_spu2RegisterAccesses;
+    using native::g_spu2Samples;
+
     namespace
     {
         constexpr uint32_t kRamMask = IopSpu2::RamWords - 1u;
@@ -142,6 +169,16 @@ namespace ps2x::iop::detail
         reset();
     }
 
+    void IopSpu2::setAbsent()
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        m_absent = true;
+        native::g_spu2Absent.store(true);
+        m_ram = std::vector<uint16_t>(); // no sound RAM
+        m_pending = std::vector<int16_t>();
+        m_nextEvent = UINT64_MAX;
+    }
+
     void IopSpu2::reset()
     {
         std::fill(m_ram.begin(), m_ram.end(), uint16_t{0});
@@ -167,6 +204,9 @@ namespace ps2x::iop::detail
 
     uint16_t IopSpu2::read16(uint32_t address)
     {
+        g_spu2RegisterAccesses.fetch_add(1u, std::memory_order_relaxed);
+        if (m_absent)
+            return 0u;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         catchUp();
         const uint32_t offset = (address - Base) & 0x7FEu;
@@ -256,6 +296,9 @@ namespace ps2x::iop::detail
 
     void IopSpu2::write16(uint32_t address, uint16_t value)
     {
+        g_spu2RegisterAccesses.fetch_add(1u, std::memory_order_relaxed);
+        if (m_absent)
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         catchUp();
         const struct ScheduleGuard
@@ -554,6 +597,9 @@ namespace ps2x::iop::detail
 
     uint32_t IopSpu2::readDma32(uint32_t address)
     {
+        g_spu2DmaAccesses.fetch_add(1u, std::memory_order_relaxed);
+        if (m_absent)
+            return 0u;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         catchUp();
         const int coreIndex = address >= DmaBase[1] ? 1 : 0;
@@ -571,6 +617,9 @@ namespace ps2x::iop::detail
 
     void IopSpu2::writeDma32(uint32_t address, uint32_t value)
     {
+        g_spu2DmaAccesses.fetch_add(1u, std::memory_order_relaxed);
+        if (m_absent)
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         catchUp();
         const struct ScheduleGuard
@@ -1008,6 +1057,7 @@ namespace ps2x::iop::detail
         m_pending.push_back(static_cast<int16_t>(out.right));
         m_stats.peak = std::max({m_stats.peak, std::abs(out.left), std::abs(out.right)});
         ++m_stats.samples;
+        g_spu2Samples.fetch_add(1u, std::memory_order_relaxed);
         if (!m_wallClock && m_pending.size() >= kOutputChunk * 2u)
             flush();
     }
@@ -1038,6 +1088,11 @@ namespace ps2x::iop::detail
 
     void IopSpu2::pull(int16_t *frames, size_t count)
     {
+        if (m_absent)
+        {
+            std::fill_n(frames, count * 2u, int16_t{0});
+            return;
+        }
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
         m_pending.clear();
         for (size_t i = 0; i < count; ++i)
@@ -1048,6 +1103,8 @@ namespace ps2x::iop::detail
 
     void IopSpu2::flush()
     {
+        if (m_absent)
+            return;
         if (m_output && !m_pending.empty())
             m_output(m_pending.data(), m_pending.size() / 2u);
         m_pending.clear();
@@ -1055,7 +1112,11 @@ namespace ps2x::iop::detail
 
     void IopSpu2::advanceTo(uint64_t cycle)
     {
+        if (m_absent)
+            return;
         std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        if (cycle > m_cycle)
+            g_spu2Advances.fetch_add(1u, std::memory_order_relaxed);
         if (m_wallClock)
         {
             // Mixing is the audio callback's (pull): the IOP clock only ends the transfers that are not AutoDMA.
@@ -1095,6 +1156,11 @@ namespace ps2x::iop::detail
 
     void IopSpu2::updateNextEvent() noexcept
     {
+        if (m_absent)
+        {
+            m_nextEvent = UINT64_MAX;
+            return;
+        }
         if (m_wallClock)
         {
             // Often enough for the IOP to see the interrupts the mixing raised soon (1 ms of IOP time).

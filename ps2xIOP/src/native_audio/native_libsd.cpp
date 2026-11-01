@@ -505,8 +505,10 @@ namespace
         ret(e, 0u);
     }
 
-    // PS2X_NATIVE_AUDIO=1: libsd's exports taken over (static initialization, before any module loads).
-    const bool g_registered = []
+    // PS2X_NATIVE_AUDIO=1: libsd's exports taken over. Read the first time nativeLibsd() is asked (the IOP's
+    // construction, before any module loads), not at static initialization: a game override, itself a static
+    // initializer in another translation unit, can then make it its default.
+    bool registerOverrides()
     {
         const char *value = std::getenv("PS2X_NATIVE_AUDIO");
         if (!(value && *value == '1'))
@@ -538,13 +540,14 @@ namespace
         overrideExport("libsd", 26u, &sdSetTransIntrHandler);
         overrideExport("libsd", 27u, &sdReturnZero); // sceSdSetSpu2IntrHandler
         return true;
-    }();
+    }
 }
 
 namespace ps2x::audio
 {
     bool nativeLibsd()
     {
-        return g_registered;
+        static const bool s_registered = registerOverrides();
+        return s_registered;
     }
 }

@@ -94,7 +94,9 @@ namespace ps2x::audio
         uint32_t inputOffset(int group) const; // the byte the input plays next
         void setInputHalfCallback(std::function<void(int group, int half)> half);
 
-        // The PC's audio device: frames stereo 16-bit samples.
+        // The PC's audio device: frames stereo 16-bit samples. Every 10 s of output (PS2X_NATIVE_AUDIO_STATS=0: never),
+        // a line on stderr: key ons, bytes uploaded, input halves played, the loudest sample, voices playing, and
+        // what reached the SPU2 emulation (absent: nothing).
         void render(int16_t *out, size_t frames);
 
     private:
@@ -160,6 +162,14 @@ namespace ps2x::audio
         void stepEnvelope(Voice &voice);
         int32_t sample(Group &group, int index, Voice &voice);
         void stepReverb(Reverb &reverb, const int32_t send[2], int32_t out[2]);
+
+        struct Stats
+        {
+            uint64_t frames = 0, keyOns = 0, uploaded = 0, halves = 0;
+            int32_t peak = 0;
+        } m_stats;
+        void report();
+        void mix(int16_t *out, size_t frames); // under m_mutex
 
         mutable std::mutex m_mutex;
         std::vector<uint8_t> m_memory = std::vector<uint8_t>(kSoundMemory, 0u);

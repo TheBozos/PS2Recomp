@@ -297,9 +297,12 @@ namespace ps2x::iop::detail
                                   { pendingDmaInterrupts[irq] = totalCycles; });
             timrman.setInterruptSink([this](int irq) { return intrman.dispatchInterrupt(irq, *this); });
             // PS2X_NATIVE_AUDIO=1: libsd is taken over and the native mixer is the sound (native_mixer.h); the SPU2 is
-            // left unused.
+            // absent (no sound RAM, never scheduled, its registers and DMA channels counted and ignored).
             if (ps2x::audio::nativeLibsd())
+            {
+                spu2.setAbsent();
                 host.setAudioSource([](int16_t *frames, size_t count) { ps2x::audio::NativeMixer::instance().render(frames, count); });
+            }
             else if (spu2.wallClock())
                 host.setAudioSource([this](int16_t *frames, size_t count) { spu2.pull(frames, count); });
             spu2.setOutputSink([this](const int16_t *frames, size_t count)
