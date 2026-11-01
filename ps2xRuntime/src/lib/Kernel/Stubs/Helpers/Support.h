@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cctype>
 
+#include "runtime/native/native_display.h"
+
 namespace
 {
     constexpr uint32_t kCdSectorSize = 2048;
