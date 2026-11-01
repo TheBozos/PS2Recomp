@@ -767,9 +767,12 @@ void main()
         }
 
         // Under the frame, as the display merges it: the picture the game shows through circuit 2 (a menu's movie frame,
-        // where the frame's alpha is 0), then a movie's backdrop.
+        // where the frame's alpha is 0), then a movie's backdrop. Without either the frame is shown alone, its alpha
+        // ignored (PMODE with circuit 1 only: what a draw leaves in the alpha, a sky's 0, never shows).
+        bool under = backdrop != nullptr;
         {
             const DisplayPicture picture = displayPicture();
+            under = under || (picture.rgba && picture.width != 0u && picture.height != 0u);
             if (picture.rgba && picture.width != 0u && picture.height != 0u)
             {
                 if (gpu.displayPictureVersion != picture.version || gpu.displayPicture == 0u)
@@ -795,7 +798,13 @@ void main()
         if (backdrop)
             drawOverlay(*backdrop, x, y, width, height);
         // Render textures are stored bottom-up.
-        BeginBlendMode(BLEND_ALPHA_PREMULTIPLY);
+        if (under || !m_presentsAlone)
+            BeginBlendMode(BLEND_ALPHA_PREMULTIPLY);
+        else
+        {
+            rlSetBlendFactors(RL_ONE, RL_ZERO, RL_FUNC_ADD); // the frame as it is, alpha ignored
+            BeginBlendMode(BLEND_CUSTOM);
+        }
         DrawTexturePro(gpu.target.texture, Rectangle{0, 0, static_cast<float>(w), -static_cast<float>(h)},
                        Rectangle{x, y, width, height}, Vector2{0, 0}, 0.0f, WHITE);
         EndBlendMode();
