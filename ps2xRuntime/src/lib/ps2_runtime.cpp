@@ -8,6 +8,7 @@
 #include "rlgl.h"
 
 #include "ps2_runtime.h"
+#include "ps2_app.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ps2_input_bindings.h"
 #include "ps2_log.h"
@@ -2031,6 +2032,9 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
         paths.cdRoot = paths.elfDirectory;
         paths.mcRoot = paths.elfDirectory / "mc0";
     }
+    // A port with a per-user folder (ps2_app.h): the memory cards there (mc0, mc1 beside it).
+    if (const std::filesystem::path &user = ps2x::app::userDirectory(); !user.empty())
+        paths.mcRoot = user / "mc0";
 
     // PS2X_CD_IMAGE=<disc image>: sectors no file under cdRoot covers are read from it, for games that read data by
     // LSN outside the ISO 9660 file system.

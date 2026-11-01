@@ -1,5 +1,6 @@
 #include "ps2_runtime.h"
 #include "games_database.h"
+#include "ps2_app.h"
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
 #include "ps2_debug_panel.h"
 #endif
@@ -119,7 +120,23 @@ namespace
                                        std::cerr << "[terminate] non-std exception" << std::endl;
                                    }
                                }
+                               if (ps2x::app::configured())
+                                   ps2x::app::reportFatal("unhandled C++ exception (std::terminate)");
                                std::abort(); });
+    }
+
+    struct MissingGameData : std::runtime_error
+    {
+        explicit MissingGameData(const std::string &searched) : std::runtime_error(searched) {}
+    };
+
+    // A fatal error a player sees (a message box) when the port names itself, the console only otherwise.
+    void fatalMessage(const std::string &text)
+    {
+        if (ps2x::app::configured())
+            ps2x::app::showMessage(text, true);
+        else
+            std::cerr << "[main] " << text << std::endl;
     }
 
     std::string normalizeGameId(const std::string &folderName)
@@ -147,6 +164,19 @@ namespace
             std::cout << "Using argv boot path" << std::endl;
             return std::filesystem::path(argv[1]);
         }
+        // A port that names its boot ELF (ps2_app.h): the game data next to the runner or in the user folder.
+        if (ps2x::app::configured())
+        {
+            std::string searched;
+            std::filesystem::path found = ps2x::app::findGameData(&searched);
+            if (!found.empty())
+            {
+                std::cout << "Using the game data at " << found.string() << std::endl;
+                return found;
+            }
+            if (!searched.empty())
+                throw MissingGameData(searched);
+        }
 #if defined(PS2X_DEFAULT_BOOT_ELF)
         std::cout << "Using default boot file" << std::endl;
         const std::filesystem::path configuredPath = std::filesystem::path(PS2X_DEFAULT_BOOT_ELF);
@@ -169,6 +199,15 @@ int main(int argc, char *argv[])
 #if defined(__ANDROID__)
     redirectStdioToLogcat();
 #endif
+    // A port that names itself: the output also in the user folder's log (the console's when there is one), crash
+    // reports there.
+    if (ps2x::app::configured())
+    {
+        ps2x::app::startLogging();
+        ps2x::app::installCrashHandler();
+        std::cout << "[app] user folder " << ps2x::app::userDirectory().string() << ", log "
+                  << ps2x::app::logPath().string() << std::endl;
+    }
     setupTerminateLogger();
 
     try
@@ -193,6 +232,10 @@ int main(int argc, char *argv[])
             windowTitle += elfName;
         }
 
+        // A port that names itself: its own title (ps2_app.h).
+        if (*ps2x::app::title())
+            windowTitle = ps2x::app::title();
+
         PS2Runtime runtime;
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
         // This hook is to prevent leak rlimgui deps to recompiler etc
@@ -214,15 +257,22 @@ int main(int argc, char *argv[])
             },
             &debugPanel);
 #endif
+        // The ELF's folder before the window opens, the cards and settings kept next to it before copied to the user
+        // folder (ps2_app.h) once.
+        PS2Runtime::configureIoPathsFromElf(filePathStr);
+        if (!ps2x::app::userDirectory().empty())
+            ps2x::app::migrateFrom(PS2Runtime::getIoPaths().elfDirectory);
         if (!runtime.initialize(windowTitle.c_str()))
         {
-            std::cerr << "Failed to initialize PS2 runtime" << std::endl;
+            fatalMessage("Failed to initialize the PS2 runtime (the window or the graphics device could not be created).");
+            ps2x::app::flushLog();
             return 1;
         }
 
         if (!runtime.loadELF(filePathStr))
         {
-            std::cerr << "Failed to load ELF file: " << filePathStr << std::endl;
+            fatalMessage("Failed to load the game's executable: " + filePathStr);
+            ps2x::app::flushLog();
             return 1;
         }
 
@@ -233,11 +283,19 @@ int main(int argc, char *argv[])
 #endif
         std::cout.flush();
         std::cerr.flush();
+        ps2x::app::flushLog();
         std::_Exit(0);
+    }
+    catch (const MissingGameData &missing)
+    {
+        const std::string title = *ps2x::app::title() ? ps2x::app::title() : "The game";
+        fatalMessage(title + " data not found: run the launcher, or see the README.\n\nLooked for:\n" + missing.what());
     }
     catch (const std::exception &e)
     {
         std::cerr << "[main] fatal exception: " << e.what() << std::endl;
+        if (ps2x::app::configured())
+            ps2x::app::reportFatal(e.what());
     }
     catch (...)
     {
@@ -246,5 +304,6 @@ int main(int argc, char *argv[])
 
     std::cout.flush();
     std::cerr.flush();
+    ps2x::app::flushLog();
     std::_Exit(1);
 }
