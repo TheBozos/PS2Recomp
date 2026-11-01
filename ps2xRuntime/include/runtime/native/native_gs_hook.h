@@ -66,6 +66,9 @@ namespace ps2x::native
         bool loadClut = false;
         // Set: the draw samples this instead of GS memory (TEX0 still gives the wrap and size), and loads no CLUT.
         const NativeTexture *texture = nullptr;
+        // Set: TEST is the target context's where the marker sits (a draw whose game leaves its tests to the GS state the
+        // packets before it set), not `test`.
+        bool testFromTarget = false;
     };
 
     using GsDrawHook = void (*)(uint64_t group, const GsDrawTarget &target);

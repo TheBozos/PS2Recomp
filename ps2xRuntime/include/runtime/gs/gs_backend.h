@@ -72,7 +72,7 @@ public:
         state.context.tex1 = material.tex1;
         state.context.clamp = material.clamp;
         state.context.alpha = material.alpha;
-        state.context.test = material.test;
+        state.context.test = material.testFromTarget ? target.context.test : material.test;
         state.context.miptbp1 = material.miptbp1;
         state.context.miptbp2 = material.miptbp2;
         state.textureWidth = static_cast<uint16_t>(1u << (material.tex0.tw < 10u ? material.tex0.tw : 10u));
