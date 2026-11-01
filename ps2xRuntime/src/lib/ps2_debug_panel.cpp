@@ -2358,10 +2358,10 @@ void PS2DebugPanel::drawVideoTab()
     // rate, from video.ini or PS2X_FRAME_RATE, is offered as it is).
     const int refresh = GetMonitorRefreshRate(GetCurrentMonitor());
     std::vector<std::pair<int, std::string>> rates = {{0, "60 (the game's)"},
-                                                      {-1, "Match the monitor (" + std::to_string(refresh) + " Hz), smoothed"}};
+                                                      {-1, "Match the monitor (" + std::to_string(refresh) + " Hz), smoothed (experimental)"}};
     for (const int set : {current.frameRate, edited.frameRate})
         if (set > 0 && std::none_of(rates.begin(), rates.end(), [&](const auto &r) { return r.first == set; }))
-            rates.emplace_back(set, std::to_string(set) + " a second, smoothed (no vsync)");
+            rates.emplace_back(set, std::to_string(set) + " a second, smoothed (no vsync, experimental)");
     int rateIndex = 0;
     for (size_t i = 0; i < rates.size(); ++i)
         if (rates[i].first == edited.frameRate)
@@ -2377,6 +2377,7 @@ void PS2DebugPanel::drawVideoTab()
     envNote("PS2X_FRAME_RATE");
     ImGui::TextDisabled("The game runs at 60. Above that, each frame is drawn between the game's two latest:");
     ImGui::TextDisabled("smoother on a high-refresh monitor, one game frame (17 ms) more input lag. Applies at once.");
+    ImGui::TextDisabled("Experimental: a few effects (rain, lens flares, some trails) still move at 60.");
 
     ImGui::Separator();
     ImGui::Text("Now: %d x %d, %s, render scale %d%%, frame rate %s; window %d x %d", current.width, current.height,
