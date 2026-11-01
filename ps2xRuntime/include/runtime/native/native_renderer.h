@@ -121,6 +121,16 @@ namespace ps2x::native
             // levels instead of the blur: every pixel's RGB becomes clamp(levelGain x max(0, min(F, levelHigh) -
             // levelLow)) per channel (0..1 values; a game's brightness / tone pass over its finished frame).
             bool levels = false;
+            // scatter instead: a game's aerial perspective over its frame. Each pixel's GS Z (24-bit) gives the index
+            // i = min(255, Z >> scatterShift) into scatterTable (R, G, B in-scatter, A transmittance, 128 = 1, R in the
+            // low byte); RGB becomes F x A x 127 / 128 / 128 + table RGB x V / 128, V the in-scatter colour of the
+            // screen point from scatterGrid (gridWidth x gridHeight RGBA, row 0 the top, points on the screen's
+            // corners and between, bilinear).
+            bool scatter = false;
+            int scatterShift = 16;
+            uint32_t scatterTable[256] = {};
+            int gridWidth = 0, gridHeight = 0;
+            std::vector<uint32_t> scatterGrid;
             float levelGain[3] = {1.0f, 1.0f, 1.0f}, levelHigh[3] = {1.0f, 1.0f, 1.0f}, levelLow[3] = {0.0f, 0.0f, 0.0f};
         };
         // at: the batch it goes before (batchCount() when that point was reached; past the end: at the end).

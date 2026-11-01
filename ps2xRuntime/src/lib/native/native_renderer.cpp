@@ -113,6 +113,30 @@ void main()
 }
 )";
 
+        // postEffect's scatter (PostEffect::scatter): the frame (texture0), its depth, the table and the grid of V.
+        const char *kScatterShader = R"(#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+uniform sampler2D texture0;
+uniform sampler2D uDepth;
+uniform sampler2D uTable;
+uniform sampler2D uGrid;
+uniform float uDivisor;
+uniform vec2 uGridSize;
+out vec4 finalColor;
+void main()
+{
+    vec4 frame = texture(texture0, fragTexCoord);
+    float z = (1.0 - texture(uDepth, fragTexCoord).r) * 16777215.0;
+    float i = min(255.0, floor(z / uDivisor));
+    vec4 t = texture(uTable, vec2((i + 0.5) / 256.0, 0.5));
+    vec2 g = vec2(fragTexCoord.x, 1.0 - fragTexCoord.y) * (uGridSize - 1.0);
+    vec3 v = texture(uGrid, (g + 0.5) / uGridSize).rgb;
+    float keep = t.a * 255.0 * 127.0 / 128.0 / 128.0;
+    finalColor = vec4(min(frame.rgb * keep + t.rgb * v * (255.0 / 128.0), vec3(1.0)), frame.a);
+}
+)";
+
         constexpr int kGlUnsignedByte = 0x1401;
         constexpr int kGlFloat = 0x1406;
         constexpr int kGlSrcAlpha = 0x0302;
@@ -139,6 +163,115 @@ void main()
         int locStep = -1, locSigma = -1, locGain = -1;
         RenderTexture2D post[2]{};
         int postWidth = 0, postHeight = 0;
+        // The scatter pass: its shader, the table and grid textures, a frame-sized result copied back.
+        Shader scatter{};
+        int locDepth = -1, locTable = -1, locGrid = -1, locDivisor = -1, locGridSize = -1;
+        unsigned int tableTexture = 0, gridTexture = 0;
+        int gridWidth = 0, gridHeight = 0;
+        RenderTexture2D scatterOut{};
+
+        // The frame's target: colour and a depth texture (a pass can read the depth).
+        static RenderTexture2D loadTarget(int w, int h)
+        {
+            RenderTexture2D t{};
+            t.id = rlLoadFramebuffer();
+            if (t.id == 0)
+                return LoadRenderTexture(w, h);
+            rlEnableFramebuffer(t.id);
+            t.texture.id = rlLoadTexture(nullptr, w, h, RL_PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+            t.texture.width = w;
+            t.texture.height = h;
+            t.texture.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+            t.texture.mipmaps = 1;
+            t.depth.id = rlLoadTextureDepth(w, h, false);
+            t.depth.width = w;
+            t.depth.height = h;
+            t.depth.format = 19; // DEPTH_COMPONENT_24BIT
+            t.depth.mipmaps = 1;
+            rlFramebufferAttach(t.id, t.texture.id, RL_ATTACHMENT_COLOR_CHANNEL0, RL_ATTACHMENT_TEXTURE2D, 0);
+            rlFramebufferAttach(t.id, t.depth.id, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_TEXTURE2D, 0);
+            const bool complete = rlFramebufferComplete(t.id);
+            rlDisableFramebuffer();
+            if (!complete)
+            {
+                UnloadRenderTexture(t);
+                return LoadRenderTexture(w, h);
+            }
+            return t;
+        }
+
+        void scatterPass(const Renderer::PostEffect &e, int w, int h)
+        {
+            if (scatter.id == 0)
+            {
+                scatter = LoadShaderFromMemory(nullptr, kScatterShader);
+                locDepth = GetShaderLocation(scatter, "uDepth");
+                locTable = GetShaderLocation(scatter, "uTable");
+                locGrid = GetShaderLocation(scatter, "uGrid");
+                locDivisor = GetShaderLocation(scatter, "uDivisor");
+                locGridSize = GetShaderLocation(scatter, "uGridSize");
+            }
+            if (target.depth.id == 0 || e.gridWidth < 2 || e.gridHeight < 2 ||
+                e.scatterGrid.size() < static_cast<size_t>(e.gridWidth) * static_cast<size_t>(e.gridHeight))
+                return;
+            if (tableTexture == 0)
+            {
+                tableTexture = rlLoadTexture(e.scatterTable, 256, 1, RL_PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+                rlTextureParameters(tableTexture, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_NEAREST);
+                rlTextureParameters(tableTexture, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_NEAREST);
+            }
+            else
+                rlUpdateTexture(tableTexture, 0, 0, 256, 1, RL_PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, e.scatterTable);
+            if (gridTexture == 0 || gridWidth != e.gridWidth || gridHeight != e.gridHeight)
+            {
+                if (gridTexture != 0)
+                    rlUnloadTexture(gridTexture);
+                gridTexture = rlLoadTexture(e.scatterGrid.data(), e.gridWidth, e.gridHeight, RL_PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+                rlTextureParameters(gridTexture, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                rlTextureParameters(gridTexture, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                rlTextureParameters(gridTexture, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
+                rlTextureParameters(gridTexture, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+                gridWidth = e.gridWidth;
+                gridHeight = e.gridHeight;
+            }
+            else
+                rlUpdateTexture(gridTexture, 0, 0, gridWidth, gridHeight, RL_PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, e.scatterGrid.data());
+            if (scatterOut.texture.width != w || scatterOut.texture.height != h)
+            {
+                if (scatterOut.id != 0)
+                    UnloadRenderTexture(scatterOut);
+                scatterOut = LoadRenderTexture(w, h);
+            }
+            SetTextureFilter(target.texture, TEXTURE_FILTER_POINT);
+            // The frame, its depth, the table and the grid into scatterOut, then back over the frame as it is.
+            BeginTextureMode(scatterOut);
+            ClearBackground(BLANK);
+            rlDisableColorBlend();
+            BeginShaderMode(scatter);
+            const float divisor = static_cast<float>(1u << std::clamp(e.scatterShift, 0, 24));
+            const float gridSize[2] = {static_cast<float>(gridWidth), static_cast<float>(gridHeight)};
+            SetShaderValue(scatter, locDivisor, &divisor, SHADER_UNIFORM_FLOAT);
+            SetShaderValue(scatter, locGridSize, gridSize, SHADER_UNIFORM_VEC2);
+            SetShaderValueTexture(scatter, locDepth, Texture2D{target.depth.id, w, h, 1, target.depth.format});
+            SetShaderValueTexture(scatter, locTable, Texture2D{tableTexture, 256, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8});
+            SetShaderValueTexture(scatter, locGrid, Texture2D{gridTexture, gridWidth, gridHeight, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8});
+            DrawTexturePro(target.texture, Rectangle{0, 0, static_cast<float>(w), -static_cast<float>(h)},
+                           Rectangle{0, 0, static_cast<float>(w), static_cast<float>(h)}, Vector2{0, 0}, 0.0f, WHITE);
+            EndShaderMode();
+            EndTextureMode();
+            BeginTextureMode(target);
+            rlDrawRenderBatchActive();
+            rlDisableColorBlend();
+            rlDisableDepthTest();
+            rlDisableDepthMask();
+            DrawTexturePro(scatterOut.texture, Rectangle{0, 0, static_cast<float>(w), -static_cast<float>(h)},
+                           Rectangle{0, 0, static_cast<float>(w), static_cast<float>(h)}, Vector2{0, 0}, 0.0f, WHITE);
+            rlDrawRenderBatchActive();
+            rlEnableColorBlend();
+            rlSetBlendMode(RL_BLEND_ALPHA);
+            rlEnableDepthMask();
+            rlEnableDepthTest();
+        }
         struct GpuTexture
         {
             unsigned int id = 0;
@@ -228,6 +361,11 @@ void main()
             if (e.levels)
             {
                 levelsPass(e, w, h);
+                return;
+            }
+            if (e.scatter)
+            {
+                scatterPass(e, w, h);
                 return;
             }
             const int pw = std::max(1, e.width), ph = std::max(1, e.height);
@@ -488,7 +626,7 @@ void main()
         {
             if (gpu.targetWidth != 0)
                 UnloadRenderTexture(gpu.target);
-            gpu.target = LoadRenderTexture(w, h);
+            gpu.target = Gpu::loadTarget(w, h);
             gpu.targetWidth = w;
             gpu.targetHeight = h;
         }
