@@ -112,12 +112,12 @@ namespace ps2x::native
         // A full-screen pass at this point of the frame (a port's game's own post effect, from its parameters): the
         // frame drawn so far shrunk to width x height (bilinear), brightened by gain (clamped to 1), blurred (Gaussian,
         // sigma in shrunk pixels), stretched back (bilinear) and mixed over the frame by alpha (0..1), only where the
-        // depth is the cleared one when farDepthOnly (the sky behind everything drawn).
+        // frame's depth is at least depthFrom (0..1 of the window's range, 1 the cleared depth, 0 everywhere).
         struct PostEffect
         {
             int width = 128, height = 89;
             float gain = 1.0f, sigma = 0.0f, alpha = 1.0f;
-            bool farDepthOnly = true;
+            float depthFrom = 1.0f;
         };
         // at: the batch it goes before (batchCount() when that point was reached; past the end: at the end).
         void postEffect(const PostEffect &effect, size_t at = SIZE_MAX);

@@ -209,18 +209,19 @@ void main()
             pass(target.texture, w, h, post[1], 0.0f, 0.0f, 0.0f, e.gain);               // shrink, brighten
             pass(post[1].texture, pw, ph, post[0], 1.0f / pw, 0.0f, e.sigma, 1.0f);        // horizontal blur
             pass(post[0].texture, pw, ph, post[1], 0.0f, 1.0f / ph, e.sigma, 1.0f);        // vertical blur
-            // Back over the target: a quad at the far plane passes the depth test only where nothing was drawn nearer.
+            // Back over the target: a quad at depth depthFrom passes the depth test where the frame is that far or farther.
             BeginTextureMode(target);
             rlDrawRenderBatchActive();
             setDepthAlways(false);
-            if (e.farDepthOnly)
+            if (e.depthFrom > 0.0f)
                 rlEnableDepthTest();
             else
                 rlDisableDepthTest();
             rlDisableDepthMask();
             rlEnableColorBlend();
             rlSetBlendMode(RL_BLEND_ALPHA);
-            const float z = e.farDepthOnly ? -0.99999f : 0.0f;
+            // The texture mode's projection takes z to the window depth -z: the quad passes where the frame is as far.
+            const float z = -std::clamp(e.depthFrom - 0.00001f, 0.0f, 1.0f);
             const unsigned char a = static_cast<unsigned char>(std::clamp(e.alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
             rlSetTexture(post[1].texture.id);
             rlBegin(RL_QUADS);
