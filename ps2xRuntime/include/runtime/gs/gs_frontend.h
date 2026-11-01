@@ -202,6 +202,9 @@ public:
     bool clearFramebufferContext(uint32_t contextIndex, uint32_t rgba);
     bool clearActiveFramebuffer(uint32_t rgba);
     uint64_t nativeImageUploadCount() const { return m_nativeImageUploadCount; }
+    // Host-to-local image transfers the GS front end started (TRXDIR 0), and their bytes, as sent in GIF packets.
+    uint64_t imageTransfers() const { return m_imageTransfers.load(std::memory_order_relaxed); }
+    uint64_t imageBytes() const { return m_imageBytes.load(std::memory_order_relaxed); }
     uint64_t nativePackedGIFPacketCount() const { return m_nativePackedGIFPacketCount; }
 
     uint32_t consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes);
@@ -305,6 +308,7 @@ private:
     void latchHostPresentationFrame(const GSPresentationRequest *displayRegisters);
     std::atomic<uint64_t> m_queuedLatchesDone{0};
     std::atomic<uint64_t> m_displayFlips{0};
+    std::atomic<uint64_t> m_imageTransfers{0}, m_imageBytes{0};
     uint64_t m_lastLatchedDispfb1 = 0, m_lastLatchedDispfb2 = 0; // under m_presentationMutex
 
 
