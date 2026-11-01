@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <functional>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -86,6 +87,15 @@ namespace ps2x::iop::detail
         // SPU2 registers (16-bit) and DMA channels 4 and 7 are forwarded to this device.
         void setSpu2(IopSpu2 *spu2) noexcept { m_spu2 = spu2; }
         [[nodiscard]] std::span<const uint8_t> ram() const noexcept { return m_ram; }
+        // Every access that is not RAM or the scratchpad (a hardware register, modelled or not): the inventory of
+        // what reaches the hardware models (the IOP's [iop:hw] report).
+        void setHardwareObserver(std::function<void(uint32_t address, bool write)> observer) { m_hardwareObserver = std::move(observer); }
+        // No device behind the registers (PS2X_IOP_HARDWARE=0): every hardware address is plain storage (a read gives
+        // the last value written there, or 0), observed and without effect: the INTC registers are not intrman's
+        // state, a DMA channel's CHCR start bit starts nothing. Devices attached with setSio2 / setSpu2 still answer
+        // their ranges (the IOP detaches the SIO2; the SPU2 has its own absent mode).
+        void setHardwareAbsent(bool absent) noexcept { m_hardwareAbsent = absent; }
+        [[nodiscard]] bool hardwareAbsent() const noexcept { return m_hardwareAbsent; }
 
         [[nodiscard]] static uint32_t physicalAddress(uint32_t address) noexcept;
 
@@ -108,5 +118,7 @@ namespace ps2x::iop::detail
         std::optional<DmaStart> m_dmaStart;
         IopSio2 *m_sio2 = nullptr;
         IopSpu2 *m_spu2 = nullptr;
+        std::function<void(uint32_t address, bool write)> m_hardwareObserver;
+        bool m_hardwareAbsent = false;
     };
 }

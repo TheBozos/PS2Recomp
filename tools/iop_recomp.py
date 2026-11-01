@@ -8,8 +8,11 @@
 
 Functions come from the module's entry, its export tables (magic 0x41C00000), the targets of JALs, the addresses
 the code builds with LUI + ADDIU/ORI that land on a function prologue (ADDIU $sp, $sp, -n: SIF command handlers,
-thread entries and callbacks a module only passes as pointers), the data words that hold such an address, every
-prologue right after a function's end, the --entry list, and the functions those reach. Import stubs (magic 0x41E00000: `jr ra; addiu $0, $0, ordinal`) stay calls into the IOP's
+thread entries and callbacks a module only passes as pointers) or right after another function's JR $ra (a leaf
+without a stack frame), the data words that hold such an address, every prologue right after a function's end, the
+--entry list, and the functions those reach. A computed jump (JR on another register than $ra: a switch) makes every
+address inside the function that the image holds as a word (its jump table) a case the function can be entered at,
+explored with the rest. Import stubs (magic 0x41E00000: `jr ra; addiu $0, $0, ordinal`) stay calls into the IOP's
 import dispatch. A function the tool cannot translate safely (an unknown instruction, a load whose register the next
 instruction reads: a load delay slot the R3000 would honour) is left to the interpreter.
 """
@@ -43,6 +46,15 @@ class Module:
 
     def contains(self, addr):
         return self.base <= addr < self.base + self.size
+
+    def code_pointers(self):
+        """The words of the image that hold an address inside the module (word-aligned): jump tables, function tables,
+        structures of callbacks."""
+        if not hasattr(self, '_code_pointers'):
+            count = len(self.image) // 4
+            self._code_pointers = {w for w in struct.unpack_from('<%dI' % count, self.image)
+                                   if self.contains(w) and w % 4 == 0}
+        return self._code_pointers
 
     def tables(self):
         """(exports {addr: (library, index)}, import stubs {addr: (library, ordinal)})."""
@@ -206,6 +218,16 @@ def explore(module, start, limit):
                     fn.labels.add(addr + 8)
                     addr += 8
                     continue
+                if insn.rs != 31:
+                    # A computed jump (a switch's jump table): every address in [start, limit) the image holds as a
+                    # word may be one of its cases. Each becomes a place the function can be entered at, so the
+                    # jump leaves the native code there and comes straight back in (it used to be interpreted from
+                    # the case up to the next entry, and the code only the cases reach was never recompiled).
+                    for target in module.code_pointers():
+                        if start <= target < limit and target not in fn.insns:
+                            fn.labels.add(target)
+                            fn.resume.add(target)
+                            work.append(target)
                 break  # jr
             addr += 4
     # A load whose register the next instruction reads: the R3000 would give it the old value (its load delay).
@@ -220,7 +242,8 @@ def explore(module, start, limit):
 
 def pointer_seeds(module):
     """Function starts the code only takes the address of: LUI rt, hi then, within the next few instructions,
-    ADDIU/ORI rt2, rt, lo giving an address in the module whose first instruction is ADDIU $sp, $sp, -n. Also the
+    ADDIU/ORI rt2, rt, lo giving an address in the module whose first instruction is ADDIU $sp, $sp, -n (or that
+    starts right after another function's JR $ra: a leaf without a stack frame). Also the
     data words that hold such an address (function tables, structures of callbacks), and every prologue right after
     a function's end (JR $ra, its delay slot, nop padding): the functions only other unreached code or a jump table
     leads to (Jade Cocoon 2's M2SOUND.IRX: 21 functions from the LUI pairs alone, 89 with these)."""
@@ -228,12 +251,22 @@ def pointer_seeds(module):
         prologue = module.word(target) if module.contains(target) and target % 4 == 0 else None
         return prologue is not None and prologue >> 16 == 0x27BD and prologue & 0x8000
 
+    def after_return(target):
+        # Right after a function's end (JR $ra and its delay slot, then any zero padding): where a leaf function
+        # without a stack frame starts (989SND's voice helpers, only called through a pointer).
+        if not module.contains(target) or target % 4:
+            return False
+        back = target - 4
+        while module.contains(back) and module.word(back) == 0 and module.word(back - 4) != 0x03E00008:
+            back -= 4
+        return module.word(back - 4) == 0x03E00008
+
     seeds = set()
     for addr in range(module.base, module.base + module.size, 4):
         insn = module.word(addr)
         if insn is None:
             continue
-        if is_prologue(insn):
+        if is_prologue(insn) or after_return(insn):
             seeds.add(insn)
         if is_prologue(addr):
             # Skip the zero padding back to the delay slot: JR $ra is just before it (or is it, under a nop slot).
@@ -254,7 +287,7 @@ def pointer_seeds(module):
                 lo = low_insn & 0xFFFF
                 target = ((hi << 16) + (lo - 0x10000 if op == 0x09 and lo & 0x8000 else lo)) & 0xFFFFFFFF
                 prologue = module.word(target) if module.contains(target) and target % 4 == 0 else None
-                if prologue is not None and prologue >> 16 == 0x27BD and prologue & 0x8000:
+                if prologue is not None and ((prologue >> 16 == 0x27BD and prologue & 0x8000) or after_return(target)):
                     seeds.add(target)
                 break
             if (low_insn >> 16) & 31 == rt and op not in (0x2B, 0x29, 0x28):  # rt written again (not a store)
