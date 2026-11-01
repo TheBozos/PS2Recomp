@@ -88,7 +88,8 @@ namespace ps2x::audio
         void setInputVolume(int group, int side, uint16_t value);
         uint16_t inputVolume(int group, int side) const;
         // The input: bytes at memory (a buffer in IOP RAM, which the driver refills while it plays) from offset; loop
-        // or once. half(group, half) is called (on the mixer's thread) each time a half has played, half 0 or 1.
+        // or once. half(group, half) is called (on the mixer's thread) each time a half has been taken, half 0 or 1:
+        // a block (256 samples) before it has played. inputOffset is where the next block is taken from.
         void startInput(int group, const uint8_t *memory, uint32_t bytes, uint32_t offset, bool loop);
         void stopInput(int group);
         bool inputPlaying(int group) const;
@@ -151,13 +152,19 @@ namespace ps2x::audio
             bool phase = false;            // the reverb steps every other output sample
             int32_t input[2] = {}, out[2] = {}, previous[2] = {};
         };
+        // The input takes its buffer a block (256 samples) ahead of what it plays, as libsd's transfer does: a half
+        // has been taken, and is the driver's to refill, once its last block is (the half's signal).
         struct Input
         {
             const uint8_t *memory = nullptr;
             uint32_t samples = 0, position = 0; // in stereo samples
-            bool playing = false, loop = false;
+            uint32_t taken = 0;                 // where the next block is taken from
+            bool playing = false, loop = false, primed = false;
+            int slot = 0;
+            int16_t blocks[2][512] = {};        // the block playing and the one taken after it: 256 left, 256 right
             int16_t volume[2] = {0x7FFF, 0x7FFF};
         };
+        void takeInputBlock(int group, Input &input, int slot, uint32_t start);
         struct Group
         {
             Voice voices[kVoices];

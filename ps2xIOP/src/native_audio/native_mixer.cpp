@@ -440,6 +440,7 @@ namespace ps2x::audio
         input.position = input.samples != 0u ? inputSampleAt(offset) % input.samples : 0u;
         input.loop = loop;
         input.playing = memory != nullptr && input.samples != 0u;
+        input.primed = false;
     }
     void NativeMixer::stopInput(int group)
     {
@@ -454,7 +455,25 @@ namespace ps2x::audio
     uint32_t NativeMixer::inputOffset(int group) const
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        return inputOffsetOf(m_groups[group].input.position);
+        const Input &input = m_groups[group].input;
+        return inputOffsetOf(input.primed ? input.taken : input.position);
+    }
+    void NativeMixer::takeInputBlock(int group, Input &input, int slot, uint32_t start)
+    {
+        const uint8_t *block = input.memory + inputOffsetOf(start - start % 256u);
+        for (uint32_t i = 0; i < 512u; ++i)
+            input.blocks[slot][i] = static_cast<int16_t>(static_cast<uint16_t>(block[i * 2u] | (block[i * 2u + 1u] << 8u)));
+        input.taken = start - start % 256u + 256u;
+        const uint32_t half = input.samples / 2u;
+        if (input.taken == half || input.taken >= input.samples)
+        {
+            const int which = input.taken == half ? 0 : 1;
+            if (input.taken >= input.samples)
+                input.taken = 0u;
+            ++m_stats.halves;
+            if (m_inputHalf)
+                m_inputHalf(group, which);
+        }
     }
     void NativeMixer::setInputHalfCallback(std::function<void(int group, int half)> half)
     {
@@ -679,25 +698,27 @@ namespace ps2x::audio
                 if (group.input.playing)
                 {
                     Input &in = group.input;
-                    const uint32_t at = inputOffsetOf(in.position);
-                    for (int side = 0; side < 2; ++side)
+                    if (!in.primed)
                     {
-                        const uint8_t *p = in.memory + at + static_cast<uint32_t>(side) * 512u;
-                        input[side] = mul15(static_cast<int16_t>(static_cast<uint16_t>(p[0] | (p[1] << 8u))), in.volume[side]);
+                        in.primed = true;
+                        in.slot = 0;
+                        takeInputBlock(g, in, 0, in.position);
+                        if (in.loop || in.taken != 0u)
+                            takeInputBlock(g, in, 1, in.taken);
                     }
-                    ++in.position;
-                    const uint32_t half = in.samples / 2u;
-                    if (in.position == half || in.position >= in.samples)
+                    else if (in.position % 256u == 0u)
                     {
-                        const int which = in.position == half ? 0 : 1;
-                        if (in.position >= in.samples)
-                        {
-                            in.position = 0u;
-                            in.playing = in.loop;
-                        }
-                        ++m_stats.halves;
-                        if (m_inputHalf)
-                            m_inputHalf(g, which);
+                        in.slot ^= 1;
+                        if (in.loop || in.taken != 0u)
+                            takeInputBlock(g, in, in.slot ^ 1, in.taken);
+                    }
+                    const uint32_t at = in.position % 256u;
+                    for (int side = 0; side < 2; ++side)
+                        input[side] = mul15(in.blocks[in.slot][at + static_cast<uint32_t>(side) * 256u], in.volume[side]);
+                    if (++in.position >= in.samples)
+                    {
+                        in.position = 0u;
+                        in.playing = in.loop;
                     }
                 }
                 for (int index = 0; index < kVoices; ++index)
