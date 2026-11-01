@@ -6,6 +6,7 @@
 #include "ThreadNaming.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/native/native_vif1.h"
+#include "runtime/native/native_vu1_hle.h"
 #include "runtime/vif1_command_stats.h"
 #include <atomic>
 #include <chrono>
@@ -740,6 +741,17 @@ uint32_t PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             m_vu1ProgramSkipped = ps2x::native::vu1Skipped(m_vu1Code, startPC);
             if (m_vu1ProgramSkipped && m_vu1SkipCallback)
                 m_vu1SkipCallback(startPC);
+            // The EE address of the VIF data that launched the program, when the DMA chain's segments are known (the
+            // synchronous path): a diagnostic for a port to find the game object behind a microprogram.
+            uint32_t launchSource = 0;
+            if (m_vif1Segments)
+                for (const DmaSegment &segment : *m_vif1Segments)
+                    if (pos >= segment.offset && pos < segment.offset + segment.bytes)
+                    {
+                        launchSource = segment.madr + (pos - segment.offset);
+                        break;
+                    }
+            ps2x::native::g_vu1LaunchSource.store(launchSource, std::memory_order_relaxed);
             if (m_vu1MscalCallback && !m_vu1ProgramSkipped)
                 m_vu1MscalCallback(startPC, runTop, runItop);
             continue;

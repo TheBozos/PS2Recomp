@@ -20,6 +20,7 @@ namespace ps2x::native
         uint32_t startPc = 0;
         uint32_t top = 0;
         uint32_t itop = 0;
+        uint32_t source = 0; // the EE address of the VIF1 data that launched it (0: unknown), a diagnostic
         // Sends a GIF packet on PATH1, as XGKICK would, in order with the rest of the GIF stream.
         void (*kick)(void *user, const uint8_t *packet, uint32_t bytes) = nullptr;
         // Draws the native renderer's group `group` at this point of the GS stream, where the kick would have gone
@@ -31,6 +32,10 @@ namespace ps2x::native
     };
 
     using Vu1Hle = bool (*)(Vu1HleRun &run);
+
+    // The EE address of the VIF1 data whose MSCAL launched the current VU1 program, when the DMA chain's segments are
+    // known (the synchronous VIF1 path; 0 otherwise): Vu1HleRun::source.
+    inline std::atomic<uint32_t> g_vu1LaunchSource{0};
 
     inline std::atomic<Vu1Hle> g_vu1Hle{nullptr};
     inline void setVu1Hle(Vu1Hle handler) { g_vu1Hle.store(handler, std::memory_order_release); }

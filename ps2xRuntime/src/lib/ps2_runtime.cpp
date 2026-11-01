@@ -1439,6 +1439,7 @@ bool PS2Runtime::syncCoreSubsystems()
                                          run.startPc = startPC;
                                          run.top = top;
                                          run.itop = itop;
+                                         run.source = ps2x::native::g_vu1LaunchSource.load(std::memory_order_relaxed);
                                          run.user = &m_memory;
                                          run.kick = [](void *user, const uint8_t *packet, uint32_t bytes)
                                          { static_cast<PS2Memory *>(user)->submitGifPacket(GifPathId::Path1, packet, bytes); };
