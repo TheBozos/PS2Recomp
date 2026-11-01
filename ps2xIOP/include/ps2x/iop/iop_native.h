@@ -53,6 +53,10 @@ namespace ps2x::iop::native
                        (static_cast<uint32_t>(ram[physical + 2u]) << 16) | (static_cast<uint32_t>(ram[physical + 3u]) << 24);
             return read32(address);
         }
+        // The IOP's RAM itself (a stream a driver refills in place, read as it plays).
+        const uint8_t *ramBase() const { return ram; }
+        uint32_t ramBytes() const { return ramSize; }
+
         // Writes go through the IOP (it tracks which RAM a module has written, and hardware registers have effects).
         void w8(uint32_t address, uint8_t value) { write8(address, value); }
         void w16(uint32_t address, uint16_t value) { write16(address, value); }
