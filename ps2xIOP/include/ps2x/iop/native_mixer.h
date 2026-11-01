@@ -17,6 +17,7 @@
 //
 // Not done yet: noise, pitch modulation.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -87,7 +88,8 @@ namespace ps2x::audio
         void setInputVolume(int group, int side, uint16_t value);
         uint16_t inputVolume(int group, int side) const;
         // The input: bytes at memory (a buffer in IOP RAM, which the driver refills while it plays) from offset; loop
-        // or once. half(group, half) is called (on the mixer's thread) each time a half has played, half 0 or 1.
+        // or once. half(group, half) is called (on the mixer's thread) each time a half has been taken, half 0 or 1:
+        // a block (256 samples) before it has played. inputOffset is where the next block is taken from.
         void startInput(int group, const uint8_t *memory, uint32_t bytes, uint32_t offset, bool loop);
         void stopInput(int group);
         bool inputPlaying(int group) const;
@@ -98,6 +100,16 @@ namespace ps2x::audio
         // a line on stderr: key ons, bytes uploaded, input halves played, the loudest sample, voices playing, and
         // what reached the SPU2 emulation (absent: nothing).
         void render(int16_t *out, size_t frames);
+
+        // Mixing on the IOP's clock (36.864 MHz, 768 cycles a sample), into a queue render takes from: a driver
+        // streaming through a small input ring (two halves of 256 samples) gets each half's signal and refills it in
+        // its own time before the mixer reaches it again, whatever the audio device's period. advance(cycle) mixes
+        // a sample per step due by then (the IOP calls it at nextEventCycle at the latest), staying within 512
+        // samples of the IOP clock; the step follows the queue's level, so the device neither runs dry nor falls
+        // behind, and render mixes what is missing while that keeps within the 512. Until the first advance, render
+        // mixes itself.
+        void advance(uint64_t cycle);
+        uint64_t nextEventCycle() const noexcept { return m_nextEvent.load(std::memory_order_relaxed); }
 
     private:
         struct Volume
@@ -140,13 +152,19 @@ namespace ps2x::audio
             bool phase = false;            // the reverb steps every other output sample
             int32_t input[2] = {}, out[2] = {}, previous[2] = {};
         };
+        // The input takes its buffer a block (256 samples) ahead of what it plays, as libsd's transfer does: a half
+        // has been taken, and is the driver's to refill, once its last block is (the half's signal).
         struct Input
         {
             const uint8_t *memory = nullptr;
             uint32_t samples = 0, position = 0; // in stereo samples
-            bool playing = false, loop = false;
+            uint32_t taken = 0;                 // where the next block is taken from
+            bool playing = false, loop = false, primed = false;
+            int slot = 0;
+            int16_t blocks[2][512] = {};        // the block playing and the one taken after it: 256 left, 256 right
             int16_t volume[2] = {0x7FFF, 0x7FFF};
         };
+        void takeInputBlock(int group, Input &input, int slot, uint32_t start);
         struct Group
         {
             Voice voices[kVoices];
@@ -165,7 +183,7 @@ namespace ps2x::audio
 
         struct Stats
         {
-            uint64_t frames = 0, keyOns = 0, uploaded = 0, halves = 0;
+            uint64_t frames = 0, keyOns = 0, uploaded = 0, halves = 0, gapFrames = 0, droppedFrames = 0;
             int32_t peak = 0;
         } m_stats;
         void report();
@@ -175,5 +193,14 @@ namespace ps2x::audio
         std::vector<uint8_t> m_memory = std::vector<uint8_t>(kSoundMemory, 0u);
         Group m_groups[kGroups];
         std::function<void(int group, int half)> m_inputHalf;
+
+        static constexpr uint64_t kCyclesPerSample = 768u;
+        bool m_clocked = false;
+        uint64_t m_cycle = 0, m_nextCycle = 0, m_cyclesPerSample = kCyclesPerSample, m_mixed = 0;
+        size_t m_pullFrames = 0;
+        std::vector<int16_t> m_queue;
+        int64_t lead() const noexcept;
+        void mixQueued();
+        std::atomic<uint64_t> m_nextEvent{0};
     };
 }

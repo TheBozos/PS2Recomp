@@ -4,6 +4,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cctype>
+#include "runtime/native/native_display.h"
 
 namespace
 {

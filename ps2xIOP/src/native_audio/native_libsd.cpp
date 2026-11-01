@@ -11,6 +11,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -47,6 +49,7 @@ namespace
             uint32_t function = 0, argument = 0, gp = 0;
         };
         Callback transCallback[2], transHandler[2]; // per DMA channel
+        Callback spu2Handler;
         uint32_t irqCallback = 0;
         uint32_t blockBuffer[2] = {}, blockSize[2] = {}; // the block transfer playing as each core's input
         uint32_t effectEnd[2] = {0x1DFFFFu, 0x1FFFFFu}; // sceSdInit's effect end addresses
@@ -55,6 +58,17 @@ namespace
             uint32_t mode = 0, delay = 0, feedback = 0;
         } effect[2];
     } g_state;
+
+    // The halves signalled and not yet answered, per channel: a driver reading the status when its signal's
+    // handler wakes it learns that half, even when the mixer has taken the next one since (its thread ran late).
+    constexpr size_t kHalvesKept = 8u;
+    std::mutex g_halvesMutex;
+    std::deque<uint32_t> g_halves[2];
+    void forgetHalves(uint32_t channel)
+    {
+        std::lock_guard<std::mutex> lock(g_halvesMutex);
+        g_halves[channel].clear();
+    }
 
     uint32_t arg(Env &e, int n)
     {
@@ -234,6 +248,8 @@ namespace
     {
         mixer().reset();
         g_state = State{};
+        forgetHalves(0u);
+        forgetHalves(1u);
         ret(e, 0u);
     }
     void sdQuit(Env &e)
@@ -394,6 +410,7 @@ namespace
         {
             const uint32_t position = blockPosition(channel);
             mixer().stopInput(static_cast<int>(channel));
+            forgetHalves(channel);
             ret(e, position);
             return;
         }
@@ -411,13 +428,15 @@ namespace
             const uint32_t start = (mode & 3u) == 3u && arg(e, 4) >= iop ? arg(e, 4) - iop : 0u;
             g_state.blockBuffer[channel] = iop;
             g_state.blockSize[channel] = size;
+            forgetHalves(channel);
             mixer().startInput(static_cast<int>(channel), e.ramBase() + physical, size, start, (mode & 0x10u) != 0u);
             ret(e, 0u);
             return;
         }
         }
     }
-    // sceSdBlockTransStatus(channel, flag): where the input plays now, | 1 << 24 while in the second half.
+    // sceSdBlockTransStatus(channel, flag): where the input is taken now, | 1 << 24 while in the second half; after a
+    // half's signal, the half taken next as it was at that signal.
     void sdBlockTransStatus(Env &e)
     {
         const uint32_t channel = arg(e, 0) & 1u;
@@ -426,8 +445,17 @@ namespace
             ret(e, 0u);
             return;
         }
-        const uint32_t offset = mixer().inputOffset(static_cast<int>(channel));
-        const uint32_t second = offset >= g_state.blockSize[channel] / 2u ? 1u : 0u;
+        uint32_t offset = mixer().inputOffset(static_cast<int>(channel));
+        uint32_t second = offset >= g_state.blockSize[channel] / 2u ? 1u : 0u;
+        {
+            std::lock_guard<std::mutex> lock(g_halvesMutex);
+            if (!g_halves[channel].empty())
+            {
+                second = g_halves[channel].front();
+                g_halves[channel].pop_front();
+                offset = second * (g_state.blockSize[channel] / 2u);
+            }
+        }
         ret(e, (second << 24u) | (g_state.blockBuffer[channel] + offset));
     }
     void sdSetTransCallback(Env &e)
@@ -446,29 +474,45 @@ namespace
             std::fprintf(stderr, "[audio] sceSdSetTransIntrHandler(%u, %08x, %08x)\n", channel, arg(e, 1), arg(e, 2));
         ret(e, previous);
     }
+    void sdGetTransIntrHandlerArgument(Env &e)
+    {
+        ret(e, g_state.transHandler[arg(e, 0) & 1u].argument);
+    }
+    void sdSetSpu2IntrHandler(Env &e)
+    {
+        const uint32_t previous = g_state.spu2Handler.function;
+        g_state.spu2Handler = State::Callback{arg(e, 0), arg(e, 1), e.cpu.gpr[28]};
+        if (logging())
+            std::fprintf(stderr, "[audio] sceSdSetSpu2IntrHandler(%08x, %08x)\n", arg(e, 0), arg(e, 1));
+        ret(e, previous);
+    }
+    void sdGetSpu2IntrHandlerArgument(Env &e)
+    {
+        ret(e, g_state.spu2Handler.argument);
+    }
+    // sceSdStopTrans(channel): the channel's block transfer stopped.
+    void sdStopTrans(Env &e)
+    {
+        mixer().stopInput(static_cast<int>(arg(e, 0) & 1u));
+        forgetHalves(arg(e, 0) & 1u);
+        ret(e, 0u);
+    }
     void sdSetIrqCallback(Env &e)
     {
         const uint32_t previous = g_state.irqCallback;
         g_state.irqCallback = arg(e, 0);
         ret(e, previous);
     }
-    void sdReturnZero(Env &e)
-    {
-        ret(e, 0u);
-    }
 
     // sceSdSetEffectAttr(core, attr): attr {int core; int mode (bit 8: clear the area first); short depth_L, depth_R;
     // int delay; int feedback}. The depths are the effect volumes; the area is the mode's size below the effect end.
-    void sdSetEffectAttr(Env &e)
+    bool setEffect(Env &e, bool volumes)
     {
         const int core = static_cast<int>(arg(e, 0) & 1u);
         const uint32_t attr = arg(e, 1);
         const uint32_t mode = e.r32(attr + 4u);
         if ((mode & 0xFFu) >= 10u)
-        {
-            ret(e, 0xFFFFFFFFu);
-            return;
-        }
+            return false;
         auto &effect = g_state.effect[core];
         effect.mode = mode & 0xFFu;
         effect.delay = e.r32(attr + 0xCu);
@@ -478,6 +522,36 @@ namespace
                          e.r16(attr + 8u), e.r16(attr + 0xAu), effect.delay, effect.feedback, g_state.effectEnd[core]);
         if ((mode & 0x100u) != 0u)
             mixer().clearEffectArea(static_cast<int>(effect.mode), g_state.effectEnd[core]);
+        mixer().setEffect(core, static_cast<int>(effect.mode), effect.delay, effect.feedback, g_state.effectEnd[core]);
+        if (volumes)
+        {
+            mixer().setEffectVolume(core, 0, e.r16(attr + 8u));
+            mixer().setEffectVolume(core, 1, e.r16(attr + 0xAu));
+        }
+        return true;
+    }
+    void sdSetEffectAttr(Env &e)
+    {
+        ret(e, setEffect(e, true) ? 0u : 0xFFFFFFFFu);
+    }
+    // sceSdSetEffectMode(core, attr): the preset (and its clear) without the effect volumes.
+    void sdSetEffectMode(Env &e)
+    {
+        ret(e, setEffect(e, false) ? 0u : 0xFFFFFFFFu);
+    }
+    // sceSdSetEffectModeParams(core, attr): the delay, feedback and depths of the mode set, which attr must name.
+    void sdSetEffectModeParams(Env &e)
+    {
+        const int core = static_cast<int>(arg(e, 0) & 1u);
+        const uint32_t attr = arg(e, 1);
+        auto &effect = g_state.effect[core];
+        if ((e.r32(attr + 4u) & 0xFFu) != effect.mode)
+        {
+            ret(e, 0xFFFFFFFFu);
+            return;
+        }
+        effect.delay = e.r32(attr + 0xCu);
+        effect.feedback = e.r32(attr + 0x10u);
         mixer().setEffect(core, static_cast<int>(effect.mode), effect.delay, effect.feedback, g_state.effectEnd[core]);
         mixer().setEffectVolume(core, 0, e.r16(attr + 8u));
         mixer().setEffectVolume(core, 1, e.r16(attr + 0xAu));
@@ -495,7 +569,7 @@ namespace
         e.w32(attr + 0x10u, effect.feedback);
         ret(e, 0u);
     }
-    // sceSdClearEffectWorkArea(core, channel, mode).
+    // sceSdClearEffectWorkArea(core, channel, mode), sceSdCleanEffectWorkArea(core, channel, mode).
     void sdClearEffectWorkArea(Env &e)
     {
         const int core = static_cast<int>(arg(e, 0) & 1u);
@@ -513,8 +587,15 @@ namespace
         const char *value = std::getenv("PS2X_NATIVE_AUDIO");
         if (!(value && *value == '1'))
             return false;
-        // Each half of a block transfer played: the channel's transfer interrupt.
-        mixer().setInputHalfCallback([](int group, int) { transferDone(static_cast<uint32_t>(group)); });
+        // Each half of a block transfer taken: the channel's transfer interrupt.
+        mixer().setInputHalfCallback([](int group, int half)
+                                     {
+            {
+                std::lock_guard<std::mutex> lock(g_halvesMutex);
+                if (g_halves[group].size() < kHalvesKept)
+                    g_halves[group].push_back(half == 0 ? 1u : 0u);
+            }
+            transferDone(static_cast<uint32_t>(group)); });
         using ps2x::iop::native::overrideExport;
         overrideExport("libsd", 2u, &sdQuit);
         overrideExport("libsd", 4u, &sdInit);
@@ -538,7 +619,13 @@ namespace
         overrideExport("libsd", 24u, &sdGetEffectAttr);
         overrideExport("libsd", 25u, &sdClearEffectWorkArea);
         overrideExport("libsd", 26u, &sdSetTransIntrHandler);
-        overrideExport("libsd", 27u, &sdReturnZero); // sceSdSetSpu2IntrHandler
+        overrideExport("libsd", 27u, &sdSetSpu2IntrHandler);
+        overrideExport("libsd", 28u, &sdGetTransIntrHandlerArgument);
+        overrideExport("libsd", 29u, &sdGetSpu2IntrHandlerArgument);
+        overrideExport("libsd", 30u, &sdStopTrans);
+        overrideExport("libsd", 31u, &sdClearEffectWorkArea);
+        overrideExport("libsd", 32u, &sdSetEffectMode);
+        overrideExport("libsd", 33u, &sdSetEffectModeParams);
         return true;
     }
 }
