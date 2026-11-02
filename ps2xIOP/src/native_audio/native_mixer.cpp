@@ -637,6 +637,19 @@ namespace ps2x::audio
                             in.playing = in.loop;
                         }
                         ++m_stats.halves;
+                        // PS2X_NATIVE_AUDIO_INPUT_DUMP=<file> (diagnosis): each half of the input just played, as the
+                        // game left it in its buffer, appended in order.
+                        static std::FILE *s_dump = []
+                        {
+                            const char *path = std::getenv("PS2X_NATIVE_AUDIO_INPUT_DUMP");
+                            return path && *path ? std::fopen(path, "wb") : nullptr;
+                        }();
+                        if (s_dump)
+                        {
+                            const uint32_t bytes = half / 256u * 1024u;
+                            std::fwrite(in.memory + (which == 0 ? 0u : bytes), 1, bytes, s_dump);
+                            std::fflush(s_dump);
+                        }
                         if (m_inputHalf)
                             m_inputHalf(g, which);
                     }
