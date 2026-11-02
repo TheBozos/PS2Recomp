@@ -10,6 +10,9 @@ namespace ps2x::audio
 {
     namespace
     {
+        // The report's raw peak of each group's input data since its last line.
+        int g_inputRawPeak[2] = {0, 0};
+
         // PS2 ADPCM: a 16-byte block is a header (shift, filter, flags) and 28 4-bit samples; each filter predicts
         // from the two samples before.
         constexpr int32_t kFilterPositive[5] = {0, 60, 115, 98, 122};
@@ -575,6 +578,16 @@ namespace ps2x::audio
                      static_cast<double>(stats.frames) / kSampleRate, static_cast<unsigned long long>(stats.keyOns),
                      static_cast<unsigned long long>(stats.uploaded), static_cast<unsigned long long>(stats.halves), stats.peak,
                      playing, ps2x::iop::native::spu2Reached().c_str());
+        // Each group's input: its raw peak since the last line (the data the game streams), volume and mix switches.
+        for (int g = 0; g < kGroups; ++g)
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            const Group &group = m_groups[g];
+            std::fprintf(stderr, "[audio]   group %d input %s raw peak %d volume %04x %04x mix %04x\n", g,
+                         group.input.playing ? "playing" : "stopped", g_inputRawPeak[g], static_cast<uint16_t>(group.input.volume[0]),
+                         static_cast<uint16_t>(group.input.volume[1]), group.mix);
+            g_inputRawPeak[g] = 0;
+        }
     }
 
     void NativeMixer::render(int16_t *out, size_t frames)
@@ -609,7 +622,9 @@ namespace ps2x::audio
                     for (int side = 0; side < 2; ++side)
                     {
                         const uint8_t *p = in.memory + at + static_cast<uint32_t>(side) * 512u;
-                        input[side] = mul15(static_cast<int16_t>(static_cast<uint16_t>(p[0] | (p[1] << 8u))), in.volume[side]);
+                        const int16_t raw = static_cast<int16_t>(static_cast<uint16_t>(p[0] | (p[1] << 8u)));
+                        g_inputRawPeak[g] = std::max(g_inputRawPeak[g], std::abs(static_cast<int>(raw)));
+                        input[side] = mul15(raw, in.volume[side]);
                     }
                     ++in.position;
                     const uint32_t half = in.samples / 2u;
