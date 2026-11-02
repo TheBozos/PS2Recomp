@@ -37,6 +37,13 @@ namespace ps2x::native
     // known (the synchronous VIF1 path; 0 otherwise): Vu1HleRun::source.
     inline std::atomic<uint32_t> g_vu1LaunchSource{0};
 
+    // A port that draws everything natively from its game's own data (nothing from VU1 output) sets this: every VIF1
+    // transfer from EE memory ends at once without being processed (no VIF1 unpack, no VU1 program), as an empty
+    // transfer does, so the game's DMA end interrupts, queues and callbacks keep their order. Downloads (VIF1 to
+    // memory) are not affected.
+    inline std::atomic<bool> g_vif1Dropped{false};
+    inline void setVif1Dropped(bool dropped) { g_vif1Dropped.store(dropped, std::memory_order_release); }
+
     inline std::atomic<Vu1Hle> g_vu1Hle{nullptr};
     inline void setVu1Hle(Vu1Hle handler) { g_vu1Hle.store(handler, std::memory_order_release); }
     inline Vu1Hle vu1Hle() { return g_vu1Hle.load(std::memory_order_acquire); }

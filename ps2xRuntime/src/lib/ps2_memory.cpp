@@ -2,6 +2,7 @@
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/native/native_vif1.h"
+#include "runtime/native/native_vu1_hle.h"
 #include "ps2_log.h"
 #include <atomic>
 #include <cstdlib>
@@ -1678,7 +1679,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 uint32_t mode = (chcr >> 2) & 0x3;
                 const bool stallable = signalStallApplies(channelBase);
 
-                if (mode == 0 && qwc > 0 && !stallable)
+                // A port drawing natively from its game's data (ps2x::native::g_vif1Dropped): VIF1 data is not
+                // processed, the channel ends below as an empty transfer does.
+                if (channelBase == kVif1Channel && ps2x::native::g_vif1Dropped.load(std::memory_order_acquire))
+                {
+                }
+                else if (mode == 0 && qwc > 0 && !stallable)
                 {
                     if (channelBase == kVif1Channel && ps2x::native::vif1Observed() && !isScratchpad(madr))
                         ps2x::native::observeVif1(m_rdram + (madr & PS2_RAM_MASK), std::min<size_t>(size_t{qwc} * 16u, PS2_RAM_SIZE - (madr & PS2_RAM_MASK)));
