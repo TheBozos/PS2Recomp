@@ -2655,6 +2655,11 @@ namespace ps2_stubs
                 static const bool s_trace = std::getenv("PS2X_MPEG_TRACE") != nullptr;
                 if (s_trace && playback.picturesServed % 30u == 1u)
                 {
+                    if (playback.picturesServed == 1u)
+                        for (const auto &entry : g_mpeg_stub_state.callbacksByMpeg)
+                            for (const MpegRegisteredCallback &cb : entry.second)
+                                std::fprintf(stderr, "[MPEG:trace] callback mpeg %x: type %u stream %d id %u func %x data %x\n", entry.first,
+                                             cb.type, cb.stream ? 1 : 0, cb.streamId, cb.func, cb.data);
                     std::fprintf(stderr, "[MPEG:trace] picture %u, %zu decoded ahead (limit %zu), eof %d; given:", playback.picturesServed,
                                  playback.decodedFrames.size(), g_maxDecodedPicturesAhead.load(), g_mpeg_stub_state.currentCdStreamEofSeen ? 1 : 0);
                     for (size_t k = 0; k < 32u; ++k)
