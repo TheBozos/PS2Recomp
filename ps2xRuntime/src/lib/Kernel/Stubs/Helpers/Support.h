@@ -471,6 +471,170 @@ namespace
         return true;
     }
 
+    struct CdImageVolume
+    {
+        uint32_t base = 0;
+        uint32_t rootLsn = 0;
+        uint32_t rootSize = 0;
+    };
+
+    struct CdImageFileSystem
+    {
+        std::filesystem::path image;
+        uint64_t imageBytes = 0;
+        bool valid = false;
+        std::vector<CdImageVolume> volumes;
+    };
+
+    struct CdImageFsEntry
+    {
+        uint32_t lsn = 0;
+        uint32_t size = 0;
+        bool isDirectory = false;
+    };
+
+    bool cdImageFileSystemEnabled()
+    {
+        const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
+        return paths.cdImageFileSystem && !paths.cdImage.empty();
+    }
+
+    bool readCdImagePrimaryVolume(const std::filesystem::path &image, uint32_t sector, std::array<uint8_t, kCdSectorSize> &pvd)
+    {
+        const int32_t savedError = g_lastCdError;
+        const bool ok = readHostRange(image, static_cast<uint64_t>(sector) * kCdSectorSize, pvd.data(), pvd.size());
+        g_lastCdError = savedError;
+        return ok && pvd[0] == 1 && std::memcmp(pvd.data() + 1, "CD001", 5) == 0;
+    }
+
+    uint32_t readLe32(const uint8_t *p)
+    {
+        return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+               (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+    }
+
+    const CdImageFileSystem &cdImageFileSystem()
+    {
+        static std::mutex mutex;
+        static CdImageFileSystem fs;
+        std::lock_guard<std::mutex> lock(mutex);
+        const std::filesystem::path image = getCdImagePath();
+        std::error_code ec;
+        const uint64_t bytes = image.empty() ? 0 : static_cast<uint64_t>(std::filesystem::file_size(image, ec));
+        if (fs.image == image && fs.imageBytes == bytes && !ec)
+        {
+            return fs;
+        }
+
+        fs = CdImageFileSystem{};
+        fs.image = image;
+        fs.imageBytes = ec ? 0 : bytes;
+        std::array<uint8_t, kCdSectorSize> pvd{};
+        if (image.empty() || ec || !readCdImagePrimaryVolume(image, 16, pvd))
+        {
+            return fs;
+        }
+        fs.valid = true;
+        fs.volumes.push_back({0, readLe32(pvd.data() + 158), readLe32(pvd.data() + 166)});
+
+        const uint32_t layer0Sectors = readLe32(pvd.data() + 80);
+        if (fs.imageBytes / kCdSectorSize > static_cast<uint64_t>(layer0Sectors) + 16u &&
+            readCdImagePrimaryVolume(image, layer0Sectors, pvd))
+        {
+            fs.volumes.push_back({layer0Sectors - 16u, readLe32(pvd.data() + 158), readLe32(pvd.data() + 166)});
+        }
+        return fs;
+    }
+
+    std::vector<std::string> cdImagePathComponents(const std::string &ps2Path)
+    {
+        std::vector<std::string> components;
+        std::string current;
+        for (char c : normalizeCdPathNoPrefix(ps2Path) + "/")
+        {
+            if (c == '/' || c == '\\')
+            {
+                if (!current.empty())
+                {
+                    components.push_back(toLowerAscii(stripIsoVersionSuffix(current)));
+                }
+                current.clear();
+                continue;
+            }
+            current.push_back(c);
+        }
+        return components;
+    }
+
+    bool findCdImageFile(const std::string &ps2Path, uint32_t layer, CdImageFsEntry &out)
+    {
+        const CdImageFileSystem &fs = cdImageFileSystem();
+        if (!fs.valid || layer >= fs.volumes.size())
+        {
+            return false;
+        }
+
+        const CdImageVolume &volume = fs.volumes[layer];
+        CdImageFsEntry current{volume.base + volume.rootLsn, volume.rootSize, true};
+        for (const std::string &want : cdImagePathComponents(ps2Path))
+        {
+            if (!current.isDirectory)
+            {
+                return false;
+            }
+            std::vector<uint8_t> dir(sectorsForBytes(current.size) * static_cast<size_t>(kCdSectorSize));
+            const int32_t savedError = g_lastCdError;
+            const bool read = readHostRange(fs.image, static_cast<uint64_t>(current.lsn) * kCdSectorSize, dir.data(), dir.size());
+            g_lastCdError = savedError;
+            if (!read)
+            {
+                return false;
+            }
+
+            bool found = false;
+            size_t pos = 0;
+            while (pos < current.size && pos < dir.size())
+            {
+                const uint8_t length = dir[pos];
+                if (length == 0)
+                {
+                    pos = (pos / kCdSectorSize + 1) * kCdSectorSize;
+                    continue;
+                }
+                if (pos + length > dir.size() || length < 34)
+                {
+                    break;
+                }
+                const uint8_t *record = dir.data() + pos;
+                pos += length;
+                const uint8_t nameLength = record[32];
+                if (nameLength == 1 && (record[33] == 0 || record[33] == 1))
+                {
+                    continue;
+                }
+                std::string name(reinterpret_cast<const char *>(record + 33), std::min<size_t>(nameLength, length - 33u));
+                name = toLowerAscii(stripIsoVersionSuffix(name));
+                if (!name.empty() && name.back() == '.')
+                {
+                    name.pop_back();
+                }
+                if (name != want)
+                {
+                    continue;
+                }
+                current = CdImageFsEntry{volume.base + readLe32(record + 2), readLe32(record + 10), (record[25] & 2u) != 0};
+                found = true;
+                break;
+            }
+            if (!found)
+            {
+                return false;
+            }
+        }
+        out = current;
+        return true;
+    }
+
     bool readCdSectors(uint32_t lbn, uint32_t sectors, uint8_t *dst, size_t byteCount)
     {
         static const bool logReads = std::getenv("PS2X_CD_LOG") != nullptr; // every EE read (PS2X_CD_LOG=1)
@@ -478,6 +642,10 @@ namespace
             std::cerr << "[cd] EE read lbn=0x" << std::hex << lbn << " sectors=0x" << sectors << std::dec << std::endl;
         for (const auto &[key, entry] : g_cdFilesByKey)
         {
+            if (cdImageFileSystemEnabled())
+            {
+                break;
+            }
             const uint32_t endLbn = entry.baseLbn + entry.sectors;
             if (lbn < entry.baseLbn || lbn >= endLbn)
             {
