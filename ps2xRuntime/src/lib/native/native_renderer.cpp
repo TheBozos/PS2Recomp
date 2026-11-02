@@ -61,12 +61,14 @@ uniform int uFog;
 uniform int uFunction;
 uniform int uTextureAlpha;
 uniform int uGsUntextured;
+uniform float uTexAlphaScale;
 uniform vec3 uFogColour;
 out vec4 fragColor;
 void main()
 {
     vec4 colour = vCol * (255.0 / 128.0);
     vec4 texel = uTextured != 0 ? texture(uTex, vUv) : vec4(1.0);
+    texel.a *= uTexAlphaScale;
     if (uTextured != 0 && uFunction == 1)
         fragColor = vec4(texel.rgb, uTextureAlpha != 0 ? texel.a : colour.a);
     else if (uTextured != 0 && uFunction >= 2)
@@ -198,7 +200,7 @@ void main()
     {
         unsigned int shader = 0;
         int locM = -1, locScreen = -1, locDepthMax = -1, locTex = -1, locTextured = -1, locAlphaTest = -1, locAlphaRef = -1, locOpaque = -1, locFog = -1,
-            locFogColour = -1, locFunction = -1, locTextureAlpha = -1, locGsUntextured = -1;
+            locFogColour = -1, locFunction = -1, locTextureAlpha = -1, locGsUntextured = -1, locTexAlphaScale = -1;
         unsigned int vao = 0, vbo = 0;
         size_t vboBytes = 0;
         RenderTexture2D target{};
@@ -349,6 +351,7 @@ void main()
             locFunction = rlGetLocationUniform(shader, "uFunction");
             locTextureAlpha = rlGetLocationUniform(shader, "uTextureAlpha");
             locGsUntextured = rlGetLocationUniform(shader, "uGsUntextured");
+            locTexAlphaScale = rlGetLocationUniform(shader, "uTexAlphaScale");
             vao = rlLoadVertexArray();
             return true;
         }
@@ -999,6 +1002,8 @@ void main()
             const int function = m.textureFunction, textureAlpha = m.textureAlpha ? 1 : 0;
             rlSetUniform(gpu.locFunction, &function, RL_SHADER_UNIFORM_INT, 1);
             rlSetUniform(gpu.locTextureAlpha, &textureAlpha, RL_SHADER_UNIFORM_INT, 1);
+            const float texAlphaScale = texture && texture->rawAlpha ? 255.0f / 128.0f : 1.0f;
+            rlSetUniform(gpu.locTexAlphaScale, &texAlphaScale, RL_SHADER_UNIFORM_FLOAT, 1);
             const int gsUntextured = m_gsUntextured ? 1 : 0;
             rlSetUniform(gpu.locGsUntextured, &gsUntextured, RL_SHADER_UNIFORM_INT, 1);
             const float alphaRef = m.alphaRef / 128.0f;
