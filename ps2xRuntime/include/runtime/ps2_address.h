@@ -7,10 +7,12 @@
 
 // The guest's loads and stores go through these on every access: forced inline, as GCC stops inlining in the very
 // large generated functions and each access then paid a call.
+#ifndef PS2_ALWAYS_INLINE // (a build can define it as plain inline to compare)
 #if defined(_MSC_VER)
 #define PS2_ALWAYS_INLINE __forceinline
 #else
 #define PS2_ALWAYS_INLINE inline __attribute__((always_inline))
+#endif
 #endif
 
 static inline constexpr uint32_t PS2_EE_UNCACHED_RAM_MIRROR_BASE = 0x20000000u;
