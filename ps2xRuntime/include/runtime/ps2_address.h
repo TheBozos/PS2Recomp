@@ -5,6 +5,14 @@
 
 #include "runtime/ps2_memory_map.h"
 
+// The guest's loads and stores go through these on every access: forced inline, as GCC stops inlining in the very
+// large generated functions and each access then paid a call.
+#if defined(_MSC_VER)
+#define PS2_ALWAYS_INLINE __forceinline
+#else
+#define PS2_ALWAYS_INLINE inline __attribute__((always_inline))
+#endif
+
 static inline constexpr uint32_t PS2_EE_UNCACHED_RAM_MIRROR_BASE = 0x20000000u;
 static inline constexpr uint32_t PS2_EE_UNCACHED_RAM_MIRROR_SIZE = 0x20000000u;
 static inline constexpr uint32_t PS2_KSEG0_BASE = 0x80000000u;
@@ -51,8 +59,11 @@ static inline constexpr bool Ps2IsPhysicalSpecialAddress(uint32_t physAddr)
            (physAddr >= PS2_VU0_CODE_BASE && physAddr < (PS2_VU1_DATA_BASE + PS2_VU1_DATA_SIZE));
 }
 
-static inline constexpr bool Ps2IsSpecialAddress(uint32_t addr)
+static PS2_ALWAYS_INLINE constexpr bool Ps2IsSpecialAddress(uint32_t addr)
 {
+    // Main RAM (kuseg 0 to 32 MB): no special region lies there, and it is where nearly every access goes.
+    if (addr < PS2_RAM_SIZE)
+        return false;
     if (Ps2IsKseg23Address(addr))
         return true;
 

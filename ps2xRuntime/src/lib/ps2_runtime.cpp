@@ -2407,7 +2407,9 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         return false;
     }
 
-    if (!hasFunction(targetPc))
+    // One table lookup for the test and the call (it was made twice, the target pushed on the history a third time).
+    RecompiledFunction *targetEntry = functionTableEntry(m_memory.getRDRAM(), targetPc);
+    if (targetEntry == nullptr || *targetEntry == nullptr)
     {
         if (isTrivialReturnStub(targetPc))
         {
@@ -2438,7 +2440,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         return false;
     }
 
-    RecompiledFunction targetFn = lookupFunction(targetPc);
+    RecompiledFunction targetFn = *targetEntry;
     const uint32_t entryPc = ctx->pc;
     const uint64_t jumpSerial = g_guestJumpSerial;
     targetFn(rdram, ctx, this);

@@ -539,17 +539,17 @@ inline void ps2Vu0FmacFlags(uint32_t &mac, uint16_t &status, __m128 res, uint32_
 // Fast path: Direct RDRAM access (masked).
 // Slow path: Full runtime->Load/Store
 
-static inline bool Ps2FastRangeIsContiguous(uint32_t offset, uint32_t bytes)
+static PS2_ALWAYS_INLINE bool Ps2FastRangeIsContiguous(uint32_t offset, uint32_t bytes)
 {
     return offset <= (PS2_RAM_SIZE - bytes);
 }
 
-static inline uint8_t Ps2FastRead8(const uint8_t *rdram, uint32_t addr)
+static PS2_ALWAYS_INLINE uint8_t Ps2FastRead8(const uint8_t *rdram, uint32_t addr)
 {
     return rdram[addr & PS2_RAM_MASK];
 }
 
-static inline uint16_t Ps2FastRead16(const uint8_t *rdram, uint32_t addr)
+static PS2_ALWAYS_INLINE uint16_t Ps2FastRead16(const uint8_t *rdram, uint32_t addr)
 {
     const uint32_t offset = addr & PS2_RAM_MASK;
     if (!Ps2FastRangeIsContiguous(offset, sizeof(uint16_t)))
@@ -569,7 +569,7 @@ static inline uint16_t Ps2FastRead16(const uint8_t *rdram, uint32_t addr)
     return value;
 }
 
-static inline uint32_t Ps2FastRead32(const uint8_t *rdram, uint32_t addr)
+static PS2_ALWAYS_INLINE uint32_t Ps2FastRead32(const uint8_t *rdram, uint32_t addr)
 {
     const uint32_t offset = addr & PS2_RAM_MASK;
     if (!Ps2FastRangeIsContiguous(offset, sizeof(uint32_t)))
@@ -589,7 +589,7 @@ static inline uint32_t Ps2FastRead32(const uint8_t *rdram, uint32_t addr)
     return value;
 }
 
-static inline uint64_t Ps2FastRead64(const uint8_t *rdram, uint32_t addr)
+static PS2_ALWAYS_INLINE uint64_t Ps2FastRead64(const uint8_t *rdram, uint32_t addr)
 {
     const uint32_t offset = addr & PS2_RAM_MASK;
     if (!Ps2FastRangeIsContiguous(offset, sizeof(uint64_t)))
@@ -609,7 +609,7 @@ static inline uint64_t Ps2FastRead64(const uint8_t *rdram, uint32_t addr)
     return value;
 }
 
-static inline __m128i Ps2FastRead128(const uint8_t *rdram, uint32_t addr)
+static PS2_ALWAYS_INLINE __m128i Ps2FastRead128(const uint8_t *rdram, uint32_t addr)
 {
     const uint32_t offset = addr & PS2_RAM_MASK;
     if (!Ps2FastRangeIsContiguous(offset, sizeof(__m128i)))
@@ -629,12 +629,12 @@ static inline __m128i Ps2FastRead128(const uint8_t *rdram, uint32_t addr)
     return value;
 }
 
-static inline void Ps2FastWrite8(uint8_t *rdram, uint32_t addr, uint8_t value)
+static PS2_ALWAYS_INLINE void Ps2FastWrite8(uint8_t *rdram, uint32_t addr, uint8_t value)
 {
     rdram[addr & PS2_RAM_MASK] = value;
 }
 
-static inline void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
+static PS2_ALWAYS_INLINE void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
 {
     const uint32_t offset = addr & PS2_RAM_MASK;
     if (!Ps2FastRangeIsContiguous(offset, sizeof(uint16_t)))
@@ -650,7 +650,7 @@ static inline void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
     std::memcpy(rdram + offset, &value, sizeof(value));
 }
 
-static inline void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
+static PS2_ALWAYS_INLINE void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
 {
     const uint32_t offset = addr & PS2_RAM_MASK;
     if (!Ps2FastRangeIsContiguous(offset, sizeof(uint32_t)))
@@ -666,7 +666,7 @@ static inline void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
     std::memcpy(rdram + offset, &value, sizeof(value));
 }
 
-static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
+static PS2_ALWAYS_INLINE void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
 {
     const uint32_t offset = addr & PS2_RAM_MASK;
     if (!Ps2FastRangeIsContiguous(offset, sizeof(uint64_t)))
@@ -682,7 +682,7 @@ static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
     std::memcpy(rdram + offset, &value, sizeof(value));
 }
 
-static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
+static PS2_ALWAYS_INLINE void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
 {
     const uint32_t offset = addr & PS2_RAM_MASK;
     if (!Ps2FastRangeIsContiguous(offset, sizeof(__m128i)))
