@@ -128,6 +128,10 @@ namespace ps2x::native
             // levels instead of the blur: every pixel's RGB becomes clamp(levelGain x max(0, min(F, levelHigh) -
             // levelLow)) per channel (0..1 values; a game's brightness / tone pass over its finished frame).
             bool levels = false;
+            // levelsByAlpha: each pixel moves toward its levels by its own alpha (0..1 of the target's, a GS frame's
+            // 0x80 = 1): a game whose pass adds the frame onto itself with Cs x As + Cd leaves its pixels of alpha 0
+            // (drawn so as not to be brightened) as they are.
+            bool levelsByAlpha = false;
             // scatter instead: a game's aerial perspective over its frame. Each pixel's GS Z (24-bit) gives the index
             // i = min(255, Z >> scatterShift) into scatterTable (R, G, B in-scatter, A transmittance, 128 = 1, R in the
             // low byte); RGB becomes F x A x 127 / 128 / 128 + table RGB x V / 128, V the in-scatter colour of the

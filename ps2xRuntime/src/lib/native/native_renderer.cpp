@@ -160,6 +160,25 @@ void main()
 }
 )";
 
+        // postEffect's levels weighed by the frame's alpha (PostEffect::levelsByAlpha): the frame (texture0).
+        const char *kLevelsShader = R"(#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+uniform sampler2D texture0;
+uniform vec3 uLift;
+uniform vec3 uDrop;
+uniform vec3 uGain;
+out vec4 finalColor;
+void main()
+{
+    vec4 frame = texture(texture0, fragTexCoord);
+    vec3 c = clamp(frame.rgb + uLift, 0.0, 1.0);
+    c = clamp(c - uDrop, 0.0, 1.0);
+    c = clamp(c * uGain, 0.0, 1.0);
+    finalColor = vec4(mix(frame.rgb, c, clamp(frame.a, 0.0, 1.0)), frame.a);
+}
+)";
+
         constexpr int kGlUnsignedByte = 0x1401;
         constexpr int kGlFloat = 0x1406;
         constexpr int kGlSrcAlpha = 0x0302;
@@ -334,8 +353,60 @@ void main()
         // horizontally, blur vertically, then mix back over the target at the far depth (or everywhere).
         // A postEffect's levels: full-target quads blended into it (its alpha kept): + (1 - high), - (1 - high + low),
         // then x gain (Cd x (gain - 1) + Cd, or Cd x gain below 1; twice above 2), the same steps as a GS would.
+        Shader levelsShader{};
+        int locLift = -1, locDrop = -1, locGainLevels = -1;
+        void levelsByAlphaPass(const Renderer::PostEffect &e, int w, int h)
+        {
+            if (levelsShader.id == 0)
+            {
+                levelsShader = LoadShaderFromMemory(nullptr, kLevelsShader);
+                locLift = GetShaderLocation(levelsShader, "uLift");
+                locDrop = GetShaderLocation(levelsShader, "uDrop");
+                locGainLevels = GetShaderLocation(levelsShader, "uGain");
+            }
+            if (scatterOut.texture.width != w || scatterOut.texture.height != h)
+            {
+                if (scatterOut.id != 0)
+                    UnloadRenderTexture(scatterOut);
+                scatterOut = LoadRenderTexture(w, h);
+            }
+            const float lift[3] = {1.0f - e.levelHigh[0], 1.0f - e.levelHigh[1], 1.0f - e.levelHigh[2]};
+            const float drop[3] = {lift[0] + e.levelLow[0], lift[1] + e.levelLow[1], lift[2] + e.levelLow[2]};
+            SetTextureFilter(target.texture, TEXTURE_FILTER_POINT);
+            BeginTextureMode(scatterOut);
+            ClearBackground(BLANK);
+            rlDisableColorBlend();
+            rlDisableDepthTest();
+            BeginShaderMode(levelsShader);
+            SetShaderValue(levelsShader, locLift, lift, SHADER_UNIFORM_VEC3);
+            SetShaderValue(levelsShader, locDrop, drop, SHADER_UNIFORM_VEC3);
+            SetShaderValue(levelsShader, locGainLevels, e.levelGain, SHADER_UNIFORM_VEC3);
+            DrawTexturePro(target.texture, Rectangle{0, 0, static_cast<float>(w), -static_cast<float>(h)},
+                           Rectangle{0, 0, static_cast<float>(w), static_cast<float>(h)}, Vector2{0, 0}, 0.0f, WHITE);
+            EndShaderMode();
+            EndTextureMode();
+            BeginTextureMode(target);
+            rlDrawRenderBatchActive();
+            setDepthAlways(false);
+            rlDisableColorBlend();
+            rlDisableDepthTest();
+            rlDisableDepthMask();
+            DrawTexturePro(scatterOut.texture, Rectangle{0, 0, static_cast<float>(w), -static_cast<float>(h)},
+                           Rectangle{0, 0, static_cast<float>(w), static_cast<float>(h)}, Vector2{0, 0}, 0.0f, WHITE);
+            rlDrawRenderBatchActive();
+            rlEnableColorBlend();
+            rlSetBlendMode(RL_BLEND_ALPHA);
+            rlEnableDepthMask();
+            rlEnableDepthTest();
+        }
+
         void levelsPass(const Renderer::PostEffect &e, int w, int h)
         {
+            if (e.levelsByAlpha)
+            {
+                levelsByAlphaPass(e, w, h);
+                return;
+            }
             constexpr int kZero = 0, kOne = 1, kSrcColour = 0x0300, kDstColour = 0x0306, kAdd = 0x8006, kReverseSubtract = 0x800B;
             BeginTextureMode(target);
             rlDrawRenderBatchActive();
