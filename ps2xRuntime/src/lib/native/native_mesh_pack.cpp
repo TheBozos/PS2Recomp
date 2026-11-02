@@ -220,6 +220,18 @@ namespace ps2x::native::packs
         return bound;
     }
 
+    LoadedImages::Image LoadedImages::bindCopy(const Image &source, uint32_t to, uint32_t from, uint32_t size)
+    {
+        Image copy = source;
+        const uint32_t offset = from - source.base;
+        copy.base = to - offset;
+        copy.first = offset;
+        copy.size = std::min(offset + size, source.size);
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_images.push_back(copy);
+        return copy;
+    }
+
     void LoadedImages::clear()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -231,7 +243,7 @@ namespace ps2x::native::packs
         std::lock_guard<std::mutex> lock(m_mutex);
         bool found = false;
         for (const Image &image : m_images)
-            if (address >= image.base && address < image.base + image.size)
+            if (address >= image.base + image.first && address < image.base + image.size)
             {
                 out = image;
                 found = true;

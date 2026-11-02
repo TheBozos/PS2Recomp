@@ -172,6 +172,7 @@ namespace ps2x::native::packs
             uint32_t base = 0, size = 0;
             const MeshFile *file = nullptr; // null: not in the pack, or not the image it was converted from
             uint32_t index = 0;             // the file's index in the pack
+            uint32_t first = 0;             // a copy of part of the file: it holds base + first .. base + size
         };
         struct Bound
         {
@@ -183,6 +184,9 @@ namespace ps2x::native::packs
         // An image of `size` bytes at `base` (rdram: EE memory, base masked to 32 MB), named as the pack names files.
         // replace: the game's list of loaded files starts again with this one.
         Bound bind(const MeshPack &pack, const uint8_t *rdram, const std::string &name, uint32_t base, uint32_t size, bool replace);
+        // The game's copy at `to` of `size` bytes from `from`, an address in `source` (a bound image): the file's objects
+        // in that range are found at the copy. Not checked against the file: the bytes are the source's.
+        Image bindCopy(const Image &source, uint32_t to, uint32_t from, uint32_t size);
         void clear();
         // The images in the order they were bound, under the lock: fn(const Image &) returns false to stop.
         template <typename F>
