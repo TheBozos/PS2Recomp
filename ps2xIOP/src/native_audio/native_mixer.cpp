@@ -459,6 +459,37 @@ namespace ps2x::audio
         std::lock_guard<std::mutex> lock(m_mutex);
         return inputOffsetOf(m_groups[group].input.position);
     }
+    void NativeMixer::moviePush(const int16_t *stereo, size_t frames)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_movieRead > 0u && m_movieRead * 2u >= m_movie.size() / 2u)
+        {
+            m_movie.erase(m_movie.begin(), m_movie.begin() + static_cast<std::ptrdiff_t>(m_movieRead * 2u));
+            m_movieRead = 0u;
+        }
+        m_movie.insert(m_movie.end(), stereo, stereo + frames * 2u);
+        m_movieQueued = true;
+        m_movieDry = 0u;
+    }
+    void NativeMixer::movieStart(int group)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_movieQueued && m_movieGroup < 0)
+            m_movieGroup = std::clamp(group, 0, kGroups - 1);
+    }
+    void NativeMixer::movieStop()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_movie.clear();
+        m_movieRead = 0u;
+        m_movieGroup = -1;
+        m_movieQueued = false;
+    }
+    bool NativeMixer::movieActive() const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_movieQueued;
+    }
     void NativeMixer::setInputHalfCallback(std::function<void(int group, int half)> half)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -622,9 +653,22 @@ namespace ps2x::audio
                     for (int side = 0; side < 2; ++side)
                     {
                         const uint8_t *p = in.memory + at + static_cast<uint32_t>(side) * 512u;
-                        const int16_t raw = static_cast<int16_t>(static_cast<uint16_t>(p[0] | (p[1] << 8u)));
+                        int16_t raw = static_cast<int16_t>(static_cast<uint16_t>(p[0] | (p[1] << 8u)));
+                        // A movie given directly plays in the group's input instead (moviePush), the game's input data
+                        // unheard: silence until the movie starts, then its frames.
+                        if (m_movieQueued)
+                            raw = m_movieGroup == g && m_movieRead * 2u + 1u < m_movie.size()
+                                      ? m_movie[m_movieRead * 2u + static_cast<size_t>(side)]
+                                      : int16_t{0};
                         g_inputRawPeak[g] = std::max(g_inputRawPeak[g], std::abs(static_cast<int>(raw)));
                         input[side] = mul15(raw, in.volume[side]);
+                    }
+                    if (m_movieQueued && m_movieGroup == g)
+                    {
+                        if (m_movieRead * 2u + 1u < m_movie.size())
+                            ++m_movieRead, m_movieDry = 0u;
+                        else if (++m_movieDry > kSampleRate * 3u / 10u)
+                            m_movie.clear(), m_movieRead = 0u, m_movieGroup = -1, m_movieQueued = false;
                     }
                     ++in.position;
                     const uint32_t half = in.samples / 2u;

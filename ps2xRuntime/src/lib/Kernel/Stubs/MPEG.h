@@ -19,6 +19,13 @@ namespace ps2_stubs
     // (default 128). The movie audio demuxed with them goes to the game's audio callbacks without back-pressure,
     // so a game whose audio buffers hold less needs a smaller lead.
     void setMpegMaxPicturesAhead(size_t pictures);
+    // A port's access to a movie as it is demuxed and shown (a native audio path for its movies): the audio sink gets
+    // each private stream 1 DATA packet's payload after its 4-byte sub-header (ff 90 00 channel), in stream order, with
+    // the pictures served so far of that playback; the picture hook each picture as it is served (0 the first).
+    using MpegAudioSink = void (*)(uint32_t mpegAddr, uint32_t channel, const uint8_t *data, size_t bytes, uint32_t picturesServed);
+    using MpegPictureHook = void (*)(uint32_t mpegAddr, uint32_t picture);
+    void setMpegAudioSink(MpegAudioSink sink);
+    void setMpegPictureHook(MpegPictureHook hook);
     // The game fed all of a movie's data: decode what is buffered, then let sceMpegIsEnd report the
     // end once the queued pictures are drained. libmpeg players end a stream by appending a
     // sequence_end_code to the IPU ring (the ezmpeg sample's videoDecFlush) and may never read

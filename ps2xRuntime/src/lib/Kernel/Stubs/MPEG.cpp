@@ -528,6 +528,8 @@ namespace ps2_stubs
         // sceMpegDemuxPssRing takes its input this many bytes (one CD sector) at a time, checking the limit between.
         constexpr uint32_t kDemuxChunkBytes = 2048u;
         std::atomic<size_t> g_maxDecodedPicturesAhead{kDefaultMaxDecodedPicturesAhead};
+        std::atomic<MpegAudioSink> g_mpegAudioSink{nullptr};
+        std::atomic<MpegPictureHook> g_mpegPictureHook{nullptr};
         // PS2X_MPEG_TRACE=1: every 30 pictures, the decode lead and the stream bytes the game's callbacks took (and
         // those none took) by type * 4 + channel since the last line.
         uint64_t g_mpegTraceGiven[32] = {}, g_mpegTraceDropped[32] = {};
@@ -1446,6 +1448,9 @@ namespace ps2_stubs
                             const uint32_t channel = buffer[payloadStart + 3u] != 0u
                                                          ? buffer[payloadStart + 3u]
                                                          : (buffer[payloadStart + 1u] & 0x0Fu);
+                            if (const MpegAudioSink sink = g_mpegAudioSink.load(std::memory_order_acquire))
+                                sink(mpegAddr, channel, buffer.data() + payloadStart + 4u, packetEnd - payloadStart - 4u,
+                                     playback.picturesServed);
                             queueStreamCallbackEvent(
                                 mpegAddr,
                                 kMpegStrDATA,
@@ -2018,6 +2023,16 @@ namespace ps2_stubs
                 runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_OK);
             }
         }
+    }
+
+    void setMpegAudioSink(MpegAudioSink sink)
+    {
+        g_mpegAudioSink.store(sink, std::memory_order_release);
+    }
+
+    void setMpegPictureHook(MpegPictureHook hook)
+    {
+        g_mpegPictureHook.store(hook, std::memory_order_release);
     }
 
     void setMpegMaxPicturesAhead(size_t pictures)
@@ -2652,6 +2667,8 @@ namespace ps2_stubs
                 height = playback.height;
                 frameCount = playback.picturesServed;
                 playback.picturesServed += 1u;
+                if (const MpegPictureHook hook = g_mpegPictureHook.load(std::memory_order_acquire))
+                    hook(mpegAddr, frameCount);
                 static const bool s_trace = std::getenv("PS2X_MPEG_TRACE") != nullptr;
                 if (s_trace && playback.picturesServed % 30u == 1u)
                 {

@@ -94,6 +94,15 @@ namespace ps2x::audio
         uint32_t inputOffset(int group) const; // the byte the input plays next
         void setInputHalfCallback(std::function<void(int group, int half)> half);
 
+        // A movie's audio given directly (a port that has its movie's PCM from the runtime's decoder): stereo 16-bit
+        // frames queued by moviePush, played from movieStart at 48 kHz in place of the group's sound data input
+        // (through the same volume and mix), while the game's own input keeps playing silently. It stops by itself
+        // (and the game's input is heard again) once the queue has been empty for 0.3 s; movieStop drops it at once.
+        void moviePush(const int16_t *stereo, size_t frames);
+        void movieStart(int group);
+        void movieStop();
+        bool movieActive() const;
+
         // The PC's audio device: frames stereo 16-bit samples. Every 10 s of output (PS2X_NATIVE_AUDIO_STATS=0: never),
         // a line on stderr: key ons, bytes uploaded, input halves played, the loudest sample, voices playing, and
         // what reached the SPU2 emulation (absent: nothing).
@@ -175,5 +184,10 @@ namespace ps2x::audio
         std::vector<uint8_t> m_memory = std::vector<uint8_t>(kSoundMemory, 0u);
         Group m_groups[kGroups];
         std::function<void(int group, int half)> m_inputHalf;
+        std::vector<int16_t> m_movie; // queued stereo frames
+        size_t m_movieRead = 0;       // the next frame to play (in frames)
+        int m_movieGroup = -1;        // the group it plays in, -1 while not started
+        bool m_movieQueued = false;   // frames pushed and not dropped
+        uint32_t m_movieDry = 0;      // output frames since the queue ran empty
     };
 }
