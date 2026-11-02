@@ -29,7 +29,7 @@ uniform vec4 uM[4];
 uniform vec4 uScreen;
 uniform float uDepthMax;
 out vec2 vUv;
-out vec4 vCol;
+noperspective out vec4 vCol;
 out float vFog;
 void main()
 {
@@ -50,7 +50,7 @@ void main()
         // premultiplied colour and coverage (opaque draws cover fully), so present() composites it over the window.
         const char *kFragmentShader = R"(#version 330
 in vec2 vUv;
-in vec4 vCol;
+noperspective in vec4 vCol;
 in float vFog;
 uniform sampler2D uTex;
 uniform int uTextured;
