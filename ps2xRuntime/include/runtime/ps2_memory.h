@@ -242,9 +242,6 @@ public:
     // An MSCAL / MSCALF whose program VU1 skips (ps2x::native::setVu1Gate): the native port draws it instead.
     using Vu1SkipCallback = std::function<void(uint32_t startPC)>;
     void setVu1SkipCallback(Vu1SkipCallback cb) { m_vu1SkipCallback = std::move(cb); }
-    // A VIF1 MARK whose group the native port drew (ps2x::native::setVif1MarkGate).
-    using Vif1MarkCallback = std::function<void(uint64_t group)>;
-    void setVif1MarkCallback(Vif1MarkCallback cb) { m_vif1MarkCallback = std::move(cb); }
     // VIF0 MSCAL/MSCALF (start pc in bytes) and MSCNT (~0u: continue at the current pc).
     using Vu0MscalCallback = std::function<void(uint32_t startPC)>;
     void setVu0MscalCallback(Vu0MscalCallback cb) { m_vu0MscalCallback = std::move(cb); }
@@ -406,7 +403,6 @@ public:
     GifArbiter *m_gifArbiter = nullptr;
     Vu1MscalCallback m_vu1MscalCallback;
     Vu1SkipCallback m_vu1SkipCallback;
-    Vif1MarkCallback m_vif1MarkCallback;
     Vu0MscalCallback m_vu0MscalCallback;
     Vu1MscntCallback m_vu1MscntCallback;
 

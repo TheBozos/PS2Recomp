@@ -1505,11 +1505,6 @@ bool PS2Runtime::syncCoreSubsystems()
                                     if (ps2x::native::Renderer::instance().hasGroup(++s_group) && m_gs)
                                         m_gs->queueNativeDraw(s_group, 0); // (a setup's group has none: its strips follow)
                                 });
-    m_memory.setVif1MarkCallback([this](uint64_t group)
-                                 {
-                                     if (ps2x::native::Renderer::instance().hasGroup(group) && m_gs)
-                                         m_gs->queueNativeDraw(group, 0);
-                                 });
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  {
                                      // On the VIF1 worker the EE has moved on: use its FBRST from when the transfer was

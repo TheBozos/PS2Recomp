@@ -51,6 +51,10 @@ namespace ps2x::native
             // A DIRECT packet the port draws itself (true: drawn, the GS does not get it); asked before the adapter's
             // own rule (directs) while active, with the packet's quadwords.
             std::function<bool(Vu1StreamAdapter &adapter, const uint32_t *packet, size_t qwords)> drawDirect;
+            // A VIF MARK the port left in the game's VIF1 list where its EE-built draws belong (true: they were drawn,
+            // after the next group began). Asked in stream order while active, so the port's EE-built draws and its
+            // programs' draws share the GS stream's group numbering.
+            std::function<bool(Vu1StreamAdapter &adapter, uint16_t mark)> drawMark;
             bool directs = true; // DIRECT packets that only draw (no image transfer) drawn natively
             // The sandbox's and the DIRECTs' draws go to the GS front end with their packets' register writes
             // (GifToNative::setGsWrites): for the native GL GS renderer, whose textures and render targets they then
@@ -92,6 +96,7 @@ namespace ps2x::native
         void run(const uint32_t *words, size_t count);
         void program(uint32_t cmd, uint32_t pc);
         void direct(const uint32_t *words, size_t qwords, size_t size);
+        void mark(uint16_t value);
         void publish();
         void runSandbox(bool resumed, uint32_t pc);
 

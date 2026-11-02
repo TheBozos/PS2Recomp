@@ -106,10 +106,10 @@ namespace ps2x::native
 
     void setVif1MarkGate(Vif1MarkGate gate) { g_markGate.store(gate, std::memory_order_release); }
 
-    uint64_t vif1MarkGroup(uint16_t mark)
+    bool vif1MarkSkipped(uint16_t mark)
     {
         const Vif1MarkGate gate = g_markGate.load(std::memory_order_acquire);
-        return gate ? gate(mark) : 0u;
+        return gate && gate(mark);
     }
 
     bool directSkipped(uint32_t qwords)
