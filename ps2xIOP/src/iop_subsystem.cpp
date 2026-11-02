@@ -249,6 +249,11 @@ namespace ps2x::iop
         return m_impl->emulator.freeMemory(address);
     }
 
+    uint32_t IopSubsystem::maxFreeMemory() const
+    {
+        return m_impl->emulator.maxFreeMemory();
+    }
+
     bool IopSubsystem::readMemory(uint32_t address, void *destination, size_t size) const
     {
         return m_impl->emulator.readMemory(address, destination, size);

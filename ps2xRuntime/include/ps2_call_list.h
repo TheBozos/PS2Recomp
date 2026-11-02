@@ -542,6 +542,9 @@
     X(sceSifLoadFileReset)                    \
     X(sceSifLoadIopHeap)                      \
     X(sceSifLoadModuleBuffer)                 \
+    X(sceSifQueryMaxFreeMemSize)              \
+    X(sceSifQueryMemSize)                     \
+    X(sceSifQueryTotalFreeMemSize)            \
     X(sceSifRebootIop)                        \
     X(sceSifRegisterRpc)                      \
     X(sceSifRemoveCmdHandler)                 \
