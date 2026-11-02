@@ -379,6 +379,21 @@ namespace ps2_stubs
 
         CdReadArgs selected{a0, a1, a2, "a0/a1/a2"};
         bool ok = tryRead(selected);
+        // Deterministic mode: the read takes the time a PS2's drive would (DVD at 4x, ~5.28 MB/s: 114,400 EE cycles a
+        // 2048-byte sector), charged as EE time, so the IOP, the timers and the vblanks advance through a load as they
+        // would on the console. Without it a load took no time at all: the IOP's sound driver answered the menus'
+        // sound teardown after the level had been loaded over the menus' memory, and wrote into the level (a freeze
+        // on a story started at Midtown Suburbs).
+        if (ok && ps2x::det::enabled() && runtime && a1 != 0u && a1 <= PS2_RAM_SIZE / kCdSectorSize)
+        {
+            constexpr uint64_t kSectorCycles = 114400u;
+            for (uint64_t left = static_cast<uint64_t>(a1) * kSectorCycles; left != 0u;)
+            {
+                const uint32_t step = static_cast<uint32_t>(std::min<uint64_t>(left, 1u << 24));
+                runtime->eeScheduler().accountCycles(step);
+                left -= step;
+            }
+        }
         static const bool logReads = std::getenv("PS2X_CD_LOG") != nullptr;
         if (logReads)
             std::cerr << "[cd] sceCdRead lbn=0x" << std::hex << a0 << " sectors=0x" << a1 << " buf=0x" << a2
