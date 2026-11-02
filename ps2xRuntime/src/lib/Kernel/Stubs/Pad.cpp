@@ -1,6 +1,7 @@
 #include "runtime/ps2_input_bindings.h"
 #include "Common.h"
 #include "Pad.h"
+#include "runtime/ps2_determinism.h"
 
 namespace ps2_stubs
 {
@@ -322,7 +323,7 @@ namespace ps2_stubs
                 }
                 else if (slot != 0)
                     return false; // a multitap's empty slot
-                else
+                else if (!ps2x::det::enabled()) // deterministic mode: no host input, the pad left at rest
                 {
                     applyGamepadState(state);
                     applyKeyboardState(state, portState.analogMode);
