@@ -164,6 +164,9 @@ namespace ps2x::native
         // A blended draw writes its own alpha to the target (As, as the GS does) instead of blending it with the
         // target's (As + Ad x (1 - As)): for a game whose later pass reads the frame's alpha (setGsAlphaWrites).
         void setGsAlphaWrites(bool on) { m_gsAlphaWrites = on; }
+        // An untextured draw's colour as the GS has it: the vertex colour as it is (0x80 = 128 of 255), the 0x80 = 1.0
+        // scale being the texture modulation's only (its alpha stays a blend factor, 0x80 = 1). Off: x 255 / 128 too.
+        void setGsUntexturedColour(bool on) { m_gsUntextured = on; }
         void beginGroup(uint64_t group) { m_group = group; }
         // A group has batches waiting (its GS marker is worth queueing): the VIF1 interpreter reaches a program after
         // the native port has drawn it (at the transfer's start), so a group without batches by then has none.
@@ -263,6 +266,7 @@ namespace ps2x::native
         bool m_enabled = false;
         bool m_streamDraws = false;
         bool m_gsAlphaWrites = false;
+        bool m_gsUntextured = false;
         uint64_t m_group = 0;
         std::mutex m_streamMutex;
         std::deque<StreamBatch> m_stream; // batches waiting for their group's point of the GS stream

@@ -60,6 +60,7 @@ uniform int uOpaque;
 uniform int uFog;
 uniform int uFunction;
 uniform int uTextureAlpha;
+uniform int uGsUntextured;
 uniform vec3 uFogColour;
 out vec4 fragColor;
 void main()
@@ -71,6 +72,8 @@ void main()
     else if (uTextured != 0 && uFunction >= 2)
         fragColor = vec4(texel.rgb * colour.rgb + colour.a,
                          uTextureAlpha != 0 ? (uFunction == 2 ? texel.a + colour.a : texel.a) : colour.a);
+    else if (uTextured == 0 && uGsUntextured != 0)
+        fragColor = vec4(vCol.rgb, colour.a); // the GS: an untextured colour as it is (0x80 = 128), its alpha a factor
     else
         fragColor = vec4(texel.rgb * colour.rgb, (uTextureAlpha != 0 ? texel.a : 1.0) * colour.a);
     fragColor = clamp(fragColor, 0.0, 1.0);
@@ -195,7 +198,7 @@ void main()
     {
         unsigned int shader = 0;
         int locM = -1, locScreen = -1, locDepthMax = -1, locTex = -1, locTextured = -1, locAlphaTest = -1, locAlphaRef = -1, locOpaque = -1, locFog = -1,
-            locFogColour = -1, locFunction = -1, locTextureAlpha = -1;
+            locFogColour = -1, locFunction = -1, locTextureAlpha = -1, locGsUntextured = -1;
         unsigned int vao = 0, vbo = 0;
         size_t vboBytes = 0;
         RenderTexture2D target{};
@@ -345,6 +348,7 @@ void main()
             locFogColour = rlGetLocationUniform(shader, "uFogColour");
             locFunction = rlGetLocationUniform(shader, "uFunction");
             locTextureAlpha = rlGetLocationUniform(shader, "uTextureAlpha");
+            locGsUntextured = rlGetLocationUniform(shader, "uGsUntextured");
             vao = rlLoadVertexArray();
             return true;
         }
@@ -995,6 +999,8 @@ void main()
             const int function = m.textureFunction, textureAlpha = m.textureAlpha ? 1 : 0;
             rlSetUniform(gpu.locFunction, &function, RL_SHADER_UNIFORM_INT, 1);
             rlSetUniform(gpu.locTextureAlpha, &textureAlpha, RL_SHADER_UNIFORM_INT, 1);
+            const int gsUntextured = m_gsUntextured ? 1 : 0;
+            rlSetUniform(gpu.locGsUntextured, &gsUntextured, RL_SHADER_UNIFORM_INT, 1);
             const float alphaRef = m.alphaRef / 128.0f;
             rlSetUniform(gpu.locTextured, &textured, RL_SHADER_UNIFORM_INT, 1);
             rlSetUniform(gpu.locAlphaTest, &alphaTest, RL_SHADER_UNIFORM_INT, 1);
