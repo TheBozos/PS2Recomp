@@ -1433,6 +1433,12 @@ bool PS2Runtime::freeIopMemory(uint32_t address)
     return m_iopSubsystem && m_iopSubsystem->freeMemory(address);
 }
 
+uint32_t PS2Runtime::maxFreeIopMemory()
+{
+    IopLock iop(m_iopMutex, m_iopWanted);
+    return m_iopSubsystem ? m_iopSubsystem->maxFreeMemory() : 0u;
+}
+
 bool PS2Runtime::readIopMemory(uint32_t address, void *destination, size_t size) const
 {
     IopLock iop(m_iopMutex, m_iopWanted);

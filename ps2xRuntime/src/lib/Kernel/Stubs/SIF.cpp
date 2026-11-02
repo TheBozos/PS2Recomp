@@ -354,6 +354,25 @@ namespace ps2_stubs
         setReturnU32(ctx, runtime ? runtime->allocateIopMemory(reqSize, 64u) : 0u);
     }
 
+    void sceSifQueryMemSize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        (void)runtime;
+        setReturnU32(ctx, 2u * 1024u * 1024u);
+    }
+
+    void sceSifQueryMaxFreeMemSize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        setReturnU32(ctx, runtime ? runtime->maxFreeIopMemory() : 0u);
+    }
+
+    void sceSifQueryTotalFreeMemSize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)rdram;
+        setReturnU32(ctx, runtime ? runtime->maxFreeIopMemory() : 0u);
+    }
+
     void sceSifAllocSysMemory(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)rdram;

@@ -180,6 +180,28 @@ void register_ps2_sif_dma_tests()
             t.IsTrue(getRegS32(env.ctx, 2) < 0, "sceSifDmaStat should be negative when transfer is complete");
         });
 
+        tc.Run("sceSifQuery*MemSize report the IOP heap sceSifAllocIopHeap allocates from", [](TestCase &t)
+        {
+            TestEnv env;
+
+            ps2_stubs::sceSifQueryMemSize(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(::getRegU32(&env.ctx, 2), 2u * 1024u * 1024u, "the IOP has 2 MB of RAM");
+
+            ps2_stubs::sceSifQueryMaxFreeMemSize(env.rdram.data(), &env.ctx, &env.runtime);
+            const uint32_t before = ::getRegU32(&env.ctx, 2);
+            t.IsTrue(before >= 0x10000u, "a fresh IOP heap should have a large free block");
+
+            ps2_stubs::sceSifQueryTotalFreeMemSize(env.rdram.data(), &env.ctx, &env.runtime);
+            t.IsTrue(::getRegU32(&env.ctx, 2) >= before, "the total free memory is at least the largest block");
+
+            setRegU32(env.ctx, 4, 0x8000u);
+            ps2_stubs::sceSifAllocIopHeap(env.rdram.data(), &env.ctx, &env.runtime);
+            t.IsTrue(::getRegU32(&env.ctx, 2) != 0u, "the allocation should succeed");
+
+            ps2_stubs::sceSifQueryMaxFreeMemSize(env.rdram.data(), &env.ctx, &env.runtime);
+            t.IsTrue(::getRegU32(&env.ctx, 2) <= before - 0x8000u, "an allocation should shrink the largest free block");
+        });
+
         tc.Run("IOP heap DMA uses private backing instead of aliasing EE RDRAM", [](TestCase &t)
         {
             TestEnv env;
