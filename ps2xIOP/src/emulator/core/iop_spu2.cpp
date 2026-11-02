@@ -165,7 +165,7 @@ namespace ps2x::iop::detail
         : m_memory(memory), m_ram(RamWords)
     {
         const char *wallClock = std::getenv("PS2X_SPU2_WALLCLOCK");
-        m_wallClock = wallClock && *wallClock == '1';
+        m_wallClock = wallClock && *wallClock == '1' && !native::deterministic(); // never in deterministic mode
         reset();
     }
 

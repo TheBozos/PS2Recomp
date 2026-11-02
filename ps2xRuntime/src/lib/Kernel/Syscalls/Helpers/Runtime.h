@@ -156,7 +156,9 @@ static bool localtimeSafe(const std::time_t *t, std::tm *out)
 static void encodePs2Time(std::time_t t, uint8_t out[8])
 {
     std::tm tm{};
-    if (!localtimeSafe(&t, &tm))
+    if (ps2x::det::enabled()) // deterministic mode: every file date is the fixed date
+        tm = ps2x::det::fixedDate();
+    else if (!localtimeSafe(&t, &tm))
     {
         std::memset(out, 0, 8);
         return;
@@ -191,6 +193,8 @@ static bool gmtimeSafe(const std::time_t *t, std::tm *out)
 
 static int getTimezoneOffsetMinutes()
 {
+    if (ps2x::det::enabled()) // deterministic mode: UTC
+        return 0;
     std::time_t now = std::time(nullptr);
     std::tm local{};
     std::tm gmt{};

@@ -435,6 +435,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_memory.cpp
     src/lib/ps2_overlay_modules.cpp
     src/lib/ps2_pad.cpp
+    src/lib/ps2_reference.cpp
     src/lib/ps2_input_bindings.cpp
     src/lib/ps2_video_settings.cpp
     src/lib/ps2_debug_ui.cpp

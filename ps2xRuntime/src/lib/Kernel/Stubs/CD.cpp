@@ -2,6 +2,7 @@
 #include "CD.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/ps2_determinism.h"
 
 #include <deque>
 
@@ -716,6 +717,9 @@ namespace ps2_stubs
 #else
         localtime_r(&now, &localTm);
 #endif
+        // Deterministic mode: a fixed date (games seed their random numbers from it).
+        if (ps2x::det::enabled())
+            localTm = ps2x::det::fixedDate();
 
         // sceCdCLOCK format (BCD fields).
         clockData[0] = 0;

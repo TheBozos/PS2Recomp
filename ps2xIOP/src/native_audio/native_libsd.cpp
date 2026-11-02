@@ -231,51 +231,69 @@ namespace
         g_state.coreAttributes[entry] = value;
     }
 
+    // Deterministic mode (the mixer clocked by the IOP): the mix brought up to the IOP's cycle before the call acts on
+    // it or reads it back, so what a driver sees changes only with the IOP's own time.
+    void syncMixer()
+    {
+        if (mixer().clocked())
+            mixer().advanceTo(ps2x::iop::native::currentCycle());
+    }
+
     // The hooks: libsd's calling convention.
     void sdInit(Env &e)
     {
+        syncMixer();
         mixer().reset();
         g_state = State{};
         ret(e, 0u);
     }
     void sdQuit(Env &e)
     {
+        syncMixer();
         ret(e, 0u);
     }
     void sdSetParam(Env &e)
     {
+        syncMixer();
         setParam(arg(e, 0) & 0xFFFFu, arg(e, 1));
         ret(e, 0u);
     }
     void sdGetParam(Env &e)
     {
+        syncMixer();
         ret(e, getParam(arg(e, 0) & 0xFFFFu));
     }
     void sdSetSwitch(Env &e)
     {
+        syncMixer();
         setSwitch(arg(e, 0) & 0xFFFFu, arg(e, 1));
         ret(e, 0u);
     }
     void sdGetSwitch(Env &e)
     {
+        syncMixer();
         ret(e, getSwitch(arg(e, 0) & 0xFFFFu));
     }
     void sdSetAddr(Env &e)
     {
+        syncMixer();
         setAddr(arg(e, 0) & 0xFFFFu, arg(e, 1));
         ret(e, 0u);
     }
     void sdGetAddr(Env &e)
     {
+        syncMixer();
         ret(e, getAddr(arg(e, 0) & 0xFFFFu));
     }
     void sdSetCoreAttr(Env &e)
     {
+        syncMixer();
         setCoreAttr(arg(e, 0) & 0xFFFFu, arg(e, 1));
         ret(e, 0u);
     }
     void sdGetCoreAttr(Env &e)
     {
+        syncMixer();
         const auto it = g_state.coreAttributes.find(arg(e, 0) & 0xFFFFu);
         ret(e, it == g_state.coreAttributes.end() ? 0u : it->second);
     }
@@ -304,6 +322,7 @@ namespace
     }
     void sdProcBatch(Env &e)
     {
+        syncMixer();
         const uint32_t batch = arg(e, 0), returns = arg(e, 1), count = arg(e, 2);
         for (uint32_t i = 0; i < count; ++i)
         {
@@ -316,6 +335,7 @@ namespace
     }
     void sdProcBatchEx(Env &e)
     {
+        syncMixer();
         const uint32_t batch = arg(e, 0), returns = arg(e, 1), count = arg(e, 2), voices = arg(e, 3);
         uint32_t written = 0;
         for (uint32_t i = 0; i < count; ++i)
@@ -352,6 +372,7 @@ namespace
     // 3+ choose DMA or I/O: the same here). Done when it returns.
     void sdVoiceTrans(Env &e)
     {
+        syncMixer();
         const uint32_t mode = arg(e, 1) & 3u, iop = arg(e, 2), sound = arg(e, 3), size = arg(e, 4);
         if (mode == 0u || mode == 3u)
         {
@@ -373,6 +394,7 @@ namespace
     }
     void sdVoiceTransStatus(Env &e)
     {
+        syncMixer();
         ret(e, 1u); // done
     }
     // sceSdBlockTrans(channel, mode, iop address, size[, start]): the sound data input of core channel, played from
@@ -386,6 +408,7 @@ namespace
     }
     void sdBlockTrans(Env &e)
     {
+        syncMixer();
         const uint32_t channel = arg(e, 0) & 1u, mode = arg(e, 1), iop = arg(e, 2), size = arg(e, 3);
         static int s_logged = 0;
         if (logging() && s_logged++ < 20)
@@ -422,6 +445,7 @@ namespace
     // sceSdBlockTransStatus(channel, flag): where the input plays now, | 1 << 24 while in the second half.
     void sdBlockTransStatus(Env &e)
     {
+        syncMixer();
         const uint32_t channel = arg(e, 0) & 1u;
         if (!mixer().inputPlaying(static_cast<int>(channel)))
         {
@@ -434,6 +458,7 @@ namespace
     }
     void sdSetTransCallback(Env &e)
     {
+        syncMixer();
         const uint32_t channel = arg(e, 0) & 1u, previous = g_state.transCallback[channel].function;
         g_state.transCallback[channel] = State::Callback{arg(e, 1), 0u, e.cpu.gpr[28]};
         if (logging())
@@ -442,6 +467,7 @@ namespace
     }
     void sdSetTransIntrHandler(Env &e)
     {
+        syncMixer();
         const uint32_t channel = arg(e, 0) & 1u, previous = g_state.transHandler[channel].function;
         g_state.transHandler[channel] = State::Callback{arg(e, 1), arg(e, 2), e.cpu.gpr[28]};
         if (logging())
@@ -450,12 +476,14 @@ namespace
     }
     void sdSetIrqCallback(Env &e)
     {
+        syncMixer();
         const uint32_t previous = g_state.irqCallback;
         g_state.irqCallback = arg(e, 0);
         ret(e, previous);
     }
     void sdReturnZero(Env &e)
     {
+        syncMixer();
         ret(e, 0u);
     }
 
@@ -463,6 +491,7 @@ namespace
     // int delay; int feedback}. The depths are the effect volumes; the area is the mode's size below the effect end.
     void sdSetEffectAttr(Env &e)
     {
+        syncMixer();
         const int core = static_cast<int>(arg(e, 0) & 1u);
         const uint32_t attr = arg(e, 1);
         const uint32_t mode = e.r32(attr + 4u);
@@ -487,6 +516,7 @@ namespace
     }
     void sdGetEffectAttr(Env &e)
     {
+        syncMixer();
         const int core = static_cast<int>(arg(e, 0) & 1u);
         const uint32_t attr = arg(e, 1);
         const auto &effect = g_state.effect[core];
@@ -500,6 +530,7 @@ namespace
     // sceSdClearEffectWorkArea(core, channel, mode).
     void sdClearEffectWorkArea(Env &e)
     {
+        syncMixer();
         const int core = static_cast<int>(arg(e, 0) & 1u);
         const uint32_t mode = arg(e, 2) & 0xFFu;
         if (mode < 10u)

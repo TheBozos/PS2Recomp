@@ -3,6 +3,8 @@
 #include "runtime/native/native_renderer.h"
 #include "runtime/native/native_vu0_hle.h"
 #include "runtime/ps2_store_patch.h"
+#include "runtime/ps2_determinism.h"
+#include "runtime/ps2_reference.h"
 
 #include "raylib.h"
 #include "rlgl.h"
@@ -1037,10 +1039,11 @@ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
     // PS2X_IOP_WALLCLOCK=1: the IOP's time follows the host's clock (in EE cycles, the IOP running at an eighth),
     // not the EE cycles the game ran: its timers, vblank interrupts and scheduler, and so the sound drivers' ticks,
     // keep real time whatever the frame rate. A gap longer than 50 ms (a pause, a debugger) counts as 50 ms.
+    // PS2X_DETERMINISTIC=1: never (the IOP on the EE's cycles alone).
     static const bool s_wallClock = []
     {
         const char *value = std::getenv("PS2X_IOP_WALLCLOCK");
-        return value && *value == '1';
+        return value && *value == '1' && !ps2x::det::enabled();
     }();
     if (s_wallClock)
     {
@@ -1624,7 +1627,8 @@ bool PS2Runtime::syncCoreSubsystems()
         m_memory.setVif1Threaded(true);
     if (const char *lag = std::getenv("PS2X_GS_LAG"); lag && lag[0] == '1')
         m_memory.setGsLag(true);
-    if (const char *iopThread = std::getenv("PS2X_IOP_THREAD"); iopThread && iopThread[0] == '1')
+    // (Never in deterministic mode: the IOP runs its slices on the EE thread, at the EE's cycles.)
+    if (const char *iopThread = std::getenv("PS2X_IOP_THREAD"); iopThread && iopThread[0] == '1' && !ps2x::det::enabled())
         setIopThreaded(true);
 
     m_boundRdram = rdram;
@@ -1634,6 +1638,7 @@ bool PS2Runtime::syncCoreSubsystems()
 
 bool PS2Runtime::initialize(const char *title)
 {
+    (void)ps2x::reference::active(); // PS2X_REFERENCE: read now, so the calls are recorded from the first one
     try
     {
         if (!m_memory.initialize())
@@ -2443,7 +2448,11 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     RecompiledFunction targetFn = *targetEntry;
     const uint32_t entryPc = ctx->pc;
     const uint64_t jumpSerial = g_guestJumpSerial;
-    targetFn(rdram, ctx, this);
+    // PS2X_REFERENCE: the port's library and kernel stubs recorded with their arguments and result.
+    if (ps2x::reference::g_tracingCalls && ps2x::reference::tracesAddress(targetPc)) [[unlikely]]
+        ps2x::reference::tracedCall(targetPc, targetFn, rdram, ctx, this);
+    else
+        targetFn(rdram, ctx, this);
 
     // The callee is unwinding to the dispatcher with ctx->pc = where to resume. That pc can be
     // this call's own target (recursion: A calls B, B calls A, a checkpoint fires at the inner
@@ -2689,6 +2698,26 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx, uint32_t encod
     const uint32_t syscallId = (encodedSyscallId != 0u)
                                    ? encodedSyscallId
                                    : getRegU32(ctx, 3); // $v1 / $3 is the EE kernel syscall number
+
+    if (ps2x::reference::g_tracingCalls) [[unlikely]]
+    {
+        const size_t slot = ps2x::reference::noteSyscallEntry(syscallId, ctx);
+        bool handled = false;
+        try
+        {
+            handled = ps2_syscalls::dispatchNumericSyscall(syscallId, rdram, ctx, this);
+        }
+        catch (...)
+        {
+            ps2x::reference::noteSyscallResult(slot, ctx, true);
+            throw;
+        }
+        ps2x::reference::noteSyscallResult(slot, ctx, false);
+        if (handled)
+            return;
+        ps2_syscalls::TODO(rdram, ctx, this, encodedSyscallId);
+        return;
+    }
 
     if (ps2_syscalls::dispatchNumericSyscall(syscallId, rdram, ctx, this))
     {

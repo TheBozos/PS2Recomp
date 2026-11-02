@@ -99,6 +99,21 @@ namespace ps2x::audio
         // what reached the SPU2 emulation (absent: nothing).
         void render(int16_t *out, size_t frames);
 
+        // Clocked by the IOP (PS2X_DETERMINISTIC=1, setClocked): the mix is made on the IOP's thread, a 48 kHz sample
+        // per 768 IOP cycles, by advanceTo(the IOP's cycle) (before each libsd call and at the end of each IOP slice),
+        // so what the drivers read back (envelopes, ended voices, input positions and halves) changes only at guest
+        // points; render() then only takes the samples made from a queue (silence when it runs dry, the oldest dropped
+        // when the device falls behind by more than the queue holds).
+        void setClocked(bool clocked);
+        bool clocked() const { return m_clocked; }
+        void advanceTo(uint64_t iopCycle);
+
+        // The samples mixed since the last take (any mode, the emulated SPU2's output as well: noteMixed), for the
+        // reference recorder's per-frame sound: FNV-1a 64 of them (int16 little-endian, left then right) and their
+        // count (stereo samples). The first take turns the digest on.
+        static void noteMixed(const int16_t *frames, size_t count);
+        static void takeMixed(uint64_t &hash, uint32_t &count);
+
     private:
         struct Volume
         {
@@ -172,6 +187,15 @@ namespace ps2x::audio
         void mix(int16_t *out, size_t frames); // under m_mutex
 
         mutable std::mutex m_mutex;
+        // Clocked mode: the next sample's IOP cycle count (in samples: cycle / 768) and the queue the device drains.
+        bool m_clocked = false;
+        bool m_clockStarted = false;
+        uint64_t m_samplesMade = 0;
+        std::mutex m_queueMutex;
+        std::vector<int16_t> m_queue; // ring of kQueueFrames stereo samples
+        size_t m_queueRead = 0, m_queueFill = 0;
+        std::vector<int16_t> m_scratch;
+        static constexpr size_t kQueueFrames = 16384u; // 0.34 s
         std::vector<uint8_t> m_memory = std::vector<uint8_t>(kSoundMemory, 0u);
         Group m_groups[kGroups];
         std::function<void(int group, int half)> m_inputHalf;
