@@ -1065,6 +1065,25 @@ void main()
         m_movieWidth = width;
         m_movieHeight = height;
         ++m_movieGeneration;
-        m_movieTime = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        // PS2X_NATIVE_STATS=1: every 2 s of a movie, its pictures per second and the longest gap between two.
+        static const bool s_stats = [] { const char *v = std::getenv("PS2X_NATIVE_STATS"); return v && *v == '1'; }();
+        static double s_since = 0.0, s_longest = 0.0;
+        static int s_pictures = 0;
+        if (s_stats)
+        {
+            if (m_movieTime > 0.0)
+                s_longest = std::max(s_longest, now - m_movieTime);
+            if (s_since == 0.0 || now - m_movieTime > 1.0)
+                s_since = now, s_pictures = 0, s_longest = 0.0;
+            if (++s_pictures, now - s_since >= 2.0)
+            {
+                std::printf("[native] movie: %.1f pictures/s, longest gap %.0f ms\n", s_pictures / (now - s_since), s_longest * 1000.0);
+                s_since = now;
+                s_pictures = 0;
+                s_longest = 0.0;
+            }
+        }
+        m_movieTime = now;
     }
 }
