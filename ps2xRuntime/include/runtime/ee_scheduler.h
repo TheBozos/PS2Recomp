@@ -528,6 +528,10 @@ private:
     uint8_t *m_rdram = nullptr;
     std::array<std::deque<int>, kPriorityCount> m_readyQueues{};
     std::unordered_map<int, GuestThread> m_threads;
+    // accountCycles' thread, looked up again when the current thread changes (a lookup on every accounted block was
+    // 2% of the game thread); cleared where a thread record goes away.
+    int m_cycleThreadId = 0;
+    GuestThread *m_cycleThread = nullptr;
     std::unordered_map<int, EeSemaphore> m_semaphores;
     std::unordered_map<int, EeEventFlag> m_eventFlags;
     std::unordered_map<int, EeAlarm> m_alarms;

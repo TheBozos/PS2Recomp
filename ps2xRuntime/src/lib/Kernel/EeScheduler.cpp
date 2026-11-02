@@ -134,6 +134,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_rdram = rdram;
     m_readyQueues = {};
     m_threads.clear();
+    m_cycleThread = nullptr;
     m_hostDeadlineWakes.clear();
     m_semaphores.clear();
     m_eventFlags.clear();
@@ -616,8 +617,16 @@ void EeScheduler::accountCycles(uint32_t cycles) noexcept
 {
     const uint64_t elapsed = std::max<uint64_t>(1u, cycles) + m_runtime.memory().takeTimerSpinCycles();
     m_eeCycle += elapsed;
-    if (GuestThread *thread = m_currentThreadId != 0 ? currentThread() : nullptr)
-        thread->cycles += elapsed;
+    if (m_currentThreadId != 0)
+    {
+        if (m_cycleThread == nullptr || m_cycleThreadId != m_currentThreadId)
+        {
+            m_cycleThread = currentThread();
+            m_cycleThreadId = m_currentThreadId;
+        }
+        if (m_cycleThread)
+            m_cycleThread->cycles += elapsed;
+    }
     m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
     m_runtime.advanceIopEeCycles(elapsed);
     m_iopEeCycles += elapsed;
@@ -699,6 +708,7 @@ int EeScheduler::deleteThread(int id, uint32_t &ownedStack)
         ownedStack = it->second.stack;
     }
     m_threads.erase(it);
+    m_cycleThread = nullptr;
     publishSnapshot();
     return KE_OK;
 }
@@ -747,6 +757,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     if (deleteThreadRecord && id != kMainThreadId)
     {
         m_threads.erase(id);
+        m_cycleThread = nullptr;
     }
     if (ownedStack != 0u)
     {
@@ -2164,14 +2175,23 @@ void EeScheduler::processPendingEvents()
             dispatchIrq(false, 9u + timer);
         }
     }
-    std::deque<EeEvent> pending;
+    // A deque only when there are events (an empty std::deque allocates: 2% of the game thread in malloc).
+    bool anyEvents;
     {
         std::lock_guard lock(m_eventMutex);
-        pending.swap(m_events);
+        anyEvents = !m_events.empty();
     }
-    for (const EeEvent &event : pending)
+    if (anyEvents)
     {
-        processEvent(event);
+        std::deque<EeEvent> pending;
+        {
+            std::lock_guard lock(m_eventMutex);
+            pending.swap(m_events);
+        }
+        for (const EeEvent &event : pending)
+        {
+            processEvent(event);
+        }
     }
 
     {
