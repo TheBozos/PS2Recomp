@@ -105,6 +105,97 @@ namespace
         std::memset(&ctx, 0, sizeof(ctx));
     }
 
+    void putBothEndian32(std::vector<uint8_t> &out, size_t at, uint32_t value)
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            out[at + i] = static_cast<uint8_t>(value >> (8 * i));
+            out[at + 7 - i] = static_cast<uint8_t>(value >> (8 * i));
+        }
+    }
+
+    std::vector<uint8_t> isoRecord(const std::string &name, uint32_t lsn, uint32_t size, bool isDirectory)
+    {
+        std::vector<uint8_t> record(33 + name.size() + ((name.size() % 2) == 0 ? 1 : 0), 0);
+        record[0] = static_cast<uint8_t>(record.size());
+        putBothEndian32(record, 2, lsn);
+        putBothEndian32(record, 10, size);
+        record[25] = isDirectory ? 2 : 0;
+        record[28] = 1;
+        record[31] = 1;
+        record[32] = static_cast<uint8_t>(name.size());
+        std::memcpy(record.data() + 33, name.data(), name.size());
+        return record;
+    }
+
+    struct IsoTestFile
+    {
+        std::string name;
+        std::string data;
+    };
+
+    std::vector<uint8_t> isoVolume(uint32_t sectors, const std::vector<IsoTestFile> &rootFiles,
+                                   const std::vector<IsoTestFile> &subFiles)
+    {
+        constexpr size_t kSector = 2048;
+        std::vector<uint8_t> image(sectors * kSector, 0);
+        image[16 * kSector] = 1;
+        std::memcpy(image.data() + 16 * kSector + 1, "CD001", 5);
+        image[16 * kSector + 6] = 1;
+        putBothEndian32(image, 16 * kSector + 80, sectors);
+        const std::vector<uint8_t> root = isoRecord(std::string(1, '\0'), 18, 2048, true);
+        std::memcpy(image.data() + 16 * kSector + 156, root.data(), root.size());
+        image[17 * kSector] = 0xFF;
+
+        uint32_t lsn = 20;
+        auto place = [&](const std::vector<IsoTestFile> &files, size_t dirSector, std::vector<uint8_t> dir)
+        {
+            for (const IsoTestFile &file : files)
+            {
+                std::memcpy(image.data() + lsn * kSector, file.data.data(), file.data.size());
+                const std::vector<uint8_t> rec = isoRecord(file.name + ";1", lsn, static_cast<uint32_t>(file.data.size()), false);
+                dir.insert(dir.end(), rec.begin(), rec.end());
+                lsn += static_cast<uint32_t>((file.data.size() + kSector - 1) / kSector);
+            }
+            std::memcpy(image.data() + dirSector * kSector, dir.data(), dir.size());
+        };
+        std::vector<uint8_t> rootDir = isoRecord(std::string(1, '\0'), 18, 2048, true);
+        const std::vector<uint8_t> parent = isoRecord(std::string(1, '\1'), 18, 2048, true);
+        rootDir.insert(rootDir.end(), parent.begin(), parent.end());
+        const std::vector<uint8_t> sub = isoRecord("SUB", 19, 2048, true);
+        rootDir.insert(rootDir.end(), sub.begin(), sub.end());
+        std::vector<uint8_t> subDir = isoRecord(std::string(1, '\0'), 19, 2048, true);
+        subDir.insert(subDir.end(), parent.begin(), parent.end());
+        place(rootFiles, 18, rootDir);
+        place(subFiles, 19, subDir);
+        return image;
+    }
+
+    std::filesystem::path writeDualLayerImage(const std::filesystem::path &dir)
+    {
+        const std::vector<uint8_t> layer0 = isoVolume(32, {{"SYSTEM.CNF", "boot"}}, {{"A.BIN", "layer0-a"}});
+        const std::vector<uint8_t> layer1 = isoVolume(40, {}, {{"B.BIN", "layer1-b"}});
+        const std::filesystem::path path = dir / "dual.iso";
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char *>(layer0.data()), static_cast<std::streamsize>(layer0.size()));
+        out.write(reinterpret_cast<const char *>(layer1.data() + 16 * 2048),
+                  static_cast<std::streamsize>(layer1.size() - 16 * 2048));
+        return path;
+    }
+
+    void useCdImageFileSystem(const std::filesystem::path &cdRoot, const std::filesystem::path &mcRoot,
+                              const std::filesystem::path &image, bool enabled)
+    {
+        PS2Runtime::IoPaths ioPaths;
+        ioPaths.elfDirectory = cdRoot;
+        ioPaths.hostRoot = cdRoot;
+        ioPaths.cdRoot = cdRoot;
+        ioPaths.mcRoot = mcRoot;
+        ioPaths.cdImage = image;
+        ioPaths.cdImageFileSystem = enabled;
+        PS2Runtime::setIoPaths(ioPaths);
+    }
+
     int32_t syncMc(std::vector<uint8_t> &rdram, int32_t *cmdOut = nullptr)
     {
         R5900Context syncCtx{};
@@ -888,6 +979,101 @@ void register_ps2_runtime_io_tests()
             t.Equals(getRegS32(&test.ctx, 2), 1, "sceCdRead should succeed when cdImage is configured");
             t.Equals(std::memcmp(test.rdram.data() + bufAddr, "cd-image", 8), 0,
                      "sceCdRead should copy sector data from the configured image");
+        });
+
+        tc.Run("sceCdReadDvdDualInfo and sceCdLayerSearchFile answer from both layers of the image", [](TestCase &t)
+        {
+            TestContext test;
+            useCdImageFileSystem(test.paths.cdRoot, test.paths.mcRoot, writeDualLayerImage(test.paths.base), true);
+
+            constexpr uint32_t dualAddr = GUEST_BUFFER_AREA_START + 0x1D00;
+            constexpr uint32_t startAddr = GUEST_BUFFER_AREA_START + 0x1D04;
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, dualAddr);
+            setRegU32(test.ctx, 5, startAddr);
+            ps2_stubs::sceCdReadDvdDualInfo(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), 1, "sceCdReadDvdDualInfo should succeed");
+            t.Equals(readGuestS32(test.rdram.data(), dualAddr), 1, "the image should be reported dual-layer");
+            t.Equals(readGuestU32(test.rdram.data(), startAddr), 16u, "layer 1 should start 16 sectors before its volume descriptor");
+
+            constexpr uint32_t fileAddr = GUEST_BUFFER_AREA_START + 0x1D40;
+            constexpr uint32_t pathAddr = GUEST_STRING_AREA_START + 0xB00;
+            constexpr uint32_t bufAddr = GUEST_BUFFER_AREA_START + 0x2800;
+            writeGuestString(test.rdram.data(), pathAddr, "\\SUB\\B.BIN;1");
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, fileAddr);
+            setRegU32(test.ctx, 5, pathAddr);
+            setRegU32(test.ctx, 6, 1u);
+            ps2_stubs::sceCdLayerSearchFile(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), 1, "a layer 1 file should be found on layer 1");
+            t.Equals(readGuestU32(test.rdram.data(), fileAddr), 16u + 20u, "its sector should be the layer 1 start plus its own");
+            t.Equals(readGuestU32(test.rdram.data(), fileAddr + 4), 8u, "its size should come from the directory record");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, readGuestU32(test.rdram.data(), fileAddr));
+            setRegU32(test.ctx, 5, 1u);
+            setRegU32(test.ctx, 6, bufAddr);
+            ps2_stubs::sceCdRead(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(std::memcmp(test.rdram.data() + bufAddr, "layer1-b", 8), 0, "sceCdRead should read the layer 1 file at that sector");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, fileAddr);
+            setRegU32(test.ctx, 5, pathAddr);
+            ps2_stubs::sceCdSearchFile(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), 0, "sceCdSearchFile looks on layer 0 only");
+
+            writeGuestString(test.rdram.data(), pathAddr, "\\SUB");
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, fileAddr);
+            setRegU32(test.ctx, 5, pathAddr);
+            ps2_stubs::sceCdSearchFile(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), 1, "a directory should be found");
+            t.Equals(readGuestU32(test.rdram.data(), fileAddr), 19u, "at its own sector");
+
+            writeGuestString(test.rdram.data(), pathAddr, "cdrom0:\\sub\\a.bin;1");
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, fileAddr);
+            setRegU32(test.ctx, 5, pathAddr);
+            ps2_stubs::sceCdSearchFile(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), 1, "a layer 0 file should be found whatever its case and prefix");
+            t.Equals(readGuestU32(test.rdram.data(), fileAddr), 21u, "at its own sector");
+        });
+
+        tc.Run("sceCdReadDvdDualInfo and sceCdLayerSearchFile without the image file system", [](TestCase &t)
+        {
+            TestContext test;
+            useCdImageFileSystem(test.paths.cdRoot, test.paths.mcRoot, writeDualLayerImage(test.paths.base), false);
+            {
+                std::ofstream out(test.paths.cdRoot / "A.BIN", std::ios::binary);
+                out << "host";
+            }
+
+            constexpr uint32_t dualAddr = GUEST_BUFFER_AREA_START + 0x1D00;
+            constexpr uint32_t startAddr = GUEST_BUFFER_AREA_START + 0x1D04;
+            writeGuestU32(test.rdram.data(), dualAddr, 0xFFFFFFFFu);
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, dualAddr);
+            setRegU32(test.ctx, 5, startAddr);
+            ps2_stubs::sceCdReadDvdDualInfo(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(readGuestS32(test.rdram.data(), dualAddr), 0, "a disc read from files is single-layer");
+
+            constexpr uint32_t fileAddr = GUEST_BUFFER_AREA_START + 0x1D40;
+            constexpr uint32_t pathAddr = GUEST_STRING_AREA_START + 0xB00;
+            writeGuestString(test.rdram.data(), pathAddr, "\\A.BIN;1");
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, fileAddr);
+            setRegU32(test.ctx, 5, pathAddr);
+            setRegU32(test.ctx, 6, 0u);
+            ps2_stubs::sceCdLayerSearchFile(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), 1, "layer 0 should search like sceCdSearchFile");
+            t.IsTrue(readGuestU32(test.rdram.data(), fileAddr) >= 0x00100000u, "with a pseudo sector, as sceCdSearchFile");
+
+            clearContext(test.ctx);
+            setRegU32(test.ctx, 4, fileAddr);
+            setRegU32(test.ctx, 5, pathAddr);
+            setRegU32(test.ctx, 6, 1u);
+            ps2_stubs::sceCdLayerSearchFile(test.rdram.data(), &test.ctx, nullptr);
+            t.Equals(getRegS32(&test.ctx, 2), 0, "there is no layer 1");
         });
 
         tc.Run("sceCdInitEeCB runs the sceCdCallback function on its own thread, which may block", [](TestCase &t)

@@ -61,6 +61,7 @@ public:
         std::filesystem::path cdRoot;
         std::filesystem::path mcRoot;
         std::filesystem::path cdImage;
+        bool cdImageFileSystem = false;
     };
 
     PS2Runtime();

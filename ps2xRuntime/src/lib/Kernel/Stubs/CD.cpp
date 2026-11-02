@@ -734,8 +734,88 @@ namespace ps2_stubs
         sceCdRead(rdram, ctx, runtime);
     }
 
+    namespace
+    {
+        bool searchCdImageFile(uint8_t *rdram, R5900Context *ctx, uint32_t layer)
+        {
+            const uint32_t fileAddr = getRegU32(ctx, 4);
+            const std::string path = readPs2CStringBounded(rdram, getRegU32(ctx, 5), 260);
+            CdImageFsEntry found{};
+            if (path.empty() || !findCdImageFile(path, layer, found))
+            {
+                g_lastCdError = -1;
+                setReturnS32(ctx, 0);
+                return true;
+            }
+
+            CdFileEntry entry;
+            entry.baseLbn = found.lsn;
+            entry.sizeBytes = found.size;
+            entry.sectors = sectorsForBytes(found.size);
+            if (!writeCdSearchResult(rdram, fileAddr, path, entry))
+            {
+                g_lastCdError = -1;
+                setReturnS32(ctx, 0);
+                return true;
+            }
+            g_cdStreamingLbn = entry.baseLbn;
+            g_cdStreamingEndLbn = entry.baseLbn + entry.sectors;
+            g_lastCdError = 0;
+            setReturnS32(ctx, 1);
+            return true;
+        }
+    }
+
+    void sceCdLayerSearchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t layer = getRegU32(ctx, 6);
+        if (cdImageFileSystemEnabled())
+        {
+            searchCdImageFile(rdram, ctx, layer);
+            return;
+        }
+        if (layer != 0)
+        {
+            g_lastCdError = -1;
+            setReturnS32(ctx, 0);
+            return;
+        }
+        sceCdSearchFile(rdram, ctx, runtime);
+    }
+
+    void sceCdReadDvdDualInfo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        (void)runtime;
+        int32_t onDual = 0;
+        uint32_t layer1Start = 0;
+        if (cdImageFileSystemEnabled())
+        {
+            const CdImageFileSystem &fs = cdImageFileSystem();
+            if (fs.volumes.size() > 1)
+            {
+                onDual = 1;
+                layer1Start = fs.volumes[1].base;
+            }
+        }
+        if (uint8_t *p = getMemPtr(rdram, getRegU32(ctx, 4)))
+        {
+            std::memcpy(p, &onDual, sizeof(onDual));
+        }
+        if (uint8_t *p = getMemPtr(rdram, getRegU32(ctx, 5)))
+        {
+            std::memcpy(p, &layer1Start, sizeof(layer1Start));
+        }
+        g_lastCdError = 0;
+        setReturnS32(ctx, 1);
+    }
+
     void sceCdSearchFile(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (cdImageFileSystemEnabled())
+        {
+            searchCdImageFile(rdram, ctx, 0);
+            return;
+        }
         uint32_t fileAddr = getRegU32(ctx, 4);
         uint32_t pathAddr = getRegU32(ctx, 5);
         const std::string path = readPs2CStringBounded(rdram, pathAddr, 260);
