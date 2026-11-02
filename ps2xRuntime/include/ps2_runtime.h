@@ -93,6 +93,7 @@ public:
                      std::function<void(const ps2x::iop::RpcResult &)> done);
     uint32_t allocateIopMemory(uint32_t size, uint32_t alignment = 16u);
     bool freeIopMemory(uint32_t address);
+    uint32_t maxFreeIopMemory();
     bool readIopMemory(uint32_t address, void *destination, size_t size) const;
     bool writeIopMemory(uint32_t address, const void *source, size_t size);
     bool zeroIopMemory(uint32_t address, size_t size);

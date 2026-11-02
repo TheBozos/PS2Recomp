@@ -2174,6 +2174,11 @@ namespace ps2x::iop::detail
         return m_impl->memory.freeAllocation(address);
     }
 
+    uint32_t IopEmulator::maxFreeMemory() const
+    {
+        return m_impl->memory.maxFreeMemory();
+    }
+
     bool IopEmulator::readMemory(uint32_t address, void *destination, size_t size) const
     {
         return isMemoryRange(address, size) &&

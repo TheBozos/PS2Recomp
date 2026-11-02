@@ -24,6 +24,9 @@ namespace ps2_stubs
     void resetSifState();
     void sceSifAddCmdHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifAllocIopHeap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceSifQueryMemSize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceSifQueryMaxFreeMemSize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    void sceSifQueryTotalFreeMemSize(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifAllocSysMemory(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifBindRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifCheckStatRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
