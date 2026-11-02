@@ -1057,6 +1057,8 @@ void main()
         if (width <= 0 || height <= 0 || !rgba)
             return;
         std::lock_guard<std::mutex> lock(m_movieMutex);
+        if (m_movieGeneration == 0u)
+            std::printf("[native] movie pictures shown natively (%d x %d)\n", width, height);
         m_movie.assign(rgba, rgba + static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
         for (size_t i = 3; i < m_movie.size(); i += 4)
             m_movie[i] = 255u;
