@@ -161,6 +161,9 @@ namespace ps2x::native
         // render targets, each group is drawn into its target at its point of the GS stream, so it sorts with the GS
         // draws around it, and present() leaves the frame to the GS; otherwise present() draws as before.
         void setStreamDraws(bool on);
+        // A blended draw writes its own alpha to the target (As, as the GS does) instead of blending it with the
+        // target's (As + Ad x (1 - As)): for a game whose later pass reads the frame's alpha (setGsAlphaWrites).
+        void setGsAlphaWrites(bool on) { m_gsAlphaWrites = on; }
         void beginGroup(uint64_t group) { m_group = group; }
         // A group has batches waiting (its GS marker is worth queueing): the VIF1 interpreter reaches a program after
         // the native port has drawn it (at the transfer's start), so a group without batches by then has none.
@@ -259,6 +262,7 @@ namespace ps2x::native
         double m_movieTime = 0.0;
         bool m_enabled = false;
         bool m_streamDraws = false;
+        bool m_gsAlphaWrites = false;
         uint64_t m_group = 0;
         std::mutex m_streamMutex;
         std::deque<StreamBatch> m_stream; // batches waiting for their group's point of the GS stream

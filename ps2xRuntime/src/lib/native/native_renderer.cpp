@@ -949,7 +949,7 @@ void main()
             {
                 rlEnableColorBlend();
                 rlSetBlendFactorsSeparate(kGlSrcAlpha, m.blend == Material::Blend::Additive ? kGlOne : kGlOneMinusSrcAlpha,
-                                          kGlOne, kGlOneMinusSrcAlpha, kGlFuncAdd, kGlFuncAdd);
+                                          kGlOne, m_gsAlphaWrites ? 0 : kGlOneMinusSrcAlpha, kGlFuncAdd, kGlFuncAdd);
                 rlSetBlendMode(RL_BLEND_CUSTOM_SEPARATE);
             }
             if (m.depthWrite)
