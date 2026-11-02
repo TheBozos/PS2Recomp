@@ -20,19 +20,18 @@ namespace ps2x::native
         // thread), for the gates when VIF1 gets to it, in the same order.
         struct Decision
         {
-            uint32_t pc = 0; // an MSCAL's start, a DIRECT's size in quadwords, or a MARK's value
+            uint32_t pc = 0; // an MSCAL's start, or a DIRECT's size in quadwords
             bool skipped = false;
             bool direct = false;
-            bool mark = false;
             uint64_t cycles = 0; // a sandboxed program's VU1 cycles
         };
         std::mutex g_decisionsMutex;
         std::deque<Decision> g_decisions;
 
-        void noteDecision(uint32_t pc, bool skipped, bool direct, uint64_t cycles = 0, bool mark = false)
+        void noteDecision(uint32_t pc, bool skipped, bool direct, uint64_t cycles = 0)
         {
             std::lock_guard<std::mutex> lock(g_decisionsMutex);
-            g_decisions.push_back({pc, skipped, direct, mark, cycles});
+            g_decisions.push_back({pc, skipped, direct, cycles});
             if (g_decisions.size() > 65536u) // nobody takes them (no gate)
                 g_decisions.pop_front();
         }
@@ -47,7 +46,7 @@ namespace ps2x::native
                 {
                     const Decision decision = g_decisions.front();
                     g_decisions.pop_front();
-                    if (!decision.direct && !decision.mark && decision.pc == startPc)
+                    if (!decision.direct && decision.pc == startPc)
                     {
                         found = decision;
                         break;
@@ -74,17 +73,9 @@ namespace ps2x::native
             return false;
         }
 
-        // Everything before a MARK's own entry was VIF1's already (the observer saw the stream up to the MARK).
-        bool markGate(uint16_t mark)
-        {
-            std::lock_guard<std::mutex> lock(g_decisionsMutex);
-            const auto found = std::find_if(g_decisions.begin(), g_decisions.end(), [mark](const Decision &d) { return d.mark && d.pc == mark; });
-            if (found == g_decisions.end())
-                return false; // a transfer the adapter did not see
-            const bool skipped = found->skipped;
-            g_decisions.erase(g_decisions.begin(), found + 1);
-            return skipped;
-        }
+        // Drawn when VIF1 reaches the MARK, not when the adapter reads it: VIF1 may run a piece of a transfer the
+        // adapter reads only after, and the two must count the same groups.
+        bool markGate(uint16_t mark) { return Vu1StreamAdapter::instance().markReached(mark); }
 
         // A DIRECT packet that only draws (vertex kicks, no image transfer).
         bool drawsOnly(const uint32_t *words, size_t qwords)
@@ -400,19 +391,17 @@ namespace ps2x::native
         }
     }
 
-    void Vu1StreamAdapter::mark(uint16_t value)
+    bool Vu1StreamAdapter::markReached(uint16_t value)
     {
-        bool drawn = false;
-        if (m_config.drawMark && (!m_config.active || m_config.active()))
-        {
-            Renderer &renderer = Renderer::instance();
-            renderer.beginGroup(m_group + 1u);
-            renderer.setKey(0);
-            drawn = m_config.drawMark(*this, value);
-            if (drawn)
-                ++m_group;
-        }
-        noteDecision(value, drawn, false, 0, true);
+        if (!m_config.drawMark || (m_config.active && !m_config.active()))
+            return false;
+        Renderer &renderer = Renderer::instance();
+        renderer.beginGroup(m_group + 1u);
+        renderer.setKey(0);
+        if (!m_config.drawMark(*this, value))
+            return false;
+        ++m_group;
+        return true;
     }
 
     void Vu1StreamAdapter::run(const uint32_t *words, size_t count)
@@ -463,9 +452,6 @@ namespace ps2x::native
             case 0x05: // STMOD
                 m_vif.mode = imm & 3u;
                 m_sawMode = true;
-                break;
-            case 0x07: // MARK
-                mark(static_cast<uint16_t>(imm));
                 break;
             case 0x14: // MSCAL
             case 0x15: // MSCALF
