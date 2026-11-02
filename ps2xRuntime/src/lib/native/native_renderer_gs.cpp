@@ -218,45 +218,92 @@ void main()
         glDepthFunc(GL_LEQUAL);
     }
 
-    bool readFramebufferDepth(int width, int height, std::vector<float> &out)
+    bool readFramebufferDepthTiles(int width, int height, int tile, const std::vector<uint64_t> &tiles,
+                                   std::unordered_map<uint64_t, std::vector<float>> &out)
     {
-        // Asynchronous: this frame's depth goes into one pixel buffer while the other, read the frame before, is
-        // copied out (a synchronous read made the present thread wait for the GPU every frame).
+        // Asynchronous: this frame's depth goes into one pixel buffer while the other, read the frame before, is copied
+        // out (a synchronous read made the present thread wait for the GPU every frame). Only the rectangle around the
+        // tiles asked for, in one read, as the depth buffer's own integers: the whole depth buffer as floats each frame
+        // (4.6 MB at twice the PS2's resolution, more in full HD) was 15% of the present thread for a few lens flare
+        // samples, and a read per tile cost more still.
+        struct Pending
+        {
+            int width = 0, height = 0;
+            int x0 = 0, y0 = 0, w = 0, h = 0; // the rectangle read, top-down
+            std::vector<uint64_t> tiles;
+            bool filled = false;
+        };
         static GLuint s_buffers[2] = {};
-        static int s_width = 0, s_height = 0, s_next = 0;
-        static bool s_filled[2] = {};
-        const GLsizeiptr bytes = static_cast<GLsizeiptr>(width) * height * 4;
+        static GLsizeiptr s_capacity[2] = {};
+        static Pending s_pending[2];
+        static int s_next = 0;
         GLint packBuffer = 0, alignment = 4;
         glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &packBuffer);
         glGetIntegerv(GL_PACK_ALIGNMENT, &alignment);
         if (s_buffers[0] == 0)
             glGenBuffers(2, s_buffers);
-        if (width != s_width || height != s_height)
-        {
-            for (GLuint buffer : s_buffers)
-            {
-                glBindBuffer(GL_PIXEL_PACK_BUFFER, buffer);
-                glBufferData(GL_PIXEL_PACK_BUFFER, bytes, nullptr, GL_STREAM_READ);
-            }
-            s_width = width, s_height = height;
-            s_filled[0] = s_filled[1] = false;
-        }
         glPixelStorei(GL_PACK_ALIGNMENT, 4);
-        glBindBuffer(GL_PIXEL_PACK_BUFFER, s_buffers[s_next]);
-        glReadPixels(0, 0, width, height, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-        s_filled[s_next] = true;
+        Pending &pending = s_pending[s_next];
+        pending = Pending{width, height, 0, 0, 0, 0, tiles, true};
+        if (!tiles.empty())
+        {
+            int tx0 = INT32_MAX, ty0 = INT32_MAX, tx1 = -1, ty1 = -1;
+            for (uint64_t key : tiles)
+            {
+                const int tx = static_cast<int>(key & 0xffffffffu), ty = static_cast<int>(key >> 32);
+                tx0 = std::min(tx0, tx), ty0 = std::min(ty0, ty), tx1 = std::max(tx1, tx), ty1 = std::max(ty1, ty);
+            }
+            pending.x0 = tx0 * tile;
+            pending.y0 = ty0 * tile;
+            pending.w = std::min((tx1 + 1) * tile, width) - pending.x0;
+            pending.h = std::min((ty1 + 1) * tile, height) - pending.y0;
+            if (pending.w > 0 && pending.h > 0)
+            {
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, s_buffers[s_next]);
+                const GLsizeiptr bytes = static_cast<GLsizeiptr>(pending.w) * pending.h * 4;
+                if (bytes > s_capacity[s_next])
+                {
+                    glBufferData(GL_PIXEL_PACK_BUFFER, bytes, nullptr, GL_STREAM_READ);
+                    s_capacity[s_next] = bytes;
+                }
+                // GL counts rows from the bottom: the rectangle's last row first.
+                glReadPixels(pending.x0, height - pending.y0 - pending.h, pending.w, pending.h, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT,
+                             nullptr);
+            }
+            else
+                pending.tiles.clear();
+        }
         const int previous = 1 - s_next;
         s_next = previous;
         bool copied = false;
-        if (s_filled[previous])
+        const Pending &ready = s_pending[previous];
+        if (ready.filled && ready.width == width && ready.height == height)
         {
-            glBindBuffer(GL_PIXEL_PACK_BUFFER, s_buffers[previous]);
-            if (const void *data = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, bytes, GL_MAP_READ_BIT))
+            copied = true;
+            if (!ready.tiles.empty())
             {
-                out.resize(static_cast<size_t>(width) * height);
-                std::memcpy(out.data(), data, static_cast<size_t>(bytes));
-                glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-                copied = true;
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, s_buffers[previous]);
+                const GLsizeiptr readyBytes = static_cast<GLsizeiptr>(ready.w) * ready.h * 4;
+                if (const auto *data = static_cast<const uint32_t *>(glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, readyBytes, GL_MAP_READ_BIT)))
+                {
+                    for (uint64_t key : ready.tiles)
+                    {
+                        const int x0 = static_cast<int>(key & 0xffffffffu) * tile, y0 = static_cast<int>(key >> 32) * tile;
+                        std::vector<float> &values = out[key];
+                        values.assign(static_cast<size_t>(tile) * tile, 1.0f); // past the edge: far
+                        for (int y = y0; y < std::min(y0 + tile, ready.y0 + ready.h); ++y)
+                        {
+                            // The rectangle's row 0 is its bottom row.
+                            const uint32_t *row = data + static_cast<size_t>(ready.y0 + ready.h - 1 - y) * ready.w;
+                            for (int x = x0; x < std::min(x0 + tile, ready.x0 + ready.w); ++x)
+                                values[static_cast<size_t>(y - y0) * tile + static_cast<size_t>(x - x0)] =
+                                    static_cast<float>(static_cast<double>(row[x - ready.x0]) / 4294967295.0);
+                        }
+                    }
+                    glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+                }
+                else
+                    copied = false;
             }
         }
         glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(packBuffer));

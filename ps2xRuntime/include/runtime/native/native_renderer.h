@@ -379,7 +379,12 @@ namespace ps2x::native
         std::shared_ptr<Frame> m_shown, m_shownPrevious; // present thread: the frame drawn and the one before it
         std::atomic<double> m_depthWantedAt{-10.0};      // wantDepth()'s time (seconds)
         std::mutex m_depthMutex;
-        std::vector<float> m_depth; // window depth, bottom-up rows, of the frame presented last
+        // The window depth read back, by tiles of kDepthTile x kDepthTile pixels (top-down, key ty << 32 | tx; rows
+        // top-down in the tile, 1 past the window's edge): only around the pixels depthAt was asked for lately (the lens
+        // flares' few samples), not the whole frame each present.
+        static constexpr int kDepthTile = 32;
+        std::unordered_map<uint64_t, std::vector<float>> m_depthTiles; // of the frame presented last (or the one before)
+        std::unordered_map<uint64_t, double> m_depthTilesWanted;       // tile -> when depthAt last asked for it (seconds)
         int m_depthWidth = 0, m_depthHeight = 0;
         Screen m_depthScreen;
     };

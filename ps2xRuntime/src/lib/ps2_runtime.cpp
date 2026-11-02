@@ -1044,6 +1044,13 @@ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
     }();
     if (s_wallClock)
     {
+        // The EE accounts its cycles block by block, hundreds of thousands of calls a second: the host's clock is read
+        // once 20000 EE cycles have gone by (68 us of PS2 time), not on each (they were a quarter of the game thread's
+        // work). The IOP's time is the host's either way: it only advances in fewer, larger steps.
+        static uint64_t s_since = 0u;
+        if ((s_since += eeCycles) < 20000u)
+            return;
+        s_since = 0u;
         using Clock = std::chrono::steady_clock;
         static Clock::time_point s_last = Clock::now();
         static double s_carry = 0.0;

@@ -747,9 +747,11 @@ void main()
         return m_published && !m_published->batches.empty();
     }
 
-    // native_renderer_gs.cpp (raw GL): the bound framebuffer's depth, width x height floats, bottom-up rows, from the
-    // call before this one (false when there is none yet).
-    bool readFramebufferDepth(int width, int height, std::vector<float> &out);
+    // native_renderer_gs.cpp (raw GL): the bound framebuffer's (width x height) depth in the given tiles of tile x tile
+    // pixels (top-down, key ty << 32 | tx), each tile's floats top-down, 1 past the framebuffer's edge, from the call
+    // before this one (false when there is none yet, or it was for another size).
+    bool readFramebufferDepthTiles(int width, int height, int tile, const std::vector<uint64_t> &tiles,
+                                   std::unordered_map<uint64_t, std::vector<float>> &out);
 
     namespace
     {
@@ -772,14 +774,24 @@ void main()
             return true;
         }
         std::lock_guard<std::mutex> lock(m_depthMutex);
-        if (m_depth.empty() || m_depthScreen.width <= 0.0f || m_depthScreen.height <= 0.0f)
+        if (m_depthWidth <= 0 || m_depthScreen.width <= 0.0f || m_depthScreen.height <= 0.0f)
             return false;
         const int x = static_cast<int>((gsX - m_depthScreen.originX) / m_depthScreen.width * static_cast<float>(m_depthWidth));
         const int y = static_cast<int>((gsY - m_depthScreen.originY) / m_depthScreen.height * static_cast<float>(m_depthHeight));
         if (x < 0 || y < 0 || x >= m_depthWidth || y >= m_depthHeight)
             return false;
+        // Its tile and the ones around it are read from now on (what moves a little by the next frame is still read).
+        const int tx = x / kDepthTile, ty = y / kDepthTile;
+        const double now = secondsNow();
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+                if (tx + dx >= 0 && ty + dy >= 0 && (tx + dx) * kDepthTile < m_depthWidth && (ty + dy) * kDepthTile < m_depthHeight)
+                    m_depthTilesWanted[static_cast<uint64_t>(ty + dy) << 32 | static_cast<uint32_t>(tx + dx)] = now;
+        const auto tile = m_depthTiles.find(static_cast<uint64_t>(ty) << 32 | static_cast<uint32_t>(tx));
+        if (tile == m_depthTiles.end())
+            return false; // not read yet
         // present()'s depth: window depth 1 - (z / w) / depthMax (cleared to 1, far), GS Z = z / w * gsZScale.
-        const float d = m_depth[static_cast<size_t>(m_depthHeight - 1 - y) * m_depthWidth + x];
+        const float d = tile->second[static_cast<size_t>(y - ty * kDepthTile) * kDepthTile + static_cast<size_t>(x - tx * kDepthTile)];
         const double z = (1.0 - static_cast<double>(d)) * m_depthScreen.depthMax * m_depthScreen.gsZScale;
         gsZ = static_cast<uint32_t>(std::clamp(z, 0.0, 4294967295.0));
         return true;
@@ -1492,14 +1504,30 @@ void main()
         rlDisableScissorTest();
         if (secondsNow() - m_depthWantedAt.load(std::memory_order_relaxed) < 1.0)
         {
-            std::vector<float> depth;
-            if (readFramebufferDepth(w, h, depth))
+            // The tiles asked for in the last half second (none at first: depthAt maps to pixels with this size).
+            std::vector<uint64_t> tiles;
             {
                 std::lock_guard<std::mutex> lock(m_depthMutex);
-                m_depth.swap(depth);
+                if (w != m_depthWidth || h != m_depthHeight)
+                {
+                    m_depthTiles.clear();
+                    m_depthTilesWanted.clear();
+                }
                 m_depthWidth = w;
                 m_depthHeight = h;
                 m_depthScreen = screen;
+                const double now = secondsNow();
+                for (auto it = m_depthTilesWanted.begin(); it != m_depthTilesWanted.end();)
+                    if (now - it->second > 0.5)
+                        it = m_depthTilesWanted.erase(it);
+                    else
+                        tiles.push_back((it++)->first);
+            }
+            std::unordered_map<uint64_t, std::vector<float>> depth;
+            if (readFramebufferDepthTiles(w, h, kDepthTile, tiles, depth))
+            {
+                std::lock_guard<std::mutex> lock(m_depthMutex);
+                m_depthTiles.swap(depth);
             }
         }
         rlDisableVertexArray();
