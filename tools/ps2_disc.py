@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Reads a PS2 disc image (ISO9660) without any outside tool: a plain .iso (2048-byte sectors), a raw .bin (2352 bytes
 a sector, MODE1 or MODE2 form 1, with or without its .cue) or the .cue itself. Lists, reads and extracts the files
-(names without their ";1" version, as bsdtar extracts them), and reads SYSTEM.CNF's boot ELF.
+(names without their ";1" version, as bsdtar extracts them), and reads SYSTEM.CNF's boot ELF. A dual-layer DVD's second
+layer holds a volume of its own, its sectors counted from that layer's start: its files are listed after the first
+layer's, except the paths the first layer already has.
 
   tools/ps2_disc.py list <image>
   tools/ps2_disc.py boot <image>                prints the BOOT2 executable's name (SCUS_971.01, ...)
@@ -116,14 +118,19 @@ class Disc:
             self.image.close()
             raise DiscError('%s is not an ISO9660 disc image (no primary volume descriptor)' % path)
         self.volume_id = pvd[40:72].decode('latin-1').strip()
-        root = pvd[156:156 + 34]
-        self.root_lba, self.root_size = struct.unpack_from('<I', root, 2)[0], struct.unpack_from('<I', root, 10)[0]
+        self.volumes = [(0, pvd)]
+        layer0_sectors = struct.unpack_from('<I', pvd, 80)[0]
+        if self.image.size // self.image.sector_size > layer0_sectors + 16:
+            pvd1 = self.image.read_sectors(layer0_sectors, 1)
+            if pvd1[1:6] == b'CD001' and pvd1[0] == 1:
+                self.volumes.append((layer0_sectors - 16, pvd1))
         self._entries = None
 
     def close(self):
         self.image.close()
 
-    def _walk(self, lba, size, prefix, seen):
+    def _walk(self, base, lba, size, prefix, seen):
+        lba += base
         if lba in seen:
             return
         seen.add(lba)
@@ -149,17 +156,24 @@ class Disc:
                 name = name.split(';')[0]
             if name.endswith('.') and not flags & 2:
                 name = name[:-1]
-            e = Entry(prefix + name, struct.unpack_from('<I', rec, 2)[0], struct.unpack_from('<I', rec, 10)[0],
+            e = Entry(prefix + name, base + struct.unpack_from('<I', rec, 2)[0], struct.unpack_from('<I', rec, 10)[0],
                       bool(flags & 2), _record_time(rec))
             yield e
             if e.is_dir:
                 subdirs.append(e)
         for d in subdirs:
-            yield from self._walk(d.lba, d.size, d.path + '/', seen)
+            yield from self._walk(base, d.lba - base, d.size, d.path + '/', seen)
 
     def entries(self):
         if self._entries is None:
-            self._entries = list(self._walk(self.root_lba, self.root_size, '', set()))
+            entries, paths, seen = [], set(), set()
+            for base, pvd in self.volumes:
+                root_lba, root_size = struct.unpack_from('<I', pvd, 158)[0], struct.unpack_from('<I', pvd, 166)[0]
+                for e in self._walk(base, root_lba, root_size, '', seen):
+                    if e.path.upper() not in paths:
+                        paths.add(e.path.upper())
+                        entries.append(e)
+            self._entries = entries
         return self._entries
 
     def find(self, path):
