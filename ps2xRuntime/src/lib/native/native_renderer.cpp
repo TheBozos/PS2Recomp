@@ -662,7 +662,7 @@ void main()
         batch.material = material;
         std::memcpy(batch.matrix, matrix, sizeof(batch.matrix));
         // A material whose TEXA is the GS's gets its texture where the GS stream reaches the draw (the TEXA there).
-        if (material.textured && !material.fromGsContext && !material.texaFromGs)
+        if (material.textured && !material.fromGsContext && !material.texaFromGs && material.tex0 != kCapturedFrame)
             batch.texture = ps2x::native::textures().texture(material.tex0, material.texa);
         batch.first = static_cast<uint32_t>(m_building.vertices.size());
         batch.count = count;
@@ -749,6 +749,14 @@ void main()
     }
 
     void Renderer::wantDepth() { m_depthWantedAt.store(secondsNow(), std::memory_order_relaxed); }
+
+    void Renderer::captureFrame() { m_captureAt.store(secondsNow(), std::memory_order_release); }
+
+    std::shared_ptr<const TextureCache::Texture> Renderer::capturedFrame()
+    {
+        std::lock_guard<std::mutex> lock(m_captureMutex);
+        return m_captured;
+    }
 
     bool Renderer::depthAt(float gsX, float gsY, uint32_t &gsZ)
     {
@@ -982,7 +990,9 @@ void main()
             rlSetUniform(gpu.locM, matrix, RL_SHADER_UNIFORM_VEC4, 4);
             std::shared_ptr<const TextureCache::Texture> texture = batch.texture;
             if (m.textured && !texture)
-                texture = ps2x::native::textures().texture(m.tex0, m.texa);
+                texture = m.tex0 == kCapturedFrame ? capturedFrame() : ps2x::native::textures().texture(m.tex0, m.texa);
+            if (m.textured && m.tex0 == kCapturedFrame && !texture)
+                continue; // nothing captured yet
             // PS2X_NATIVE_DUMP_TEXTURE=<tex0, hex>: that texture as the cache decoded it, once, as texture_<tex0>.png
             // (in PS2X_NATIVE_CAPTURE_DIR, or the current folder).
             static const uint64_t s_dumpTex0 = []
@@ -1064,6 +1074,24 @@ void main()
         rlEnableColorBlend();
         rlSetBlendMode(RL_BLEND_ALPHA);
         EndTextureMode();
+
+        // captureFrame(): this frame as drawn, read back once (the target's rows are bottom-up).
+        if (m_captureAt.exchange(-1.0, std::memory_order_acq_rel) >= 0.0)
+            if (auto *pixels = static_cast<uint32_t *>(rlReadTexturePixels(gpu.target.texture.id, w, h, gpu.target.texture.format)))
+            {
+                auto picture = std::make_shared<TextureCache::Texture>();
+                picture->width = static_cast<uint32_t>(w);
+                picture->height = static_cast<uint32_t>(h);
+                picture->rgba.resize(static_cast<size_t>(w) * h);
+                for (int row = 0; row < h; ++row)
+                    for (int column = 0; column < w; ++column)
+                        picture->rgba[static_cast<size_t>(row) * w + column] = pixels[static_cast<size_t>(h - 1 - row) * w + column] | 0xFF000000u;
+                RL_FREE(pixels);
+                std::lock_guard<std::mutex> lock(m_captureMutex);
+                picture->key = 0xCA97000000000000ull | ++m_captures;
+                picture->version = m_captures;
+                m_captured = std::move(picture);
+            }
 
         static const bool s_stats = []
         {

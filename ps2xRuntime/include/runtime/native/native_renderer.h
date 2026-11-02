@@ -154,6 +154,15 @@ namespace ps2x::native
         bool depthAt(float gsX, float gsY, uint32_t &gsZ);
         // The frame being built's GS Z per unit of z / w (screen-space draws give GS Z over it).
         float gsZScale() const { return m_building.screen.gsZScale; }
+        // A picture of the screen, for a game that shows a frame of its own again (VP2's pause draws its last field
+        // frame, frozen and blurred, under its menu): the next frame present() draws (the one on screen, unless the game
+        // published another meanwhile) is read back once drawn, RGBA8 with row 0 the top and alpha opaque, as
+        // capturedFrame(), a new texture each capture (null before the first). Any thread.
+        void captureFrame();
+        std::shared_ptr<const TextureCache::Texture> capturedFrame();
+        // A material's tex0 for capturedFrame() as it is when present() draws the batch (drawn without a texture): a
+        // capture asked for while a frame is built is ready by the time that frame is presented.
+        static constexpr uint64_t kCapturedFrame = 0xCA97F00000000000ull;
         TextureCache &textures() { return ps2x::native::textures(); }
         // Drawing inside the GS stream (runtime/native/native_gs_hook.h). The native port numbers the VU1 programs it
         // draws instead of VU1, in stream order (1, 2, ...: the VIF1 interpreter numbers the programs it skips the
@@ -297,6 +306,10 @@ namespace ps2x::native
         std::shared_ptr<Frame> m_shown, m_shownPrevious; // present thread: the frame drawn and the one before it
         std::atomic<double> m_depthWantedAt{-10.0};      // wantDepth()'s time (seconds)
         std::mutex m_depthMutex;
+        std::atomic<double> m_captureAt{-1.0}; // captureFrame()'s time (seconds), -1 when none is waiting
+        std::mutex m_captureMutex;
+        std::shared_ptr<const TextureCache::Texture> m_captured;
+        uint64_t m_captures = 0;
         std::vector<float> m_depth; // window depth, bottom-up rows, of the frame presented last
         int m_depthWidth = 0, m_depthHeight = 0;
         Screen m_depthScreen;
