@@ -528,6 +528,9 @@ namespace ps2_stubs
         // sceMpegDemuxPssRing takes its input this many bytes (one CD sector) at a time, checking the limit between.
         constexpr uint32_t kDemuxChunkBytes = 2048u;
         std::atomic<size_t> g_maxDecodedPicturesAhead{kDefaultMaxDecodedPicturesAhead};
+        // PS2X_MPEG_TRACE=1: every 30 pictures, the decode lead and the stream bytes the game's callbacks took (and
+        // those none took) by type * 4 + channel since the last line.
+        uint64_t g_mpegTraceGiven[32] = {}, g_mpegTraceDropped[32] = {};
 
         struct MpegPlaybackState
         {
@@ -1233,6 +1236,10 @@ namespace ps2_stubs
             event.pts = pts90k >= 0 ? static_cast<uint64_t>(pts90k) : 0xFFFFFFFFFFFFFFFFull;
             event.dts = dts90k >= 0 ? static_cast<uint64_t>(dts90k) : 0xFFFFFFFFFFFFFFFFull;
             event.callbacks = matchingStreamCallbacks(mpegAddr, streamType, streamId);
+            // PS2X_MPEG_TRACE's counts: the stream bytes given to the game's callbacks, by type and channel, and
+            // those no callback took.
+            const size_t traced = std::min<size_t>(streamType * 4u + std::min<uint32_t>(streamId, 3u), 31u);
+            (event.callbacks.empty() ? g_mpegTraceDropped : g_mpegTraceGiven)[traced] += len;
             if (!event.callbacks.empty())
             {
                 callbackEvents.push_back(std::move(event));
@@ -1497,8 +1504,10 @@ namespace ps2_stubs
             // lets the game's producer loop wake the consumer again. Backpressure
             // still propagates naturally to sceCdStRead because the ring does not
             // advance while this is true.
+            // PS2X_MPEG_AHEAD=<pictures>: another lead (diagnosis).
+            static const size_t s_ahead = [] { const char *v = std::getenv("PS2X_MPEG_AHEAD"); return v ? std::strtoull(v, nullptr, 10) : 0ull; }();
             return !g_mpeg_stub_state.currentCdStreamEofSeen &&
-                   playback.decodedFrames.size() >= g_maxDecodedPicturesAhead.load(std::memory_order_relaxed);
+                   playback.decodedFrames.size() >= (s_ahead ? s_ahead : g_maxDecodedPicturesAhead.load(std::memory_order_relaxed));
         }
 
         void recordCdStreamBytesDemuxedUnlocked(
@@ -2630,6 +2639,19 @@ namespace ps2_stubs
                 height = playback.height;
                 frameCount = playback.picturesServed;
                 playback.picturesServed += 1u;
+                static const bool s_trace = std::getenv("PS2X_MPEG_TRACE") != nullptr;
+                if (s_trace && playback.picturesServed % 30u == 1u)
+                {
+                    std::fprintf(stderr, "[MPEG:trace] picture %u, %zu decoded ahead (limit %zu), eof %d; given:", playback.picturesServed,
+                                 playback.decodedFrames.size(), g_maxDecodedPicturesAhead.load(), g_mpeg_stub_state.currentCdStreamEofSeen ? 1 : 0);
+                    for (size_t k = 0; k < 32u; ++k)
+                        if (g_mpegTraceGiven[k] || g_mpegTraceDropped[k])
+                            std::fprintf(stderr, " t%zu/c%zu %llu (dropped %llu)", k / 4u, k % 4u,
+                                         static_cast<unsigned long long>(g_mpegTraceGiven[k]), static_cast<unsigned long long>(g_mpegTraceDropped[k]));
+                    std::fprintf(stderr, "\n");
+                    std::fill(std::begin(g_mpegTraceGiven), std::end(g_mpegTraceGiven), 0ull);
+                    std::fill(std::begin(g_mpegTraceDropped), std::end(g_mpegTraceDropped), 0ull);
+                }
                 playback.nextPictureTickQ32 = presentationTargetQ32 + frameIntervalQ32;
                 playback.presentationEndTickQ32 = playback.nextPictureTickQ32;
                 haveFrame = true;
