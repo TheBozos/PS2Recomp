@@ -122,6 +122,25 @@ namespace ps2x::iop::native
         g_interruptCalls.push_back(InterruptCall{function, a0, a1, gp, delay});
         g_interruptCallsPending.store(true, std::memory_order_release);
     }
+
+    // The running IOP's cycle count (Impl::totalCycles), for currentCycle().
+    std::atomic<const uint64_t *> g_clock{nullptr};
+
+    uint64_t currentCycle()
+    {
+        const uint64_t *clock = g_clock.load(std::memory_order_acquire);
+        return clock ? *clock : 0u;
+    }
+
+    bool deterministic()
+    {
+        static const bool s_on = []
+        {
+            const char *value = std::getenv("PS2X_DETERMINISTIC");
+            return value && *value == '1';
+        }();
+        return s_on;
+    }
 }
 
 static_assert(offsetof(ps2x::iop::detail::IopCpuState, gpr) == offsetof(ps2x::iop::native::NativeCpu, gpr) &&
@@ -310,6 +329,7 @@ namespace ps2x::iop::detail
             memory.setSio2(&sio2);
             memory.setSpu2(&spu2);
             spu2.setClock(&totalCycles);
+            native::g_clock.store(&totalCycles, std::memory_order_release);
             spu2.setInterruptSink([this](int irq)
                                   { pendingDmaInterrupts[irq] = totalCycles; });
             timrman.setInterruptSink([this](int irq)
@@ -325,12 +345,17 @@ namespace ps2x::iop::detail
             {
                 nativeAudio = true;
                 spu2.setAbsent();
+                // Deterministic mode: mixed on the IOP's clock (runCycles, the libsd calls), the device draining a queue.
+                if (native::deterministic())
+                    ps2x::audio::NativeMixer::instance().setClocked(true);
                 host.setAudioSource([](int16_t *frames, size_t count) { ps2x::audio::NativeMixer::instance().render(frames, count); });
             }
             else if (spu2.wallClock())
                 host.setAudioSource([this](int16_t *frames, size_t count) { spu2.pull(frames, count); });
             spu2.setOutputSink([this](const int16_t *frames, size_t count)
-                               { host.submitAudio(frames, count); });
+                               {
+                                   ps2x::audio::NativeMixer::noteMixed(frames, count); // the reference recorder's sound
+                                   host.submitAudio(frames, count); });
             memory.setHardwareObserver([this](uint32_t address, bool write) { noteHardware(address, write); });
             // PS2X_IOP_HARDWARE=0: no IOP device behind the hardware registers (read as the IOP is constructed, so a
             // game override can set it). Every module reaches the IOP through its imports (the kernel, SIF, cdvdman,
@@ -446,6 +471,8 @@ namespace ps2x::iop::detail
             // The host's audio callback must not call into a SPU2 that is gone.
             if (spu2.wallClock() || ps2x::audio::nativeLibsd())
                 host.setAudioSource({});
+            const uint64_t *mine = &totalCycles;
+            native::g_clock.compare_exchange_strong(mine, nullptr);
         }
 
         bool readRam(uint32_t address, void *destination, size_t size) const
@@ -1907,6 +1934,10 @@ namespace ps2x::iop::detail
                     if (totalCycles == before)
                         ++totalCycles;
                 }
+                // Native audio clocked by the IOP (deterministic mode): mixed up to the end of the slice.
+                ps2x::audio::NativeMixer &mixer = ps2x::audio::NativeMixer::instance();
+                if (mixer.clocked())
+                    mixer.advanceTo(totalCycles);
             }
             catch (...)
             {

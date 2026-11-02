@@ -1,5 +1,6 @@
 #include "runtime/native/native_renderer.h"
 #include "runtime/native/native_movie.h"
+#include "runtime/ps2_reference.h"
 
 #include "raylib.h"
 #include "rlgl.h"
@@ -84,6 +85,74 @@ void main()
         constexpr int kGlOneMinusSrcAlpha = 0x0303;
         constexpr int kGlOne = 1;
         constexpr int kGlFuncAdd = 0x8006;
+
+        // PS2X_REFERENCE (runtime/ps2_reference.h): a texture's identity is its content (size and RGBA texels), never
+        // where it lives; kept per texture while it lives (the weak pointer tells a new texture at a freed address).
+        uint64_t textureIdentity(const std::shared_ptr<const TextureCache::Texture> &texture)
+        {
+            if (!texture)
+                return 0u;
+            struct Known
+            {
+                std::weak_ptr<const TextureCache::Texture> texture;
+                uint64_t hash = 0;
+            };
+            static std::mutex s_mutex;
+            static std::unordered_map<const TextureCache::Texture *, Known> s_known;
+            std::lock_guard<std::mutex> lock(s_mutex);
+            Known &known = s_known[texture.get()];
+            if (known.texture.expired() || known.texture.lock() != texture)
+            {
+                const uint32_t size[2] = {texture->width, texture->height};
+                known.texture = texture;
+                known.hash = ps2x::reference::hash64(texture->rgba.data(), texture->rgba.size() * sizeof(uint32_t),
+                                                     ps2x::reference::hash64(size, sizeof(size)));
+                if (s_known.size() > 65536u) // (a long run: start again rather than grow)
+                {
+                    s_known.clear();
+                    Known &again = s_known[texture.get()];
+                    again.texture = texture;
+                    again.hash = ps2x::reference::hash64(texture->rgba.data(), texture->rgba.size() * sizeof(uint32_t),
+                                                         ps2x::reference::hash64(size, sizeof(size)));
+                    return again.hash;
+                }
+            }
+            return known.hash;
+        }
+
+        // A published draw list for the reference record: per batch its material, matrix, clip, vertices and texture.
+        void noteDrawList(const Renderer::Frame &frame, uint64_t kind)
+        {
+            if (!ps2x::reference::active())
+                return;
+            static_assert(sizeof(Vertex) == 32u, "Vertex: eight 4-byte fields, no padding");
+            uint64_t h = ps2x::reference::hash64(&kind, sizeof(kind));
+            for (const Renderer::Batch &batch : frame.batches)
+            {
+                const Material &m = batch.material;
+                uint64_t words[8] = {m.tex0, m.texa, m.region,
+                                     static_cast<uint64_t>(m.textured) | static_cast<uint64_t>(m.blend) << 8 |
+                                         static_cast<uint64_t>(m.alphaRef) << 16 | static_cast<uint64_t>(m.alphaTest) << 24 |
+                                         static_cast<uint64_t>(m.depthTest) << 25 | static_cast<uint64_t>(m.depthWrite) << 26 |
+                                         static_cast<uint64_t>(m.clampU) << 27 | static_cast<uint64_t>(m.clampV) << 28 |
+                                         static_cast<uint64_t>(m.fog) << 29 | static_cast<uint64_t>(m.sampleTarget) << 30 |
+                                         static_cast<uint64_t>(m.fromGsContext) << 31 | static_cast<uint64_t>(m.alphaBlend) << 32 |
+                                         static_cast<uint64_t>(m.context) << 40,
+                                     m.fogColour, textureIdentity(batch.texture), batch.count, 0u};
+                h = ps2x::reference::hash64(words, sizeof(words), h);
+                if (m.gsWrites)
+                    for (const auto &[address, value] : *m.gsWrites)
+                    {
+                        const uint64_t write[2] = {address, value};
+                        h = ps2x::reference::hash64(write, sizeof(write), h);
+                    }
+                h = ps2x::reference::hash64(batch.matrix, sizeof(batch.matrix), h);
+                h = ps2x::reference::hash64(batch.clip, sizeof(batch.clip), h);
+                if (batch.first + static_cast<size_t>(batch.count) <= frame.vertices.size())
+                    h = ps2x::reference::hash64(frame.vertices.data() + batch.first, batch.count * sizeof(Vertex), h);
+            }
+            ps2x::reference::noteDraws(h, static_cast<uint32_t>(frame.batches.size()), static_cast<uint32_t>(frame.vertices.size()));
+        }
     }
 
     // native_renderer_gs.cpp (raw GL): glDepthFunc(GL_LEQUAL), which rlgl does not expose (its default is GL_LESS).
@@ -369,6 +438,7 @@ void main()
 
     void Renderer::publishOverlay(const Screen &screen)
     {
+        noteDrawList(m_overlayBuilding, 2u); // PS2X_REFERENCE
         auto overlay = std::make_shared<Frame>(std::move(m_overlayBuilding));
         m_overlayBuilding = Frame{};
         // PS2X_NATIVE_STATS=1: the overlay's batches every 250 publishes.
@@ -410,6 +480,7 @@ void main()
         }
         frame->vertices = {corners[0], corners[1], corners[2], corners[1], corners[3], corners[2]};
         frame->batches.push_back(batch);
+        noteDrawList(*frame, 3u); // PS2X_REFERENCE: a movie's picture, by its content
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_backdrop = std::move(frame);
@@ -426,6 +497,7 @@ void main()
 
     void Renderer::endFrame()
     {
+        noteDrawList(m_building, 1u); // PS2X_REFERENCE
         auto frame = std::make_shared<Frame>(std::move(m_building));
         m_building = Frame{};
         m_key = 0;

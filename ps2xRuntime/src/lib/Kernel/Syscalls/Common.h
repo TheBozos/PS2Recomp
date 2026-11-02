@@ -5,6 +5,7 @@
 #include "ps2_runtime_macros.h"
 #include "ps2_stubs.h"
 #include "ps2x/iop/ps2_path.h"
+#include "runtime/ps2_determinism.h"
 #include <iostream>
 #include <algorithm>
 #include <cctype>

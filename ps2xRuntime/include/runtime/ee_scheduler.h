@@ -443,6 +443,9 @@ public:
     void setNativeFrames(bool enabled) noexcept { m_nativeFrames = enabled; }
     [[nodiscard]] bool nativeFrames() const noexcept { return m_nativeFrames; }
     void presentGuestFrame();
+    // The reference recorder's thread state (ps2_reference.h): the running guest thread (0: none) and the ready
+    // threads in the order they would run (highest priority first, each queue front to back).
+    void referenceThreads(int &current, std::vector<int> &ready) const;
     // Whether a thread of equal priority takes over at the end of a time slice (default yes; PS2X_EE_SLICE_EQUAL=0
     // no). The real EE kernel never round-robins equal priorities: a thread runs until it blocks or a higher
     // priority one becomes ready.

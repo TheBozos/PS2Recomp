@@ -2,6 +2,7 @@
 #include "runtime/ps2_pad.h"
 #include "ps2_host_backend.h"
 #include "runtime/ps2_input_bindings.h"
+#include "runtime/ps2_determinism.h"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -37,13 +38,27 @@ namespace
 
     // PS2X_PAD_SCRIPT="25:SQUARE,30:START,60.5:CROSS/300" presses buttons at the given times
     // (seconds since process start) for 500 ms or the given milliseconds, without a keyboard or
-    // window focus.
+    // window focus. PS2X_DETERMINISTIC=1: the times are game frames (ps2x::det::frame(), the frames the game has
+    // ended) and the holds frames ("1500:CROSS/15", 30 frames when not given), so the pad is the same at the same
+    // frame whatever the host; the state changes only at frame ends (latched once per frame).
     struct ScriptedPress
     {
         double time = 0.0;
         double hold = 0.5;
         uint16_t mask = 0;
     };
+
+    // Deterministic mode: scripts in game frames. PS2X_PAD_CLOCK=wall keeps seconds of wall time (calibrating a
+    // frame-keyed script from a timed one with PS2X_PAD_LOG=1; such a run is not deterministic).
+    bool scriptInFrames()
+    {
+        static const bool s_frames = []
+        {
+            const char *clock = std::getenv("PS2X_PAD_CLOCK");
+            return ps2x::det::enabled() && !(clock && std::strcmp(clock, "wall") == 0);
+        }();
+        return s_frames;
+    }
 
     const auto g_processStart = std::chrono::steady_clock::now();
 
@@ -52,6 +67,8 @@ namespace
     // or the frame rate differ from the recorded session. Recording (PS2X_PAD_RECORD) uses the same clock.
     double padClockSeconds()
     {
+        if (scriptInFrames())
+            return static_cast<double>(ps2x::det::frame());
         static const bool ee = [] { const char *v = std::getenv("PS2X_PAD_CLOCK"); return v && std::strcmp(v, "ee") == 0; }();
         if (ee)
             return static_cast<double>(ps2CurrentEeCycle()) / 294912000.0;
@@ -88,10 +105,10 @@ namespace
             if (colon != std::string::npos)
             {
                 std::string button = entry.substr(colon + 1);
-                double hold = 0.5;
+                double hold = scriptInFrames() ? 30.0 : 0.5;
                 if (const size_t slash = button.find('/'); slash != std::string::npos)
                 {
-                    hold = std::atof(button.substr(slash + 1).c_str()) / 1000.0;
+                    hold = std::atof(button.substr(slash + 1).c_str()) / (scriptInFrames() ? 1.0 : 1000.0);
                     button.resize(slash);
                 }
                 presses.push_back({std::atof(entry.substr(0, colon).c_str()), hold, scriptButton(button)});
@@ -204,7 +221,7 @@ namespace
     // session can be replayed with PS2X_PAD_SCRIPT_FILE. Scripted presses are not recorded.
     void recordPhysicalButtons(uint16_t down)
     {
-        static const char *const path = std::getenv("PS2X_PAD_RECORD");
+        static const char *const path = ps2x::det::enabled() ? nullptr : std::getenv("PS2X_PAD_RECORD");
         if (!path)
             return;
         static FILE *file = std::fopen(path, "w");
@@ -232,11 +249,20 @@ namespace
     {
         static const std::string scriptText = padScriptFromFile();
         static const std::vector<ScriptedPress> script = parsePadScript(scriptText.empty() ? nullptr : scriptText.c_str());
-        static const char *const liveInput = std::getenv("PS2X_PAD_INPUT");
+        static const char *const liveInput = ps2x::det::enabled() ? nullptr : std::getenv("PS2X_PAD_INPUT");
         if (script.empty() && !liveInput)
             return 0;
         const double now = padClockSeconds();
         uint16_t down = buttonsDownAt(script, now);
+        // PS2X_PAD_LOG=1: each change of the scripted buttons of pad 1, with the frame and the wall time it came at.
+        static const bool s_log = std::getenv("PS2X_PAD_LOG") != nullptr;
+        static uint16_t s_logged = 0;
+        if (s_log && down != s_logged)
+        {
+            std::fprintf(stderr, "[pad] frame %llu t=%.2f: scripted %04x\n", static_cast<unsigned long long>(ps2x::det::frame()),
+                         std::chrono::duration<double>(std::chrono::steady_clock::now() - g_processStart).count(), down);
+            s_logged = down;
+        }
         if (liveInput)
         {
             static std::vector<ScriptedPress> livePresses;
@@ -339,7 +365,8 @@ bool PSPadBackend::connected(int port, int slot) const
     const int player = playerOf(port, slot);
     if (player < 0)
         return false;
-    return player == 0 || !playerScript(player).empty() || gamepadForPort(player) >= 0;
+    // Deterministic mode: the scripts alone say which players are there, never the host's gamepads.
+    return player == 0 || !playerScript(player).empty() || (!ps2x::det::enabled() && gamepadForPort(player) >= 0);
 }
 
 void PSPadBackend::setMultitap(bool on)
@@ -371,7 +398,11 @@ bool PSPadBackend::readState(int port, int slot, uint8_t *data, size_t size)
     // The player's bindings (runtime/ps2_input_bindings.h: input.ini, the Controls window), on the port's gamepad
     // among the connected ones unless the player chose one. PS2X_PAD_NO_HOST=1: neither keyboard nor gamepads, only
     // the pad scripts (a replay nobody can disturb).
-    static const bool s_noHost = [] { const char *v = std::getenv("PS2X_PAD_NO_HOST"); return v && v[0] == '1'; }();
+    static const bool s_noHost = []
+    {
+        const char *v = std::getenv("PS2X_PAD_NO_HOST");
+        return (v && v[0] == '1') || ps2x::det::enabled(); // never the host's devices in deterministic mode
+    }();
     uint16_t btns = 0xFFFFu;
     if (!s_noHost)
     {

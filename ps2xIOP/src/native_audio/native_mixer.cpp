@@ -620,8 +620,108 @@ namespace ps2x::audio
         ++m_mixed;
     }
 
+    namespace
+    {
+        // noteMixed / takeMixed: the samples mixed since the last take.
+        std::mutex g_digestMutex;
+        bool g_digestOn = false;
+        uint64_t g_digestHash = 0xCBF29CE484222325ull;
+        uint32_t g_digestCount = 0;
+    }
+
+    void NativeMixer::noteMixed(const int16_t *frames, size_t count)
+    {
+        std::lock_guard<std::mutex> lock(g_digestMutex);
+        if (!g_digestOn)
+            return;
+        const uint8_t *bytes = reinterpret_cast<const uint8_t *>(frames);
+        uint64_t hash = g_digestHash;
+        for (size_t i = 0; i < count * 4u; ++i)
+            hash = (hash ^ bytes[i]) * 0x100000001B3ull;
+        g_digestHash = hash;
+        g_digestCount += static_cast<uint32_t>(count);
+    }
+
+    void NativeMixer::takeMixed(uint64_t &hash, uint32_t &count)
+    {
+        std::lock_guard<std::mutex> lock(g_digestMutex);
+        g_digestOn = true;
+        hash = g_digestCount != 0u ? g_digestHash : 0u;
+        count = g_digestCount;
+        g_digestHash = 0xCBF29CE484222325ull;
+        g_digestCount = 0u;
+    }
+
+    void NativeMixer::setClocked(bool clocked)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_detClocked = clocked;
+        m_clockStarted = false;
+        std::lock_guard<std::mutex> queueLock(m_queueMutex);
+        m_detQueue.assign(kQueueFrames * 2u, 0);
+        m_queueRead = m_queueFill = 0u;
+    }
+
+    void NativeMixer::advanceTo(uint64_t iopCycle)
+    {
+        constexpr uint64_t kIopCyclesPerSample = 768u; // 36.864 MHz / 48 kHz
+        const uint64_t due = iopCycle / kIopCyclesPerSample;
+        bool report = false;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_detClocked)
+                return;
+            if (!m_clockStarted || due < m_samplesMade) // the first call, or the IOP's clock restarted (a reset)
+            {
+                m_clockStarted = true;
+                m_samplesMade = due;
+                return;
+            }
+            if (due == m_samplesMade)
+                return;
+            const size_t frames = static_cast<size_t>(std::min<uint64_t>(due - m_samplesMade, kQueueFrames));
+            m_samplesMade = due;
+            m_scratch.resize(frames * 2u);
+            const uint64_t before = m_stats.frames;
+            m_stats.frames += frames;
+            report = before / (10u * kSampleRate) != m_stats.frames / (10u * kSampleRate);
+            mix(m_scratch.data(), frames);
+            noteMixed(m_scratch.data(), frames);
+            std::lock_guard<std::mutex> queueLock(m_queueMutex);
+            for (size_t i = 0; i < frames; ++i)
+            {
+                if (m_queueFill == kQueueFrames) // the device fell behind: the oldest goes
+                {
+                    m_queueRead = (m_queueRead + 1u) % kQueueFrames;
+                    --m_queueFill;
+                }
+                const size_t at = (m_queueRead + m_queueFill) % kQueueFrames;
+                m_detQueue[at * 2u] = m_scratch[i * 2u];
+                m_detQueue[at * 2u + 1u] = m_scratch[i * 2u + 1u];
+                ++m_queueFill;
+            }
+        }
+        if (report)
+            this->report();
+    }
+
     void NativeMixer::render(int16_t *out, size_t frames)
     {
+        if (m_detClocked)
+        {
+            // The device's thread: only the queue, never the mixer's state.
+            std::lock_guard<std::mutex> queueLock(m_queueMutex);
+            const size_t taken = std::min(frames, m_queueFill);
+            for (size_t i = 0; i < taken; ++i)
+            {
+                out[i * 2u] = m_detQueue[m_queueRead * 2u];
+                out[i * 2u + 1u] = m_detQueue[m_queueRead * 2u + 1u];
+                m_queueRead = (m_queueRead + 1u) % kQueueFrames;
+            }
+            m_queueFill -= taken;
+            std::fill(out + taken * 2u, out + frames * 2u, int16_t{0});
+            return;
+        }
         bool due = false;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
@@ -650,6 +750,7 @@ namespace ps2x::audio
                     std::clamp(base + base * error / kRateCorrectionFrames, base * 7 / 8, base * 9 / 8));
             }
         }
+        noteMixed(out, frames);
         if (due)
             report();
     }

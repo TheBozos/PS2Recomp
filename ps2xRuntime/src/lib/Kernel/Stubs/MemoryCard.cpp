@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "MemoryCard.h"
+#include "runtime/ps2_determinism.h"
 
 #include <cstdlib>
 
@@ -303,7 +304,10 @@ namespace ps2_stubs
         void writeMcDateTime(SceMcStDateTime &out, std::time_t value)
         {
             std::tm tm{};
-            if (!localtimeSafeMc(&value, &tm))
+            // Deterministic mode: every card date is the fixed date (the host files' times and now alike).
+            if (ps2x::det::enabled())
+                tm = ps2x::det::fixedDate();
+            else if (!localtimeSafeMc(&value, &tm))
             {
                 std::memset(&out, 0, sizeof(out));
                 return;

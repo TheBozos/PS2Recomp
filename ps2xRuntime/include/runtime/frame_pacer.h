@@ -8,10 +8,14 @@
 #include <cstdlib>
 #include <thread>
 
+#include "runtime/ps2_determinism.h"
+
 // Native frame pacing: a game that opts in runs its own loop on real time instead of on the PS2's vblanks. Its frame
 // end calls frameEnd(), which holds the frame to the cap (frames per second, 0 = unlimited: only the host's speed
 // limits it) and returns the real time the frame took, which the game feeds to its engine as its step. The cap
 // starts from PS2X_FRAME_CAP (default 60) and can change while the game runs.
+// PS2X_DETERMINISTIC=1: the step returned is exactly one period of the cap (1/60 s with no cap), whatever the frame
+// took; the frame is still held to the cap, which changes nothing the game computes.
 class FramePacer
 {
 public:
@@ -46,7 +50,8 @@ public:
             while ((now = Clock::now()) < due)
                 std::this_thread::yield();
         }
-        const double step = std::min(std::chrono::duration<double>(now - m_previous).count(), kMaxStepSeconds);
+        const double step = ps2x::det::enabled() ? 1.0 / static_cast<double>(cap != 0u ? cap : 60u)
+                                                 : std::min(std::chrono::duration<double>(now - m_previous).count(), kMaxStepSeconds);
         m_previous = now;
         m_lastStep.store(step, std::memory_order_relaxed);
         m_frames.fetch_add(1u, std::memory_order_relaxed);

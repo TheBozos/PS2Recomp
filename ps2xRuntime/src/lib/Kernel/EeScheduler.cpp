@@ -1,5 +1,7 @@
 #include "runtime/ee_scheduler.h"
 #include "runtime/native/native_display.h"
+#include "runtime/ps2_determinism.h"
+#include "runtime/ps2_reference.h"
 
 #include "ps2_log.h"
 #include "ps2_runtime_macros.h"
@@ -564,8 +566,11 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 
 EeScheduler::WallClockCatchUp EeScheduler::wallClockCatchUp() const noexcept
 {
+    // PS2X_DETERMINISTIC=1: never (EE time is the cycles the guest accounts).
     static const std::optional<WallClockCatchUp> envCatchUp = []() -> std::optional<WallClockCatchUp>
     {
+        if (ps2x::det::enabled())
+            return WallClockCatchUp::Off;
         const char *value = std::getenv("PS2X_EE_CATCHUP");
         if (!value || !*value)
             return std::nullopt;
@@ -1669,6 +1674,22 @@ void EeScheduler::completeExternalWait(uint32_t type, uint64_t token, int result
     assertExecutor();
     const uint64_t token = ++m_hostDeadlineToken;
     m_hostDeadlineWakes[token] = std::move(onWake);
+    if (ps2x::det::enabled())
+    {
+        // Deterministic mode: no host deadline. The wake is queued from this (the executor's) thread, so it runs at the
+        // next dispatch point, wherever the host's clock is: the other guest threads get no host-timed share.
+        postTask([this, token]()
+                 {
+                     const auto it = m_hostDeadlineWakes.find(token);
+                     if (it == m_hostDeadlineWakes.end())
+                         return;
+                     const std::function<void()> wake = std::move(it->second);
+                     m_hostDeadlineWakes.erase(it);
+                     if (wake)
+                         wake();
+                     completeExternalWait(kHostDeadlineWaitType, token, 0); });
+        waitExternal(EeWaitReason::External, kHostDeadlineWaitType, token, std::move(completion));
+    }
     {
         std::lock_guard lock(m_hostDeadlineMutex);
         if (!m_hostDeadlineThread.joinable())
@@ -1835,6 +1856,18 @@ void EeScheduler::presentGuestFrame()
 {
     assertExecutor();
     latchGuestFrame();
+    // The game frame that just ended: the reference record (PS2X_REFERENCE) of it, then the frame count moves on (the
+    // pad scripts' clock in deterministic mode).
+    ps2x::reference::frameEnd(m_runtime);
+    ps2x::det::frameCounter().fetch_add(1u, std::memory_order_relaxed);
+}
+
+void EeScheduler::referenceThreads(int &current, std::vector<int> &ready) const
+{
+    current = m_currentThreadId;
+    ready.clear();
+    for (const std::deque<int> &queue : m_readyQueues)
+        ready.insert(ready.end(), queue.begin(), queue.end());
 }
 
 std::optional<bool> EeScheduler::guestFrameWaiting()
@@ -2210,7 +2243,8 @@ void EeScheduler::processDueDeadlines()
 
             // Native frames: the game's frame end paces the host and keeps EE time on real time, so an event is due
             // once EE time reaches it; nothing waits for its host deadline.
-            if (m_nativeFrames)
+            // Deterministic mode alike: events are due by their cycle alone.
+            if (m_nativeFrames || ps2x::det::enabled())
                 pacingDeadline = std::chrono::steady_clock::time_point::min();
             const auto now = std::chrono::steady_clock::now();
             if (now < pacingDeadline && interruptInvocationPending())
@@ -2234,7 +2268,7 @@ void EeScheduler::processDueDeadlines()
                 }
             }
 
-            const auto pacedNow = m_nativeFrames ? std::chrono::steady_clock::time_point::max()
+            const auto pacedNow = m_nativeFrames || ps2x::det::enabled() ? std::chrono::steady_clock::time_point::max()
                                                             : std::chrono::steady_clock::now();
             const auto cycleDueEnd = std::find_if(m_deadlines.begin(), m_deadlines.end(), [this](const ScheduledEvent &item)
                                                   { return item.deadlineCycle > m_eeCycle; });
@@ -2276,7 +2310,9 @@ void EeScheduler::processDueDeadlines()
                 uint64_t deadlineCycle = scheduled.deadlineCycle;
                 auto anchor = scheduled.hostDeadline;
                 const bool held = m_vblankHeldSince != std::chrono::steady_clock::time_point{};
-                if (m_vblankHold.load(std::memory_order_relaxed) || (m_frameWaitHoldsVBlank && guestFrameWaiting() == false))
+                // (Never held in deterministic mode: the hold's limit is host time.)
+                if (!ps2x::det::enabled() &&
+                    (m_vblankHold.load(std::memory_order_relaxed) || (m_frameWaitHoldsVBlank && guestFrameWaiting() == false)))
                 {
                     // Held (setVBlankHold): again in a moment, unless it has waited its limit.
                     constexpr auto kHoldStep = std::chrono::microseconds(250);
@@ -2676,7 +2712,9 @@ void EeScheduler::waitForEvent()
                              : (m_events.empty() ? std::string("stop")
                                                  : "ev:" + std::to_string(static_cast<int>(m_events.front().type))),
                    std::move(blocked));
-    if (!signaled)
+    // Deterministic mode: the wait only paces the host; the cycles to the deadline are charged whatever woke it
+    // (nothing the guest observes may depend on when a host thread posted something), unless the run is stopping.
+    if (!signaled || (ps2x::det::enabled() && !m_stopRequested.load(std::memory_order_acquire)))
     {
         const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;
         lock.unlock();

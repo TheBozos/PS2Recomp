@@ -111,6 +111,14 @@ namespace ps2x::iop::native
     // transfer callbacks after an upload). Any thread may queue one.
     void queueInterruptCall(uint32_t function, uint32_t a0, uint32_t a1, uint32_t gp, uint32_t delay);
 
+    // The IOP's clock (its cycle count) as the running IOP has it now (0 without one): what a driver taken over at its
+    // API is clocked by (native audio's mixer in deterministic mode).
+    uint64_t currentCycle();
+
+    // PS2X_DETERMINISTIC=1 (the runtime's ps2_determinism.h): nothing the IOP's guests observe depends on the host's
+    // clock or threads (no SPU2 on the wall clock, the native mixer clocked by the IOP).
+    bool deterministic();
+
     // What reached the SPU2 emulation so far, in one line: "absent" (native audio, PS2X_NATIVE_AUDIO=1: the SPU2 is
     // never set up) or "emulated", its register and DMA register accesses, the samples it mixed, its advances with work.
     std::string spu2Reached();

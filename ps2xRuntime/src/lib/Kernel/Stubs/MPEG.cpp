@@ -2,6 +2,7 @@
 #include "Common.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/ps2_determinism.h"
 
 #if !defined(PS2X_HAS_FFMPEG)
 #define PS2X_HAS_FFMPEG 1
@@ -55,7 +56,8 @@ namespace ps2_stubs
         uint64_t pictureTickQ32(PS2Runtime *runtime)
         {
             EeScheduler &ee = runtime->eeScheduler();
-            if (!ee.nativeFrames())
+            // Deterministic mode: the vblanks too (they follow the EE cycles), never host time.
+            if (!ee.nativeFrames() || ps2x::det::enabled())
                 return ee.currentVSyncTick() << 32u;
             const EeScheduler::FieldRate rate = ee.fieldRate();
             const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - pictureClockEpoch()).count();
@@ -74,7 +76,7 @@ namespace ps2_stubs
 
         void accountHostDecodeTime(PS2Runtime *runtime, std::chrono::steady_clock::time_point start)
         {
-            if (!runtime)
+            if (!runtime || ps2x::det::enabled()) // deterministic mode: the host's decode time is not EE time
             {
                 return;
             }
@@ -2646,7 +2648,7 @@ namespace ps2_stubs
                 {
                     const uint64_t eligibleTick = (presentationTargetQ32 + kPictureClockOne - 1u) >> 32u;
                     lock.unlock();
-                    if (runtime->eeScheduler().nativeFrames())
+                    if (runtime->eeScheduler().nativeFrames() && !ps2x::det::enabled())
                     {
                         runtime->eeScheduler().waitHostDeadline(
                             pictureTickTime(runtime, eligibleTick), [] {},
