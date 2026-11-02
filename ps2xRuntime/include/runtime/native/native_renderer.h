@@ -221,6 +221,11 @@ namespace ps2x::native
             uint64_t lastGroup = 0;                      // its batches' latest group (0: none)
         };
 
+        // Any thread (the MPEG decoder): a movie picture just decoded (RGBA8, width x height). While pictures keep
+        // coming (the last within 0.25 s), present() shows the latest over the frame, fitted to the picture: a game's
+        // movies otherwise reach the screen only through the GS.
+        void movieFrame(int width, int height, const uint8_t *rgba);
+
     private:
         Renderer();
         ~Renderer();
@@ -243,6 +248,11 @@ namespace ps2x::native
         uint64_t m_key = 0;
         int m_gsFrame[4] = {}; // id, width, height, pixel format
         std::unique_ptr<Gpu> m_gpu; // present thread only
+        std::mutex m_movieMutex;
+        std::vector<uint8_t> m_movie;
+        int m_movieWidth = 0, m_movieHeight = 0;
+        uint64_t m_movieGeneration = 0;
+        double m_movieTime = 0.0;
         bool m_enabled = false;
         bool m_streamDraws = false;
         uint64_t m_group = 0;

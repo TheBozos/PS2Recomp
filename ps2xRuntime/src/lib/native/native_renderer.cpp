@@ -192,6 +192,9 @@ void main()
         unsigned int tableTexture = 0, gridTexture = 0;
         int gridWidth = 0, gridHeight = 0;
         RenderTexture2D scatterOut{};
+        // Renderer::movieFrame's picture.
+        Texture2D movie{};
+        uint64_t movieGeneration = 0;
         // The depth-weighted mix: its shader and weight table (scatterOut is its result too).
         Shader mix{};
         int locMixBlurred = -1, locMixDepth = -1, locMixWeights = -1, locMixDivisor = -1, locMixAlpha = -1;
@@ -1022,6 +1025,44 @@ void main()
         DrawTexturePro(gpu.target.texture, Rectangle{0, 0, static_cast<float>(w), -static_cast<float>(h)},
                        Rectangle{x, y, width, height}, Vector2{0, 0}, 0.0f, WHITE);
         EndBlendMode();
+        // A movie playing (movieFrame within 0.25 s): its latest picture over the frame.
+        {
+            std::lock_guard<std::mutex> lock(m_movieMutex);
+            const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (!m_movie.empty() && now - m_movieTime < 0.25)
+            {
+                if (gpu.movie.id == 0 || gpu.movie.width != m_movieWidth || gpu.movie.height != m_movieHeight)
+                {
+                    if (gpu.movie.id != 0)
+                        UnloadTexture(gpu.movie);
+                    Image image{m_movie.data(), m_movieWidth, m_movieHeight, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                    gpu.movie = LoadTextureFromImage(image);
+                    SetTextureFilter(gpu.movie, TEXTURE_FILTER_BILINEAR);
+                    gpu.movieGeneration = m_movieGeneration;
+                }
+                else if (gpu.movieGeneration != m_movieGeneration)
+                {
+                    UpdateTexture(gpu.movie, m_movie.data());
+                    gpu.movieGeneration = m_movieGeneration;
+                }
+                DrawTexturePro(gpu.movie, Rectangle{0, 0, static_cast<float>(m_movieWidth), static_cast<float>(m_movieHeight)},
+                               Rectangle{x, y, width, height}, Vector2{0, 0}, 0.0f, WHITE);
+            }
+        }
         return true;
+    }
+
+    void Renderer::movieFrame(int width, int height, const uint8_t *rgba)
+    {
+        if (width <= 0 || height <= 0 || !rgba)
+            return;
+        std::lock_guard<std::mutex> lock(m_movieMutex);
+        m_movie.assign(rgba, rgba + static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+        for (size_t i = 3; i < m_movie.size(); i += 4)
+            m_movie[i] = 255u;
+        m_movieWidth = width;
+        m_movieHeight = height;
+        ++m_movieGeneration;
+        m_movieTime = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
 }

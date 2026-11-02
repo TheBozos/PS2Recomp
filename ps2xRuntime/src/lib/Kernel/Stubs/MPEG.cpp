@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/native/native_renderer.h"
 
 #if !defined(PS2X_HAS_FFMPEG)
 #define PS2X_HAS_FFMPEG 1
@@ -1837,6 +1838,9 @@ namespace ps2_stubs
             {
                 return;
             }
+
+            // The native renderer shows the picture itself (the GS path is not drawn there).
+            ps2x::native::Renderer::instance().movieFrame(frame.width, frame.height, frame.rgba.data());
 
             const uint32_t width = static_cast<uint32_t>(frame.width);
             const uint32_t height = static_cast<uint32_t>(frame.height);
