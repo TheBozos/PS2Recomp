@@ -177,6 +177,9 @@ void PS2AudioBackend::openSpu2Stream()
             g_spu2Stream.store(m_spu2.get());
             SetAudioStreamCallback(m_spu2->stream, spu2StreamCallback);
             PlayAudioStream(m_spu2->stream);
+            // PS2X_AUDIO_MUTE=1: mixed and recorded as usual, nothing heard (test runs beside someone).
+            if (const char *mute = std::getenv("PS2X_AUDIO_MUTE"); mute && *mute == '1')
+                SetAudioStreamVolume(m_spu2->stream, 0.0f);
             m_spu2->playing = true;
         }
     }

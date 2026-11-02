@@ -2660,6 +2660,16 @@ namespace ps2_stubs
                             for (const MpegRegisteredCallback &cb : entry.second)
                                 std::fprintf(stderr, "[MPEG:trace] callback mpeg %x: type %u stream %d id %u func %x data %x\n", entry.first,
                                              cb.type, cb.stream ? 1 : 0, cb.streamId, cb.func, cb.data);
+                    for (const auto &entry : g_mpeg_stub_state.callbacksByMpeg)
+                        for (const MpegRegisteredCallback &cb : entry.second)
+                            if (cb.stream && cb.data != 0u)
+                                if (const uint8_t *w = getConstMemPtr(rdram, cb.data))
+                                {
+                                    uint32_t v[8];
+                                    std::memcpy(v, w, sizeof(v));
+                                    std::fprintf(stderr, "[MPEG:trace] stream callback data %x: %x %x %x %x %x %x %x %x\n", cb.data, v[0], v[1], v[2],
+                                                 v[3], v[4], v[5], v[6], v[7]);
+                                }
                     std::fprintf(stderr, "[MPEG:trace] picture %u, %zu decoded ahead (limit %zu), eof %d; given:", playback.picturesServed,
                                  playback.decodedFrames.size(), g_maxDecodedPicturesAhead.load(), g_mpeg_stub_state.currentCdStreamEofSeen ? 1 : 0);
                     for (size_t k = 0; k < 32u; ++k)
