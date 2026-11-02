@@ -143,7 +143,8 @@ void main()
 )";
 
         // postEffect's depth-weighted mix (PostEffect::depthWeights): the frame (texture0), the blurred copy, the
-        // frame's depth and the weight table (R, 128 = 1).
+        // frame's depth and the weight table (R, 128 = 1); uDepthFrom > 0: the weight is uAlpha where the depth is at
+        // least uDepthFrom, else none. Both are premultiplied (colour and coverage): mixed as a whole.
         const char *kMixShader = R"(#version 330
 in vec2 fragTexCoord;
 in vec4 fragColor;
@@ -153,6 +154,7 @@ uniform sampler2D uDepth;
 uniform sampler2D uWeights;
 uniform float uDivisor;
 uniform float uAlpha;
+uniform float uDepthFrom;
 out vec4 finalColor;
 void main()
 {
@@ -160,8 +162,10 @@ void main()
     float z = (1.0 - texture(uDepth, fragTexCoord).r) * 16777215.0;
     float i = min(255.0, floor(z / uDivisor));
     float w = clamp(texture(uWeights, vec2((i + 0.5) / 256.0, 0.5)).r * 255.0 / 128.0, 0.0, 1.0) * uAlpha;
-    vec3 blurred = texture(uBlurred, vec2(fragTexCoord.x, 1.0 - fragTexCoord.y)).rgb;
-    finalColor = vec4(mix(frame.rgb, blurred, w), frame.a);
+    if (uDepthFrom > 0.0)
+        w = texture(uDepth, fragTexCoord).r >= uDepthFrom ? uAlpha : 0.0;
+    vec4 blurred = texture(uBlurred, fragTexCoord);
+    finalColor = mix(frame, blurred, w);
 }
 )";
 
@@ -221,7 +225,7 @@ void main()
         uint64_t movieGeneration = 0;
         // The depth-weighted mix: its shader and weight table (scatterOut is its result too).
         Shader mix{};
-        int locMixBlurred = -1, locMixDepth = -1, locMixWeights = -1, locMixDivisor = -1, locMixAlpha = -1;
+        int locMixBlurred = -1, locMixDepth = -1, locMixWeights = -1, locMixDivisor = -1, locMixAlpha = -1, locMixDepthFrom = -1;
         unsigned int weightTexture = 0;
 
         // The frame's target: colour and a depth texture (a pass can read the depth).
@@ -476,6 +480,7 @@ void main()
                 locMixWeights = GetShaderLocation(mix, "uWeights");
                 locMixDivisor = GetShaderLocation(mix, "uDivisor");
                 locMixAlpha = GetShaderLocation(mix, "uAlpha");
+                locMixDepthFrom = GetShaderLocation(mix, "uDepthFrom");
             }
             unsigned char table[256 * 4];
             for (int i = 0; i < 256; ++i)
@@ -504,6 +509,8 @@ void main()
             const float alpha = std::clamp(e.alpha, 0.0f, 1.0f);
             SetShaderValue(mix, locMixDivisor, &divisor, SHADER_UNIFORM_FLOAT);
             SetShaderValue(mix, locMixAlpha, &alpha, SHADER_UNIFORM_FLOAT);
+            const float depthFrom = e.depthWeights ? 0.0f : std::clamp(e.depthFrom - 0.00001f, 0.0f, 1.0f);
+            SetShaderValue(mix, locMixDepthFrom, &depthFrom, SHADER_UNIFORM_FLOAT);
             SetShaderValueTexture(mix, locMixBlurred, post[1].texture);
             SetShaderValueTexture(mix, locMixDepth, Texture2D{target.depth.id, w, h, 1, target.depth.format});
             SetShaderValueTexture(mix, locMixWeights, Texture2D{weightTexture, 256, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8});
@@ -576,7 +583,7 @@ void main()
             pass(target.texture, w, h, post[1], 0.0f, 0.0f, 0.0f, e.gain);               // shrink, brighten
             pass(post[1].texture, pw, ph, post[0], 1.0f / pw, 0.0f, e.sigma, 1.0f);        // horizontal blur
             pass(post[0].texture, pw, ph, post[1], 0.0f, 1.0f / ph, e.sigma, 1.0f);        // vertical blur
-            if (e.depthWeights && target.depth.id != 0)
+            if ((e.depthWeights || e.depthFrom > 0.0f) && target.depth.id != 0)
             {
                 mixPass(e, w, h);
                 return;
@@ -846,7 +853,10 @@ void main()
         rlDisableVertexArray();
 
         BeginTextureMode(gpu.target);
-        ClearBackground(BLANK);
+        if (frame->cleared)
+            ClearBackground(Color{frame->clearColour[0], frame->clearColour[1], frame->clearColour[2], 255});
+        else
+            ClearBackground(BLANK);
         rlDrawRenderBatchActive();
         const Screen &screen = frame->screen;
         const float screenRect[4] = {screen.originX, screen.originY, screen.width, screen.height};

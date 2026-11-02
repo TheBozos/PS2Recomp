@@ -167,6 +167,15 @@ namespace ps2x::native
         // An untextured draw's colour as the GS has it: the vertex colour as it is (0x80 = 128 of 255), the 0x80 = 1.0
         // scale being the texture modulation's only (its alpha stays a blend factor, 0x80 = 1). Off: x 255 / 128 too.
         void setGsUntexturedColour(bool on) { m_gsUntextured = on; }
+        // The frame being built starts from this opaque colour (the GS's frame clear, 0x80 = 128 of 255) instead of a
+        // transparent target: what the game's own geometry leaves uncovered shows it, blends over it included.
+        void setClearColour(uint8_t r, uint8_t g, uint8_t b)
+        {
+            m_building.cleared = true;
+            m_building.clearColour[0] = r;
+            m_building.clearColour[1] = g;
+            m_building.clearColour[2] = b;
+        }
         void beginGroup(uint64_t group) { m_group = group; }
         // A group has batches waiting (its GS marker is worth queueing): the VIF1 interpreter reaches a program after
         // the native port has drawn it (at the transfer's start), so a group without batches by then has none.
@@ -229,6 +238,8 @@ namespace ps2x::native
             double time = 0.0;                           // when it was published (seconds)
             std::unordered_map<uint64_t, uint32_t> keys; // key -> its first batch
             uint64_t lastGroup = 0;                      // its batches' latest group (0: none)
+            bool cleared = false;                        // the target starts from clearColour (else transparent)
+            uint8_t clearColour[3] = {};
         };
 
         // Any thread (the MPEG decoder): a movie picture just decoded (RGBA8, width x height). While pictures keep
