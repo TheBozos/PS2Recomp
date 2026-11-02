@@ -1997,6 +1997,12 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
     {
         paths.cdImage = normalizeAbsolutePath(std::filesystem::path(image));
     }
+    // PS2X_CD_IMAGE_FS=1: files are looked up in the image's own ISO 9660 volumes (both layers of a DVD9) at the disc's
+    // sector numbers, for games that read directories or files by those numbers.
+    if (const char *fs = std::getenv("PS2X_CD_IMAGE_FS"); fs && *fs && *fs != '0')
+    {
+        paths.cdImageFileSystem = true;
+    }
 
     setIoPaths(paths);
 }
