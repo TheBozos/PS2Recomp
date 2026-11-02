@@ -2141,15 +2141,17 @@ bool GSNativeBackend::bindTexture(const GSDrawState &state, const RenderTarget &
         if (static const bool check = std::getenv("PS2X_NATIVE_TEXTURE_CHECK") != nullptr; check)
             checkNativeTexture(*native, rawTex0(context.tex0), rawTexa(state.texa));
         UploadedTexture &uploaded = m_nativeUploaded[native->key];
-        if (!uploaded.texture)
+        if (!uploaded.texture || uploaded.version != native->version)
         {
-            glGenTextures(1, &uploaded.texture);
+            if (!uploaded.texture)
+                glGenTextures(1, &uploaded.texture);
             glBindTexture(GL_TEXTURE_2D, uploaded.texture);
             glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, native->width, native->height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
                          native->rgba);
             uploaded.width = native->width;
             uploaded.height = native->height;
+            uploaded.version = native->version;
         }
         texture = uploaded.texture;
         width = static_cast<float>(native->width);

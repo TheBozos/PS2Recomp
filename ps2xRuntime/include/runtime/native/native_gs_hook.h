@@ -38,12 +38,13 @@ namespace ps2x::native
     // A texture a port decoded from its game's own assets (an offline pack), in place of the one TEX0 selects in GS
     // memory: RGBA8 rows, R in the low byte, alpha as the GS keeps it (0x80 = 1.0, as TextureCache::Texture and
     // packs::decodeRecord give it): the top-left part of the 2^TW x 2^TH texture the draw's texels reach. The port keeps it alive for as long as draws
-    // may use it; key tells textures apart.
+    // may use it; key tells textures apart, and a new version of a key (a movie's next picture) replaces its pixels.
     struct NativeTexture
     {
         uint32_t width = 0, height = 0;
         const uint32_t *rgba = nullptr;
         uint64_t key = 0;
+        uint64_t version = 0;
     };
 
     // A draw a port computes in the GS's own terms (a microprogram's output, translated to C++): vertices as the GS
