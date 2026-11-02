@@ -29,7 +29,7 @@ namespace
                        kVolXL = 0x0600u, kVolXR = 0x0700u;
     // Core parameters (bit 7 set).
     constexpr uint32_t kMix = 0x0800u, kMVolL = 0x0980u, kMVolR = 0x0A80u, kEVolL = 0x0B80u, kEVolR = 0x0C80u,
-                       kAVolL = 0x0D80u, kAVolR = 0x0E80u;
+                       kAVolL = 0x0D80u, kAVolR = 0x0E80u, kBVolL = 0x0F80u, kBVolR = 0x1080u;
     // Switches.
     constexpr uint32_t kKon = 0x1500u, kKoff = 0x1600u, kEndX = 0x1700u, kVMixL = 0x1800u, kVMixEL = 0x1900u, kVMixR = 0x1A00u,
                        kVMixER = 0x1B00u;
@@ -100,8 +100,10 @@ namespace
         case kEVolL: mixer().setEffectVolume(core, 0, v); return;
         case kEVolR: mixer().setEffectVolume(core, 1, v); return;
         case kMix: mixer().setMix(core, v); return;
-        case kAVolL: mixer().setInputVolume(core, 0, v); return;
-        case kAVolR: mixer().setInputVolume(core, 1, v); return;
+        // The sound data input's volume is BVOL (SPU2 0x76C); AVOL (0x768) is the external input's, core 0's output
+        // into core 1, kept as a plain parameter.
+        case kBVolL: mixer().setInputVolume(core, 0, v); return;
+        case kBVolR: mixer().setInputVolume(core, 1, v); return;
         default: g_state.params[entry] = value; return;
         }
     }
@@ -131,8 +133,8 @@ namespace
         case kEVolL: return mixer().effectVolume(core, 0);
         case kEVolR: return mixer().effectVolume(core, 1);
         case kMix: return mixer().mix(core);
-        case kAVolL: return mixer().inputVolume(core, 0);
-        case kAVolR: return mixer().inputVolume(core, 1);
+        case kBVolL: return mixer().inputVolume(core, 0);
+        case kBVolR: return mixer().inputVolume(core, 1);
         default:
         {
             const auto it = g_state.params.find(entry);
