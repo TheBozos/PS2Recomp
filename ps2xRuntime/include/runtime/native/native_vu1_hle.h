@@ -38,9 +38,9 @@ namespace ps2x::native
     inline std::atomic<uint32_t> g_vu1LaunchSource{0};
 
     // A port that draws everything natively from its game's own data (nothing from VU1 output) sets this: every VIF1
-    // transfer from EE memory ends at once without being processed (no VIF1 unpack, no VU1 program), as an empty
-    // transfer does, so the game's DMA end interrupts, queues and callbacks keep their order. Downloads (VIF1 to
-    // memory) are not affected.
+    // chain transfer from EE memory (the game's packets for VU1) ends at once without being processed (no VIF1 unpack,
+    // no VU1 program), as an empty transfer does, so the game's DMA end interrupts, queues and callbacks keep their
+    // order. Normal-mode transfers (GS data sent through VIF1 DIRECT, waited for with FINISH) and downloads still run.
     inline std::atomic<bool> g_vif1Dropped{false};
     inline void setVif1Dropped(bool dropped) { g_vif1Dropped.store(dropped, std::memory_order_release); }
 

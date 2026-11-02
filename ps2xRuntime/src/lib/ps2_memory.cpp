@@ -1679,9 +1679,11 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 uint32_t mode = (chcr >> 2) & 0x3;
                 const bool stallable = signalStallApplies(channelBase);
 
-                // A port drawing natively from its game's data (ps2x::native::g_vif1Dropped): VIF1 data is not
-                // processed, the channel ends below as an empty transfer does.
-                if (channelBase == kVif1Channel && ps2x::native::g_vif1Dropped.load(std::memory_order_acquire))
+                // A port drawing natively from its game's data (ps2x::native::g_vif1Dropped): VIF1 chains (the game's
+                // object packets for VU1) are not processed, the channel ends below as an empty transfer does. Normal
+                // transfers still run: a game may send GS data through VIF1 DIRECT and wait for its FINISH (VP2's battle
+                // set-up does).
+                if (channelBase == kVif1Channel && mode == 1u && ps2x::native::g_vif1Dropped.load(std::memory_order_acquire))
                 {
                 }
                 else if (mode == 0 && qwc > 0 && !stallable)
