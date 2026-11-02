@@ -120,6 +120,11 @@ namespace ps2x::native
             int width = 128, height = 89;
             float gain = 1.0f, sigma = 0.0f, alpha = 1.0f;
             float depthFrom = 1.0f;
+            // depthWeights: the blurred copy is mixed by alpha x weights[i] / 128 per pixel instead, i = min(255, Z >>
+            // weightShift) from the frame's GS Z (24-bit): a game's depth of field table (depthFrom unused).
+            bool depthWeights = false;
+            int weightShift = 16;
+            uint8_t weights[256] = {};
             // levels instead of the blur: every pixel's RGB becomes clamp(levelGain x max(0, min(F, levelHigh) -
             // levelLow)) per channel (0..1 values; a game's brightness / tone pass over its finished frame).
             bool levels = false;

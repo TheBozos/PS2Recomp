@@ -137,6 +137,29 @@ void main()
 }
 )";
 
+        // postEffect's depth-weighted mix (PostEffect::depthWeights): the frame (texture0), the blurred copy, the
+        // frame's depth and the weight table (R, 128 = 1).
+        const char *kMixShader = R"(#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+uniform sampler2D texture0;
+uniform sampler2D uBlurred;
+uniform sampler2D uDepth;
+uniform sampler2D uWeights;
+uniform float uDivisor;
+uniform float uAlpha;
+out vec4 finalColor;
+void main()
+{
+    vec4 frame = texture(texture0, fragTexCoord);
+    float z = (1.0 - texture(uDepth, fragTexCoord).r) * 16777215.0;
+    float i = min(255.0, floor(z / uDivisor));
+    float w = clamp(texture(uWeights, vec2((i + 0.5) / 256.0, 0.5)).r * 255.0 / 128.0, 0.0, 1.0) * uAlpha;
+    vec3 blurred = texture(uBlurred, vec2(fragTexCoord.x, 1.0 - fragTexCoord.y)).rgb;
+    finalColor = vec4(mix(frame.rgb, blurred, w), frame.a);
+}
+)";
+
         constexpr int kGlUnsignedByte = 0x1401;
         constexpr int kGlFloat = 0x1406;
         constexpr int kGlSrcAlpha = 0x0302;
@@ -169,6 +192,10 @@ void main()
         unsigned int tableTexture = 0, gridTexture = 0;
         int gridWidth = 0, gridHeight = 0;
         RenderTexture2D scatterOut{};
+        // The depth-weighted mix: its shader and weight table (scatterOut is its result too).
+        Shader mix{};
+        int locMixBlurred = -1, locMixDepth = -1, locMixWeights = -1, locMixDivisor = -1, locMixAlpha = -1;
+        unsigned int weightTexture = 0;
 
         // The frame's target: colour and a depth texture (a pass can read the depth).
         static RenderTexture2D loadTarget(int w, int h)
@@ -356,6 +383,68 @@ void main()
             rlEnableDepthTest();
         }
 
+        // The blurred copy (post[1]) mixed over the frame by the weight of each pixel's depth: into scatterOut, then
+        // back over the frame as it is.
+        void mixPass(const Renderer::PostEffect &e, int w, int h)
+        {
+            if (mix.id == 0)
+            {
+                mix = LoadShaderFromMemory(nullptr, kMixShader);
+                locMixBlurred = GetShaderLocation(mix, "uBlurred");
+                locMixDepth = GetShaderLocation(mix, "uDepth");
+                locMixWeights = GetShaderLocation(mix, "uWeights");
+                locMixDivisor = GetShaderLocation(mix, "uDivisor");
+                locMixAlpha = GetShaderLocation(mix, "uAlpha");
+            }
+            unsigned char table[256 * 4];
+            for (int i = 0; i < 256; ++i)
+                table[4 * i] = table[4 * i + 1] = table[4 * i + 2] = table[4 * i + 3] = e.weights[i];
+            if (weightTexture == 0)
+            {
+                weightTexture = rlLoadTexture(table, 256, 1, RL_PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+                rlTextureParameters(weightTexture, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_NEAREST);
+                rlTextureParameters(weightTexture, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_NEAREST);
+            }
+            else
+                rlUpdateTexture(weightTexture, 0, 0, 256, 1, RL_PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, table);
+            if (scatterOut.texture.width != w || scatterOut.texture.height != h)
+            {
+                if (scatterOut.id != 0)
+                    UnloadRenderTexture(scatterOut);
+                scatterOut = LoadRenderTexture(w, h);
+            }
+            SetTextureFilter(target.texture, TEXTURE_FILTER_POINT);
+            BeginTextureMode(scatterOut);
+            ClearBackground(BLANK);
+            rlDisableColorBlend();
+            rlDisableDepthTest();
+            BeginShaderMode(mix);
+            const float divisor = static_cast<float>(1u << std::clamp(e.weightShift, 0, 24));
+            const float alpha = std::clamp(e.alpha, 0.0f, 1.0f);
+            SetShaderValue(mix, locMixDivisor, &divisor, SHADER_UNIFORM_FLOAT);
+            SetShaderValue(mix, locMixAlpha, &alpha, SHADER_UNIFORM_FLOAT);
+            SetShaderValueTexture(mix, locMixBlurred, post[1].texture);
+            SetShaderValueTexture(mix, locMixDepth, Texture2D{target.depth.id, w, h, 1, target.depth.format});
+            SetShaderValueTexture(mix, locMixWeights, Texture2D{weightTexture, 256, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8});
+            DrawTexturePro(target.texture, Rectangle{0, 0, static_cast<float>(w), -static_cast<float>(h)},
+                           Rectangle{0, 0, static_cast<float>(w), static_cast<float>(h)}, Vector2{0, 0}, 0.0f, WHITE);
+            EndShaderMode();
+            EndTextureMode();
+            BeginTextureMode(target);
+            rlDrawRenderBatchActive();
+            setDepthAlways(false);
+            rlDisableColorBlend();
+            rlDisableDepthTest();
+            rlDisableDepthMask();
+            DrawTexturePro(scatterOut.texture, Rectangle{0, 0, static_cast<float>(w), -static_cast<float>(h)},
+                           Rectangle{0, 0, static_cast<float>(w), static_cast<float>(h)}, Vector2{0, 0}, 0.0f, WHITE);
+            rlDrawRenderBatchActive();
+            rlEnableColorBlend();
+            rlSetBlendMode(RL_BLEND_ALPHA);
+            rlEnableDepthMask();
+            rlEnableDepthTest();
+        }
+
         void postPass(const Renderer::PostEffect &e, int w, int h)
         {
             if (e.levels)
@@ -406,6 +495,11 @@ void main()
             pass(target.texture, w, h, post[1], 0.0f, 0.0f, 0.0f, e.gain);               // shrink, brighten
             pass(post[1].texture, pw, ph, post[0], 1.0f / pw, 0.0f, e.sigma, 1.0f);        // horizontal blur
             pass(post[0].texture, pw, ph, post[1], 0.0f, 1.0f / ph, e.sigma, 1.0f);        // vertical blur
+            if (e.depthWeights && target.depth.id != 0)
+            {
+                mixPass(e, w, h);
+                return;
+            }
             // Back over the target: a quad at depth depthFrom passes the depth test where the frame is that far or farther.
             BeginTextureMode(target);
             rlDrawRenderBatchActive();
