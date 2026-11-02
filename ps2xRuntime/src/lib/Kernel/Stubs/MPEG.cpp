@@ -1590,6 +1590,19 @@ namespace ps2_stubs
                     break;
                 }
 
+                // PS2X_MPEG_DUMP=<file> (diagnosis): every PSS byte the game demuxes, appended in order (a movie as
+                // the game streams it, for a player such as ffmpeg).
+                static std::FILE *s_dump = []
+                {
+                    const char *path = std::getenv("PS2X_MPEG_DUMP");
+                    return path && *path ? std::fopen(path, "wb") : nullptr;
+                }();
+                if (s_dump)
+                {
+                    std::fwrite(src, 1, chunk, s_dump);
+                    std::fflush(s_dump);
+                }
+
                 appendPssBytes(
                     mpegAddr,
                     playback,
