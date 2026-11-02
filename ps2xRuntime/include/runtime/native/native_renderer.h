@@ -298,6 +298,12 @@ namespace ps2x::native
         void drawOverlay(const Frame &overlay, float x, float y, float width, float height); // present thread
 
         Frame m_building;
+        // The vertex and batch arrays of frames the present thread is done with, kept (cleared) for the next frames to
+        // fill: a new frame's arrays grew from nothing by doubling, megabytes copied and allocated each frame.
+        std::mutex m_poolMutex;
+        std::vector<std::vector<Vertex>> m_vertexPool;
+        std::vector<std::vector<Batch>> m_batchPool;
+        void startBuilding(const Screen &screen); // game thread: m_building anew, on pooled arrays
         Frame m_overlayBuilding;                  // game thread (drawOverlay)
         std::shared_ptr<Frame> m_overlayPublished; // under m_mutex
         bool m_presentsAlone = false;

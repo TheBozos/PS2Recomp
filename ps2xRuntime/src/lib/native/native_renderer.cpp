@@ -387,8 +387,33 @@ void main()
 
     void Renderer::beginFrame(const Screen &screen)
     {
+        startBuilding(screen);
+    }
+
+    void Renderer::startBuilding(const Screen &screen)
+    {
+        std::vector<Vertex> vertices = std::move(m_building.vertices);
+        std::vector<Batch> batches = std::move(m_building.batches);
+        if (vertices.capacity() == 0u || batches.capacity() == 0u)
+        {
+            std::lock_guard<std::mutex> lock(m_poolMutex);
+            if (vertices.capacity() == 0u && !m_vertexPool.empty())
+            {
+                vertices = std::move(m_vertexPool.back());
+                m_vertexPool.pop_back();
+            }
+            if (batches.capacity() == 0u && !m_batchPool.empty())
+            {
+                batches = std::move(m_batchPool.back());
+                m_batchPool.pop_back();
+            }
+        }
+        vertices.clear();
+        batches.clear();
         m_building = Frame{};
         m_building.screen = screen;
+        m_building.vertices = std::move(vertices);
+        m_building.batches = std::move(batches);
     }
 
     void Renderer::draw(const Material &material, const float matrix[16], const Vertex *vertices, uint32_t count)
@@ -636,13 +661,30 @@ void main()
 
     void Renderer::endFrame()
     {
-        auto frame = std::make_shared<Frame>(std::move(m_building));
-        m_building = Frame{};
+        // Its arrays go back to the pool when the present thread lets the frame go (cleared there: the textures the
+        // batches hold are released with them, as before).
+        std::shared_ptr<Frame> frame(new Frame(std::move(m_building)), [this](Frame *done)
+                                     {
+                                         done->vertices.clear();
+                                         done->batches.clear();
+                                         {
+                                             std::lock_guard<std::mutex> lock(m_poolMutex);
+                                             if (m_vertexPool.size() < 4u && done->vertices.capacity() != 0u)
+                                                 m_vertexPool.push_back(std::move(done->vertices));
+                                             if (m_batchPool.size() < 4u && done->batches.capacity() != 0u)
+                                                 m_batchPool.push_back(std::move(done->batches));
+                                         }
+                                         delete done; });
+        startBuilding(Screen{});
         m_key = 0;
         frame->time = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-        for (uint32_t i = 0; i < frame->batches.size(); ++i)
-            if (frame->batches[i].key != 0u)
-                frame->keys.emplace(frame->batches[i].key, i);
+        // The keys only serve the frames drawn between the game's (matchFrames, the traces): a map entry per object
+        // each frame otherwise.
+        const bool interpolate = frameRate() != 0;
+        if (interpolate)
+            for (uint32_t i = 0; i < frame->batches.size(); ++i)
+                if (frame->batches[i].key != 0u)
+                    frame->keys.emplace(frame->batches[i].key, i);
         if (m_streamDraws && frame->lastGroup != 0u)
         {
             std::lock_guard<std::mutex> lock(m_probeMutex);
@@ -650,7 +692,6 @@ void main()
             if (m_frameLastGroups.size() > 64u)
                 m_frameLastGroups.pop_front();
         }
-        const bool interpolate = frameRate() != 0;
         if (interpolate)
             for (const auto &[key, index] : frame->keys)
                 frame->bases[frame->batches[index].base].push_back(index);
