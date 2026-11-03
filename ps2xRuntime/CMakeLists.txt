@@ -395,6 +395,7 @@ add_library(ps2_runtime STATIC
     src/lib/native/native_mesh_draw.cpp
     src/lib/native/native_renderer.cpp
     src/lib/native/native_renderer_gs.cpp
+    src/lib/native/native_renderer_passes.cpp
     src/lib/native/native_vif1.cpp
     src/lib/native/native_gif.cpp
     src/lib/native/native_vu1_sandbox.cpp

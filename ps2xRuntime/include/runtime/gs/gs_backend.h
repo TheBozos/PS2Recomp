@@ -105,6 +105,17 @@ public:
         }
     }
 
+    // A native port's pass over a render target (Renderer::passKeyed): the GL target of a FRAME / ZBUF register pair as the
+    // game writes them, with the batch collected so far drawn first; false for a GS renderer without GL targets.
+    virtual bool NativeTarget(uint64_t frame, uint64_t zbuf, uint32_t rows, ps2x::native::GsDrawTarget &out)
+    {
+        (void)frame;
+        (void)zbuf;
+        (void)rows;
+        (void)out;
+        return false;
+    }
+
     virtual void NativeDraw(uint64_t group, const GSContext &context)
     {
         if (const ps2x::native::GsDrawHook hook = ps2x::native::gsDrawHook())

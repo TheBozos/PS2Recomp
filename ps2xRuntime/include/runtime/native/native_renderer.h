@@ -119,6 +119,7 @@ namespace ps2x::native
         // 0, not fromGsContext) decodes its texture with it, as the GS would (16- and 24-bit texels take their alpha
         // from it; a game may write TEXA once, outside the stream a port reads).
         void setGsTexa(uint64_t texa) { m_gsTexa.store(texa, std::memory_order_relaxed); }
+        uint64_t gsTexa() const { return m_gsTexa.load(std::memory_order_relaxed); }
         void endFrame();
         // A full-screen pass at this point of the frame (a port's game's own post effect, from its parameters): the
         // frame drawn so far shrunk to width x height (bilinear), brightened by gain (clamped to 1), blurred (Gaussian,
@@ -184,6 +185,59 @@ namespace ps2x::native
         // Batches whose marker the GS never reaches are dropped once 65536 newer keys were drawn.
         void drawGsKeyed(uint64_t key, const GsMaterial &material, const GsVertex *triangles, uint32_t count);
         bool takeGsKeyed(uint64_t key, GsVisitor visit, void *user);
+        // Stream draws: native passes over a render target where the GS stream reaches a port's GIF chain marker (the key,
+        // as drawGsKeyed's; its GS batches first), for a game's off-screen work done without GS memory: on the GS thread,
+        // in the order queued, into the GL target the GS renderer keeps for `frame` / `zbuf` (FRAME_n, ZBUF_n as the game
+        // writes them). Vertices are in primitive coordinates (the GS's 12.4 X and Y over 16), xyoffset (XYOFFSET_n as
+        // written) taking them to the target's pixels; width x height is the part of the target from its top-left corner
+        // a full-screen pass covers. Passes whose marker the GS never reaches are dropped with the keyed batches.
+        struct TargetPass
+        {
+            enum class Kind : uint8_t
+            {
+                // The target's pixels whose alpha is at least alphaRef (0x80 = 1.0) over width x height shrunk to half
+                // (bilinear, each 2 x 2 averaged) then to a quarter, blurred `blurs` times (two bilinear copies half a
+                // pixel apart), stretched back to half size (kept: Surface::Glow), then modulated by rgba (0x80 = 1.0)
+                // and blended over the target by the GS ALPHA register `alpha`, its RGB only.
+                Glow,
+                // Triangles (`up`, `down`) counted in a stencil of the target's size where they pass the GS depth test
+                // (GEQUAL) against the target's depth: up adds one, down takes one away (wrapping); colour and depth kept.
+                // clear: the count zeroed first and the target's depth taken as it is now.
+                Volumes,
+                // A flat rgba blended by `alpha` over width x height where the count is not 0 (alpha written as the GS
+                // does: the source's); the count zeroed after.
+                Darken,
+                // The target's depth at the points depthAt was asked for (stream draws), read here.
+                Probe,
+                // Sprites (`up`: corner pairs, or triangles when `triangles`; s, t in the surface's GS pixels) sampling a
+                // surface, its alpha texelAlpha when that is not negative (a 24-bit read: TEXA's), modulated by their
+                // colour (0x80 = 1.0) when modulate, blended by `alpha` when blend, bilinear when linear.
+                Sprites,
+                // The target's colour over width x height kept as Surface::Display (the picture the game displays).
+                KeepDisplay,
+            } kind = Kind::Glow;
+            enum class Surface : uint8_t
+            {
+                Target,  // the target as drawn so far (a copy taken at the pass)
+                Glow,    // the last Glow pass's half-size picture
+                Display, // the last KeepDisplay's
+            } surface = Surface::Target;
+            uint64_t frame = 0, zbuf = 0, xyoffset = 0;
+            uint32_t width = 640, height = 448;
+            uint8_t alphaRef = 0;
+            uint32_t blurs = 1;
+            uint32_t rgba = 0x80808080u;
+            uint64_t alpha = 0;
+            bool clear = false, modulate = true, blend = true, linear = true, triangles = false;
+            int texelAlpha = -1;
+            std::vector<GsVertex> up, down;
+        };
+        void passKeyed(uint64_t key, TargetPass pass);
+        // A pass run at every marker of `key` until replaced (a game list the GS reaches each frame, built once).
+        void standingPassKeyed(uint64_t key, TargetPass pass);
+        // GS thread, at a key's marker: the key's passes, each into the target `target` gives for its FRAME / ZBUF.
+        using TargetSource = bool (*)(void *user, uint64_t frame, uint64_t zbuf, uint32_t rows, GsDrawTarget &out);
+        void runKeyedPasses(uint64_t key, TargetSource target, void *user);
         // Frames faster than the game's (PS2X_NATIVE_INTERPOLATE=1): the native port keys each object's batches by
         // something stable from one game frame to the next (its own data, not its place in the stream); present()
         // then draws a key found in the previous frame too with its matrix between the two, by how far the window's
@@ -288,6 +342,12 @@ namespace ps2x::native
         std::deque<GsBatch> m_gsStream; // drawGs's batches waiting for their group's marker (m_streamMutex)
         std::unordered_map<uint64_t, std::vector<GsBatch>> m_gsKeyed; // drawGsKeyed's, by key (m_streamMutex)
         std::deque<uint64_t> m_gsKeyedOrder;
+        std::unordered_map<uint64_t, std::vector<TargetPass>> m_keyedPasses; // passKeyed's, by key (m_streamMutex)
+        std::deque<uint64_t> m_keyedPassOrder;
+        std::unordered_map<uint64_t, TargetPass> m_standingPasses; // m_streamMutex
+        struct PassGpu; // GS thread only (native_renderer_passes.cpp)
+        PassGpu *m_passGpu = nullptr;
+        void runPass(PassGpu &gpu, const TargetPass &pass, const GsDrawTarget &target);
         GsPass *m_gsPass = nullptr;       // its GL objects live in the GS thread's context: kept to the end
         std::atomic<bool> m_drewIntoGs{false};
         // Without GL targets (present() draws the frame over the GS one): each group's GS scissor, in primitive

@@ -898,6 +898,7 @@ void GS::queueKeyedDraw(uint64_t key)
         if (!m_backend || m_parallel)
             return;
         ps2x::native::Renderer::instance().takeGsKeyed(key, &GS::submitGsBatch, this);
+        ps2x::native::Renderer::instance().runKeyedPasses(key, &GS::nativeTarget, this);
     };
     if (!shouldQueue())
     {
@@ -908,6 +909,12 @@ void GS::queueKeyedDraw(uint64_t key)
     command.kind = QueuedCommand::Kind::Call;
     command.call = std::move(draw);
     enqueue(std::move(command));
+}
+
+bool GS::nativeTarget(void *user, uint64_t frame, uint64_t zbuf, uint32_t rows, ps2x::native::GsDrawTarget &out)
+{
+    GS *gs = static_cast<GS *>(user);
+    return gs->m_backend && gs->m_backend->NativeTarget(frame, zbuf, rows, out);
 }
 
 void GS::runOnWorker(std::function<void()> work)

@@ -293,6 +293,8 @@ private:
     static bool queueTraceActive();
     static void traceQueuedCommand(const QueuedCommand &command);
     // Renderer::takeGsBatches's visitor: a native port's triangles into the render target here.
+    // Renderer::runKeyedPasses's target source: the backend's GL target of a FRAME / ZBUF pair.
+    static bool nativeTarget(void *user, uint64_t frame, uint64_t zbuf, uint32_t rows, ps2x::native::GsDrawTarget &out);
     static void submitGsBatch(void *user, const ps2x::native::GsMaterial &material, const ps2x::native::GsVertex *triangles,
                               uint32_t count);
     // Renderer::takeGsContextBatches's visitor: a native object's triangles drawn under this GS state.

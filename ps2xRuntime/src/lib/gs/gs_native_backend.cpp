@@ -1891,6 +1891,32 @@ void GSNativeBackend::NativeDraw(uint64_t group, const GSContext &context)
     hook(group, target);
 }
 
+bool GSNativeBackend::NativeTarget(uint64_t frame, uint64_t zbuf, uint32_t rows, ps2x::native::GsDrawTarget &out)
+{
+    GSFrameReg f;
+    f.fbp = static_cast<uint32_t>(frame & 0x1FFu);
+    f.fbw = static_cast<uint32_t>((frame >> 16) & 0x3Fu);
+    f.psm = static_cast<uint8_t>((frame >> 24) & 0x3Fu);
+    f.fbmsk = static_cast<uint32_t>(frame >> 32);
+    GSZbufReg z;
+    z.zbp = static_cast<uint32_t>(zbuf & 0x1FFu);
+    z.psm = static_cast<uint8_t>(((zbuf >> 24) & 0xFu) | 0x30u);
+    z.zmask = (zbuf >> 32) & 1u;
+    const FrameTarget target = frameTarget(f, z, rows);
+    if (target.framebuffer == 0u)
+        return false;
+    out.framebuffer = target.framebuffer;
+    out.color = target.color;
+    out.depth = target.depth;
+    out.width = target.width;
+    out.height = target.height;
+    out.scale = target.scale;
+    out.zScale = target.zScale;
+    out.fbmsk = f.fbmsk;
+    out.zmask = z.zmask;
+    return true;
+}
+
 void GSNativeBackend::resolveAllTargets()
 {
     flushBatch();
