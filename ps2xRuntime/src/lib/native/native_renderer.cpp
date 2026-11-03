@@ -707,7 +707,7 @@ void main()
         }
     }
 
-    void Renderer::postEffect(const PostEffect &effect, size_t at)
+    size_t Renderer::postEffect(const PostEffect &effect, size_t at)
     {
         Batch batch;
         batch.post = static_cast<int>(m_building.posts.size());
@@ -715,6 +715,12 @@ void main()
         m_building.posts.push_back(effect);
         at = std::min(at, m_building.batches.size());
         m_building.batches.insert(m_building.batches.begin() + static_cast<std::ptrdiff_t>(at), std::move(batch));
+        return m_building.posts.size() - 1u;
+    }
+
+    Renderer::PostEffect *Renderer::adjustPostEffect(size_t index)
+    {
+        return index < m_building.posts.size() ? &m_building.posts[index] : nullptr;
     }
 
     void Renderer::endFrame()

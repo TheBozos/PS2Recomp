@@ -145,7 +145,11 @@ namespace ps2x::native
             float levelGain[3] = {1.0f, 1.0f, 1.0f}, levelHigh[3] = {1.0f, 1.0f, 1.0f}, levelLow[3] = {0.0f, 0.0f, 0.0f};
         };
         // at: the batch it goes before (batchCount() when that point was reached; past the end: at the end).
-        void postEffect(const PostEffect &effect, size_t at = SIZE_MAX);
+        // Returns the pass's index in the frame being built, for adjustPostEffect.
+        size_t postEffect(const PostEffect &effect, size_t at = SIZE_MAX);
+        // A pass of the frame being built, changeable until endFrame (a game that finishes an effect's parameters later
+        // in its frame than where the pass goes); null for an index not in this frame.
+        PostEffect *adjustPostEffect(size_t index);
         size_t batchCount() const { return m_building.batches.size(); }
         // Depth a game reads back from the GS (a visibility test: TMB's lens flares sample the Z buffer, which the
         // native frame is not in). While asked for (wantDepth, again within a second), present() copies the native
