@@ -3,6 +3,9 @@
 #include "runtime/ps2_determinism.h"
 #include "runtime/ps2_reference.h"
 #include "runtime/ps2_capture.h"
+#include "runtime/ps2_calllog.h"
+
+#include <initializer_list>
 
 #include "ps2_log.h"
 #include "ps2_runtime_macros.h"
@@ -131,6 +134,17 @@ EeScheduler::~EeScheduler()
         m_hostDeadlineThread.join();
 }
 
+namespace
+{
+    // PS2X_CALL_LOG: a change to the kernel's state (calllog.md, OP records), whoever makes it.
+    inline void logKernelOp(uint32_t op, std::initializer_list<uint32_t> args, uint64_t wide = 0u)
+    {
+        if (ps2x::calllog::g_on) [[unlikely]]
+            ps2x::calllog::op(op, args.begin(), static_cast<uint32_t>(args.size()), wide);
+    }
+    inline uint32_t u(int v) { return static_cast<uint32_t>(v); }
+}
+
 void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
 {
     m_executorThread = std::this_thread::get_id();
@@ -219,6 +233,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
 
 void EeScheduler::setFieldRate(FieldRate rate) noexcept
 {
+    logKernelOp(37u, {static_cast<uint32_t>(rate.numerator), static_cast<uint32_t>(rate.denominator)});
     // Takes effect from the next scheduled vblank.
     m_fieldRate = rate;
     m_vblankPeriodCycles = (kEeClockHz * rate.denominator + rate.numerator / 2u) / rate.numerator;
@@ -242,17 +257,40 @@ bool EeScheduler::captureWorkPending()
     return !m_events.empty();
 }
 
+bool EeScheduler::ownsContext(const R5900Context *context) const
+{
+    for (const auto &[id, candidate] : m_threads)
+    {
+        (void)id;
+        if (&candidate.context == context)
+            return true;
+        for (const GuestInvocation &invocation : candidate.invocations)
+            if (&invocation.context == context)
+                return true;
+    }
+    return false;
+}
+
 void EeScheduler::run()
 {
     assertExecutor();
     m_running.store(true, std::memory_order_release);
+    namespace calllog = ps2x::calllog;
+    if (calllog::g_on) [[unlikely]]
+        calllog::bind(&m_runtime);
 
     while (!m_stopRequested.load(std::memory_order_acquire))
     {
         // PS2X_CAPTURE: a sampled call continuing through the dispatcher (after a jump) must see nothing else run.
         if (ps2x::capture::g_active) [[unlikely]]
             ps2x::capture::schedulerPass(captureWorkPending());
+        // PS2X_CALL_LOG: the scheduler's events may change guest memory (vblank flags, posted tasks).
+        const bool logEvents = calllog::g_on && (calllog::strict() || captureWorkPending());
+        if (logEvents) [[unlikely]]
+            calllog::phaseBegin(4u);
         processPendingEvents();
+        if (logEvents) [[unlikely]]
+            calllog::phaseEnd();
         if (m_stopRequested.load(std::memory_order_acquire))
         {
             break;
@@ -281,11 +319,19 @@ void EeScheduler::run()
                 owner->status = EeThreadStatus::Running;
                 m_currentThreadId = owner->id;
                 renewTimeSlice();
+                if (calllog::g_on) [[unlikely]]
+                    calllog::phaseBegin(7u);
                 if (getRegU32(&invocation.context, 29) == 0u)
                 {
                     SET_GPR_U32(&invocation.context, 29, invocationStackTop());
                 }
                 owner->invocations.push_back(std::move(invocation));
+                if (calllog::g_on) [[unlikely]]
+                {
+                    calllog::invocationStarted(owner->id, static_cast<uint32_t>(owner->invocations.size()),
+                                               owner->invocations.back());
+                    calllog::phaseEnd();
+                }
             }
         }
 
@@ -295,6 +341,8 @@ void EeScheduler::run()
         {
             auto completion = std::move(running->resumeCompletion);
             running->resumeCompletion = {};
+            if (calllog::g_on) [[unlikely]]
+                calllog::phaseBegin(5u);
             try
             {
                 completion(running->activeContext());
@@ -302,6 +350,8 @@ void EeScheduler::run()
             catch (const EeDispatcherTransfer &)
             {
             }
+            if (calllog::g_on) [[unlikely]]
+                calllog::phaseEnd();
             if (m_currentThreadId == 0)
             {
                 continue;
@@ -328,7 +378,14 @@ void EeScheduler::run()
             if (!running->invocations.empty())
             {
                 GuestInvocation completed = std::move(running->invocations.back());
+                const uint32_t endedDepth = static_cast<uint32_t>(running->invocations.size());
+                const int endedThread = running->id;
                 running->invocations.pop_back();
+                if (calllog::g_on) [[unlikely]]
+                {
+                    calllog::invocationEnded(endedThread, endedDepth, completed);
+                    calllog::phaseBegin(6u);
+                }
                 if (completed.onComplete)
                 {
                     try
@@ -339,13 +396,23 @@ void EeScheduler::run()
                     {
                     }
                 }
+                if (calllog::g_on) [[unlikely]]
+                    calllog::phaseEnd();
                 continue;
             }
             const int endedId = running->id;
+            if (calllog::g_on) [[unlikely]]
+            {
+                const uint32_t args[] = {static_cast<uint32_t>(endedId), 0u};
+                calllog::op(calllog::kOpExit, args, 2);
+                calllog::phaseBegin(8u);
+            }
             makeDormant(*running);
             m_currentThreadId = 0;
             copyMainContextToRuntime();
             notifyThreadEnd(endedId);
+            if (calllog::g_on) [[unlikely]]
+                calllog::phaseEnd();
             publishIdleDebugContext();
             publishSnapshot();
             continue;
@@ -360,11 +427,19 @@ void EeScheduler::run()
         {
             GuestInvocation invocation = std::move(m_pendingInvocations.front());
             m_pendingInvocations.pop_front();
+            if (calllog::g_on) [[unlikely]]
+                calllog::phaseBegin(7u);
             if (getRegU32(&invocation.context, 29) == 0u)
             {
                 SET_GPR_U32(&invocation.context, 29, invocationStackTop());
             }
             running->invocations.push_back(std::move(invocation));
+            if (calllog::g_on) [[unlikely]]
+            {
+                calllog::invocationStarted(running->id, static_cast<uint32_t>(running->invocations.size()),
+                                           running->invocations.back());
+                calllog::phaseEnd();
+            }
             continue;
         }
 
@@ -403,11 +478,16 @@ void EeScheduler::run()
             continue;
         }
 
+        const int ranThread = m_currentThreadId;
+        const uint32_t ranDepth = static_cast<uint32_t>(running->invocations.size());
         try
         {
             m_transferToDispatcher = false;
             m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
             m_guestExecuting.store(true, std::memory_order_release);
+            // PS2X_CALL_LOG: the dispatcher's changes to this context since guest code last ran on it.
+            if (calllog::g_on) [[unlikely]]
+                calllog::beforeGuest(*this, ranThread, ranDepth, context);
             // PS2X_CAPTURE: a port function reached by a jump inside a sampled call is one of its out-calls.
             ps2x::capture::NativeScope captureScope;
             if (ps2x::capture::g_active && ps2x::capture::isOverride(context.pc)) [[unlikely]]
@@ -429,10 +509,17 @@ void EeScheduler::run()
             publishSnapshot();
             throw;
         }
+        if (calllog::g_on) [[unlikely]]
+            calllog::afterGuest(*this, ranThread, ranDepth);
 
         if (ps2x::capture::g_active) [[unlikely]]
             ps2x::capture::schedulerPass(captureWorkPending());
+        const bool logLateEvents = calllog::g_on && (calllog::strict() || captureWorkPending());
+        if (logLateEvents) [[unlikely]]
+            calllog::phaseBegin(4u);
         processPendingEvents();
+        if (logLateEvents) [[unlikely]]
+            calllog::phaseEnd();
         if (m_rescheduleRequested && m_currentThreadId != 0 && !threadSwitchDeferred())
         {
             GuestThread *preempted = currentThread();
@@ -465,6 +552,11 @@ void EeScheduler::postEvent(EeEvent event)
         return;
     }
 
+    if (ps2x::calllog::g_on && onExecutorThread()) [[unlikely]]
+    {
+        const uint32_t args[] = {static_cast<uint32_t>(event.type), event.id};
+        ps2x::calllog::op(ps2x::calllog::kOpEvent, args, 2, event.value);
+    }
     {
         std::lock_guard lock(m_eventMutex);
         m_events.push_back(event);
@@ -475,6 +567,8 @@ void EeScheduler::postEvent(EeEvent event)
 
 void EeScheduler::postTask(std::function<void()> task)
 {
+    if (ps2x::calllog::g_on && onExecutorThread()) [[unlikely]]
+        ps2x::calllog::op(ps2x::calllog::kOpTask, nullptr, 0);
     {
         std::lock_guard lock(m_eventMutex);
         m_tasks.push_back(std::move(task));
@@ -486,6 +580,8 @@ void EeScheduler::postTask(std::function<void()> task)
 
 bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 {
+    if (ps2x::calllog::g_on) [[unlikely]]
+        ps2x::calllog::checkpoint();
     static const bool profile = []
     {
         const char *value = std::getenv("PS2X_EE_PROFILE");
@@ -663,6 +759,8 @@ void EeScheduler::accountCycles(uint32_t cycles) noexcept
     }
     m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
     m_runtime.advanceIopEeCycles(elapsed);
+    if (ps2x::calllog::g_on) [[unlikely]]
+        ps2x::calllog::iopEnd(1u); // PS2X_CALL_LOG: what the IOP slice changed in EE memory
     m_iopEeCycles += elapsed;
     if (m_pendingEeTimerInterrupts != 0u)
     {
@@ -678,6 +776,7 @@ bool EeScheduler::isExecutingGuest() const noexcept
 void EeScheduler::setupCurrentThread(uint32_t stack, uint32_t stackSize, uint32_t gp)
 {
     assertExecutor();
+    logKernelOp(38u, {stack, stackSize, gp});
     GuestThread *target = currentThread();
     if (!target)
     {
@@ -716,6 +815,12 @@ int EeScheduler::createThread(const EeThreadCreateParams &params)
     thread.currentPriority = params.priority;
     thread.status = EeThreadStatus::Dormant;
     m_threads.emplace(id, std::move(thread));
+    if (ps2x::calllog::g_on) [[unlikely]]
+    {
+        const uint32_t args[] = {static_cast<uint32_t>(id), params.entry, params.stack, params.stackSize,
+                                 static_cast<uint32_t>(params.priority), params.gp, params.attr, params.option};
+        ps2x::calllog::op(ps2x::calllog::kOpCreate, args, 8);
+    }
     publishSnapshot();
     return id;
 }
@@ -740,6 +845,11 @@ int EeScheduler::deleteThread(int id, uint32_t &ownedStack)
     if (it->second.ownsStack)
     {
         ownedStack = it->second.stack;
+    }
+    if (ps2x::calllog::g_on) [[unlikely]]
+    {
+        const uint32_t args[] = {static_cast<uint32_t>(id), 1u};
+        ps2x::calllog::op(ps2x::calllog::kOpTerminate, args, 2);
     }
     m_threads.erase(it);
     m_cycleThread = nullptr;
@@ -773,6 +883,11 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
                                   : getRegU32(&caller, 29);
     SET_GPR_U32(&target->context, 29, stackTop);
     SET_GPR_U32(&target->context, 31, 0u);
+    if (ps2x::calllog::g_on) [[unlikely]]
+    {
+        const uint32_t args[] = {static_cast<uint32_t>(id), arg};
+        ps2x::calllog::op(ps2x::calllog::kOpStart, args, 2);
+    }
     enqueueReady(*target);
     requestPreemptionIfHigher(*target, interruptSafe);
     publishSnapshot();
@@ -786,6 +901,11 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     assert(exiting != nullptr);
     const int id = exiting->id;
     const uint32_t ownedStack = deleteThreadRecord && exiting->ownsStack ? exiting->stack : 0u;
+    if (ps2x::calllog::g_on) [[unlikely]]
+    {
+        const uint32_t args[] = {static_cast<uint32_t>(id), deleteThreadRecord ? 1u : 0u};
+        ps2x::calllog::op(ps2x::calllog::kOpExit, args, 2);
+    }
     makeDormant(*exiting);
     m_currentThreadId = 0;
     if (deleteThreadRecord && id != kMainThreadId)
@@ -832,6 +952,11 @@ int EeScheduler::terminateThread(int id, uint32_t &ownedStack, bool interruptSaf
         ownedStack = target->stack;
         target->ownsStack = false;
     }
+    if (ps2x::calllog::g_on) [[unlikely]]
+    {
+        const uint32_t args[] = {static_cast<uint32_t>(id), 0u};
+        ps2x::calllog::op(ps2x::calllog::kOpTerminate, args, 2);
+    }
     makeDormant(*target);
     (void)interruptSafe;
     publishSnapshot();
@@ -841,6 +966,7 @@ int EeScheduler::terminateThread(int id, uint32_t &ownedStack, bool interruptSaf
 int EeScheduler::suspendThread(int id, bool interruptSafe)
 {
     assertExecutor();
+    logKernelOp(13u, {u(id)});
     if (id == 0)
     {
         id = m_currentThreadId;
@@ -887,6 +1013,7 @@ int EeScheduler::suspendThread(int id, bool interruptSafe)
 int EeScheduler::resumeThread(int id, bool interruptSafe)
 {
     assertExecutor();
+    logKernelOp(14u, {u(id)});
     if (id == 0)
     {
         return KE_ILLEGAL_THID;
@@ -935,6 +1062,7 @@ void EeScheduler::sleepCurrent()
 int EeScheduler::wakeupThread(int id, bool interruptSafe)
 {
     assertExecutor();
+    logKernelOp(15u, {u(id)});
     if (id == 0 || id == m_currentThreadId)
     {
         return KE_ILLEGAL_THID;
@@ -964,6 +1092,7 @@ int EeScheduler::wakeupThread(int id, bool interruptSafe)
 int EeScheduler::cancelWakeup(int id)
 {
     assertExecutor();
+    logKernelOp(16u, {u(id)});
     if (id == 0)
     {
         id = m_currentThreadId;
@@ -982,6 +1111,7 @@ int EeScheduler::cancelWakeup(int id)
 int EeScheduler::changePriority(int id, int priority, bool interruptSafe, int &oldPriority)
 {
     assertExecutor();
+    logKernelOp(11u, {u(id), u(priority)});
     if (priority < 0 || priority >= kPriorityCount)
     {
         return KE_ILLEGAL_PRIORITY;
@@ -1025,6 +1155,7 @@ int EeScheduler::changePriority(int id, int priority, bool interruptSafe, int &o
 int EeScheduler::rotateReadyQueue(int priority, bool interruptSafe)
 {
     assertExecutor();
+    logKernelOp(12u, {u(priority)});
     if (priority == 0)
     {
         const GuestThread *self = currentThread();
@@ -1060,6 +1191,7 @@ int EeScheduler::rotateReadyQueue(int priority, bool interruptSafe)
 int EeScheduler::releaseWait(int id, bool interruptSafe)
 {
     assertExecutor();
+    logKernelOp(17u, {u(id)});
     if (id == 0)
     {
         return KE_ILLEGAL_THID;
@@ -1081,6 +1213,7 @@ int EeScheduler::releaseWait(int id, bool interruptSafe)
 
 void EeScheduler::transferIfRequested(bool interruptSafe)
 {
+    logKernelOp(39u, {interruptSafe ? 1u : 0u});
     assertExecutor();
     if (interruptSafe || m_insideInterrupt || !m_rescheduleRequested)
     {
@@ -1102,6 +1235,7 @@ void EeScheduler::transferIfRequested(bool interruptSafe)
 int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uint32_t option)
 {
     assertExecutor();
+    logKernelOp(18u, {u(initCount), u(maxCount), attr, option});
     // The EE kernel stores max_count without validating it, and games rely on that:
     // Valkyrie Profile 2 creates its sound worker semaphore with max_count 0. No semaphore has an
     // upper bound (see signalSemaphore).
@@ -1129,6 +1263,7 @@ int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uin
 int EeScheduler::deleteSemaphore(int id, bool interruptSafe)
 {
     assertExecutor();
+    logKernelOp(19u, {u(id)});
     auto it = m_semaphores.find(id);
     if (it == m_semaphores.end())
     {
@@ -1150,6 +1285,7 @@ int EeScheduler::deleteSemaphore(int id, bool interruptSafe)
 int EeScheduler::signalSemaphore(int id, bool interruptSafe)
 {
     assertExecutor();
+    logKernelOp(20u, {u(id)});
     EeSemaphore *object = semaphore(id);
     if (!object)
     {
@@ -1188,6 +1324,7 @@ int EeScheduler::signalSemaphore(int id, bool interruptSafe)
 int EeScheduler::pollSemaphore(int id)
 {
     assertExecutor();
+    logKernelOp(21u, {u(id)});
     EeSemaphore *object = semaphore(id);
     if (!object)
     {
@@ -1205,6 +1342,7 @@ int EeScheduler::pollSemaphore(int id)
 void EeScheduler::waitSemaphore(int id)
 {
     assertExecutor();
+    logKernelOp(22u, {u(id)});
     EeSemaphore *object = semaphore(id);
     if (!object)
     {
@@ -1231,6 +1369,7 @@ void EeScheduler::waitSemaphore(int id)
 int EeScheduler::createEventFlag(uint32_t initialBits, uint32_t attr, uint32_t option)
 {
     assertExecutor();
+    logKernelOp(23u, {initialBits, attr, option});
     const int id = allocatePositiveId(m_nextEventFlagId, m_eventFlags);
     if (id == 0)
     {
@@ -1250,6 +1389,7 @@ int EeScheduler::createEventFlag(uint32_t initialBits, uint32_t attr, uint32_t o
 int EeScheduler::deleteEventFlag(int id, bool interruptSafe)
 {
     assertExecutor();
+    logKernelOp(24u, {u(id)});
     auto it = m_eventFlags.find(id);
     if (it == m_eventFlags.end())
     {
@@ -1271,6 +1411,7 @@ int EeScheduler::deleteEventFlag(int id, bool interruptSafe)
 int EeScheduler::setEventFlag(int id, uint32_t bits, bool interruptSafe)
 {
     assertExecutor();
+    logKernelOp(25u, {u(id), bits});
     EeEventFlag *flag = eventFlag(id);
     if (!flag)
     {
@@ -1285,6 +1426,7 @@ int EeScheduler::setEventFlag(int id, uint32_t bits, bool interruptSafe)
 int EeScheduler::clearEventFlag(int id, uint32_t mask)
 {
     assertExecutor();
+    logKernelOp(26u, {u(id), mask});
     EeEventFlag *flag = eventFlag(id);
     if (!flag)
     {
@@ -1298,6 +1440,7 @@ int EeScheduler::clearEventFlag(int id, uint32_t mask)
 int EeScheduler::pollEventFlag(int id, uint32_t bits, uint32_t mode, uint32_t &observedBits)
 {
     assertExecutor();
+    logKernelOp(27u, {u(id), bits, mode});
     EeEventFlag *flag = eventFlag(id);
     if (!flag)
     {
@@ -1323,6 +1466,7 @@ int EeScheduler::pollEventFlag(int id, uint32_t bits, uint32_t mode, uint32_t &o
 void EeScheduler::waitEventFlag(int id, uint32_t bits, uint32_t mode, uint32_t resultAddress)
 {
     assertExecutor();
+    logKernelOp(28u, {u(id), bits, mode, resultAddress});
     EeEventFlag *flag = eventFlag(id);
     GuestThread *self = currentThread();
     assert(self != nullptr);
@@ -1359,6 +1503,7 @@ int EeScheduler::setAlarm(uint16_t ticks,
                           uint32_t sp)
 {
     assertExecutor();
+    logKernelOp(29u, {ticks, handler, argument, gp, sp});
     if (handler == 0u || !m_runtime.hasFunction(handler))
     {
         return KE_ERROR;
@@ -1379,6 +1524,7 @@ int EeScheduler::setAlarm(uint16_t ticks,
 int EeScheduler::cancelAlarm(int id)
 {
     assertExecutor();
+    logKernelOp(30u, {u(id)});
     if (m_alarms.erase(id) == 0u)
     {
         return KE_ERROR;
@@ -1397,6 +1543,8 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
 {
     assertExecutor();
     invocation.sequence = ++m_invocationSequence;
+    if (ps2x::calllog::g_on) [[unlikely]]
+        ps2x::calllog::opQueue(static_cast<uint32_t>(invocation.kind), invocation);
     m_pendingInvocations.push_back(std::move(invocation));
     m_checkpointPending.store(true, std::memory_order_release);
 }
@@ -1412,6 +1560,9 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
     }
     invocation.sequence = ++m_invocationSequence;
     owner->invocations.push_back(std::move(invocation));
+    if (ps2x::calllog::g_on) [[unlikely]]
+        ps2x::calllog::invocationStarted(owner->id, static_cast<uint32_t>(owner->invocations.size()),
+                                         owner->invocations.back());
     publishSnapshot();
     throw EeDispatcherTransfer{};
 }
@@ -1430,6 +1581,9 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
         }
         it->sequence = ++m_invocationSequence;
         owner->invocations.push_back(std::move(*it));
+        if (ps2x::calllog::g_on) [[unlikely]]
+            ps2x::calllog::invocationStarted(owner->id, static_cast<uint32_t>(owner->invocations.size()),
+                                             owner->invocations.back());
     }
     publishSnapshot();
     throw EeDispatcherTransfer{};
@@ -1489,6 +1643,7 @@ int EeScheduler::addIrqHandler(bool dmac,
                                uint32_t sp)
 {
     assertExecutor();
+    logKernelOp(31u, {dmac ? 1u : 0u, cause, handler, append ? 1u : 0u, argument, gp, sp});
     auto &handlers = dmac ? m_dmacHandlers : m_intcHandlers;
     int &nextId = dmac ? m_nextDmacHandlerId : m_nextIntcHandlerId;
     const int id = allocatePositiveId(nextId, handlers);
@@ -1513,6 +1668,7 @@ int EeScheduler::addIrqHandler(bool dmac,
 int EeScheduler::removeIrqHandler(bool dmac, uint32_t cause, int id)
 {
     assertExecutor();
+    logKernelOp(32u, {dmac ? 1u : 0u, cause, u(id)});
     auto &handlers = dmac ? m_dmacHandlers : m_intcHandlers;
     auto it = handlers.find(id);
     if (it != handlers.end() && it->second.cause == cause)
@@ -1525,6 +1681,7 @@ int EeScheduler::removeIrqHandler(bool dmac, uint32_t cause, int id)
 int EeScheduler::setIrqHandlerEnabled(bool dmac, int id, bool enabled)
 {
     assertExecutor();
+    logKernelOp(33u, {dmac ? 1u : 0u, u(id), enabled ? 1u : 0u});
     auto &handlers = dmac ? m_dmacHandlers : m_intcHandlers;
     auto it = handlers.find(id);
     if (it != handlers.end())
@@ -1537,6 +1694,7 @@ int EeScheduler::setIrqHandlerEnabled(bool dmac, int id, bool enabled)
 int EeScheduler::setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled)
 {
     assertExecutor();
+    logKernelOp(34u, {dmac ? 1u : 0u, cause, enabled ? 1u : 0u});
     if (cause < 32u)
     {
         uint32_t &mask = dmac ? m_enabledDmacMask : m_enabledIntcMask;
@@ -1571,6 +1729,12 @@ int EeScheduler::setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled)
 void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
 {
     assertExecutor();
+    if (ps2x::calllog::g_on) [[unlikely]]
+    {
+        const uint32_t mask = dmac ? m_enabledDmacMask : m_enabledIntcMask;
+        const uint32_t args[] = {dmac ? 1u : 0u, cause, cause < 32u && (mask & (1u << cause)) != 0u ? 1u : 0u};
+        ps2x::calllog::op(ps2x::calllog::kOpIrq, args, 3);
+    }
     if (!dmac && cause < 32u)
     {
         m_runtime.memory().raiseIntcStat(1u << cause);
@@ -1615,6 +1779,7 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
 void EeScheduler::setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress)
 {
     assertExecutor();
+    logKernelOp(35u, {flagAddress, tickAddress});
     m_vsyncFlagAddress = flagAddress;
     m_vsyncTickAddress = tickAddress;
     writeGuestU32(flagAddress, 0u);
@@ -1637,6 +1802,7 @@ uint64_t EeScheduler::currentVSyncTick() const noexcept
 uint32_t EeScheduler::setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_t sp)
 {
     assertExecutor();
+    logKernelOp(36u, {callback, gp, sp});
     (void)sp;
     const uint32_t previous = m_gsVSyncCallback;
     m_gsVSyncCallback = callback;
@@ -2164,6 +2330,8 @@ void EeScheduler::blockCurrent(EeWaitState wait)
 {
     GuestThread *self = currentThread();
     assert(self != nullptr);
+    if (ps2x::calllog::g_on) [[unlikely]]
+        ps2x::calllog::opBlock(self->id, wait);
     self->wait = std::move(wait);
     self->status = self->suspendCount == 0 ? EeThreadStatus::Waiting : EeThreadStatus::WaitingSuspended;
     m_currentThreadId = 0;
@@ -2173,6 +2341,12 @@ void EeScheduler::blockCurrent(EeWaitState wait)
 
 void EeScheduler::makeReady(GuestThread &item, int result, bool interruptSafe)
 {
+    if (ps2x::calllog::g_on) [[unlikely]]
+    {
+        const uint32_t args[] = {static_cast<uint32_t>(item.id), static_cast<uint32_t>(result),
+                                 item.wait.completion ? 1u : 0u, static_cast<uint32_t>(item.wait.reason)};
+        ps2x::calllog::op(ps2x::calllog::kOpWake, args, 4);
+    }
     auto completion = std::move(item.wait.completion);
     item.wait = {};
     setReturnS32(&item.activeContext(), result);
@@ -2493,6 +2667,8 @@ void EeScheduler::processEvent(const EeEvent &event)
         if (target > m_iopEeCycles)
         {
             m_runtime.advanceIopEeCycles(target - m_iopEeCycles);
+            if (ps2x::calllog::g_on) [[unlikely]]
+                ps2x::calllog::iopEnd(2u);
             m_iopEeCycles = target;
         }
         if (ps2x::native::gsFrontEndAbsent())
@@ -2563,7 +2739,11 @@ void EeScheduler::processEvent(const EeEvent &event)
             task = std::move(m_tasks.front());
             m_tasks.pop_front();
         }
+        if (ps2x::calllog::g_on) [[unlikely]]
+            ps2x::calllog::taskBegin();
         task();
+        if (ps2x::calllog::g_on) [[unlikely]]
+            ps2x::calllog::taskEnd();
         break;
     }
     case EeEventType::Alarm:

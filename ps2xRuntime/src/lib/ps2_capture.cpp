@@ -7,6 +7,8 @@
 #include "runtime/ee_scheduler.h"
 #include "runtime/ps2_determinism.h"
 #include "runtime/ps2_reference.h"
+#include "runtime/ps2_calllog.h"
+#include "ps2_capture_common.h"
 
 #include <zlib.h>
 
@@ -31,43 +33,20 @@ extern const uint32_t g_ps2RecompiledFunctionTableSlotCount;
 namespace ps2x::capture
 {
     bool g_active = false;
-
-    namespace watch
-    {
-        uint8_t *allocate(size_t bytes);
-        void release(uint8_t *memory);
-        size_t collect(uint8_t *base, size_t bytes, uint32_t *pages, size_t maxPages);
-    }
 }
 
 namespace ps2x::capture
 {
     namespace
     {
+        using namespace common;
+
         // ---- The format's constants (capture.md) --------------------------------------------------------------------
         constexpr char kMagic[8] = {'P', 'S', '2', 'X', 'C', 'A', 'P', '1'};
         constexpr uint32_t kVersion = 1;
         constexpr uint32_t kHeaderBytes = 128;
-        constexpr uint32_t kCtxWords = 332;
-        constexpr uint32_t kCtxBytes = kCtxWords * 4u;
-        constexpr uint32_t kMaskWords = (kCtxWords + 31u) / 32u;
-        constexpr uint32_t kRamBytes = PS2_RAM_SIZE;
-        constexpr uint32_t kSprBytes = PS2_SCRATCHPAD_SIZE;
-        constexpr uint32_t kVu0Bytes = PS2_VU0_DATA_SIZE;
-        constexpr uint32_t kFlatSpr = kRamBytes;
-        constexpr uint32_t kFlatVu0 = kRamBytes + kSprBytes;
-        constexpr uint32_t kFlatBytes = kRamBytes + kSprBytes + kVu0Bytes;
-        constexpr uint32_t kPage = 4096u;
-        constexpr uint32_t kRamPages = kRamBytes / kPage;
-        constexpr uint32_t kPages = kFlatBytes / kPage;
         constexpr uint32_t kSampleHeaderBytes = 64;
-        constexpr uint32_t kOutHeaderBytes = 36;
 
-        constexpr uint32_t tag(const char (&s)[5])
-        {
-            return uint32_t(uint8_t(s[0])) | uint32_t(uint8_t(s[1])) << 8 | uint32_t(uint8_t(s[2])) << 16 |
-                   uint32_t(uint8_t(s[3])) << 24;
-        }
         constexpr uint32_t kTagSample = tag("SAMP");
         constexpr uint32_t kTagSkip = tag("SKIP");
         constexpr uint32_t kTagOverrides = tag("OVRD");
@@ -91,6 +70,7 @@ namespace ps2x::capture
             Off,
             Capture,
             Replay,
+            CallLog, // the call log (ps2_calllog.cpp) uses the hooks, the override list and the write tracking
         };
 
         struct Config
@@ -104,182 +84,6 @@ namespace ps2x::capture
             std::unordered_set<uint32_t> funcs;
             int checkLog = 20;
         };
-
-        // ---- Buffers --------------------------------------------------------------------------------------------------
-        struct Buf
-        {
-            std::vector<uint8_t> b;
-            void u8(uint8_t v) { b.push_back(v); }
-            void u16(uint16_t v) { put(&v, 2); }
-            void u32(uint32_t v) { put(&v, 4); }
-            void u64(uint64_t v) { put(&v, 8); }
-            void put(const void *p, size_t n)
-            {
-                const uint8_t *s = static_cast<const uint8_t *>(p);
-                b.insert(b.end(), s, s + n);
-            }
-            void pad4()
-            {
-                while (b.size() & 3u)
-                    b.push_back(0);
-            }
-            size_t size() const { return b.size(); }
-            void patch32(size_t at, uint32_t v) { std::memcpy(b.data() + at, &v, 4); }
-        };
-
-        // ---- The context record (capture.md, "Context") ---------------------------------------------------------------
-        uint32_t bitsOf(float f)
-        {
-            uint32_t u;
-            std::memcpy(&u, &f, 4);
-            return u;
-        }
-        float floatOf(uint32_t u)
-        {
-            float f;
-            std::memcpy(&f, &u, 4);
-            return f;
-        }
-
-        void toRecord(const R5900Context &c, uint32_t *w)
-        {
-            std::memset(w, 0, kCtxBytes);
-            for (int i = 0; i < 32; ++i)
-                std::memcpy(w + i * 4, &c.r[i], 16);
-            std::memcpy(w + 128, &c.hi, 8);
-            std::memcpy(w + 130, &c.lo, 8);
-            std::memcpy(w + 132, &c.hi1, 8);
-            std::memcpy(w + 134, &c.lo1, 8);
-            w[136] = c.pc;
-            w[137] = c.sa;
-            for (int i = 0; i < 32; ++i)
-                w[138 + i] = bitsOf(c.f[i]);
-            w[170] = c.fcr31;
-            w[171] = bitsOf(c.f_acc);
-            for (int i = 0; i < 32; ++i)
-                std::memcpy(w + 172 + i * 4, &c.vu0_vf[i], 16);
-            std::memcpy(w + 300, &c.vu0_acc, 16);
-            for (int i = 0; i < 16; ++i)
-                w[304 + i] = c.vi[i];
-            w[320] = bitsOf(c.vu0_q);
-            w[321] = bitsOf(c.vu0_i);
-            w[322] = bitsOf(c.vu0_p);
-            std::memcpy(w + 323, &c.vu0_r, 4);
-            w[324] = c.vu0_status;
-            w[325] = c.vu0_mac_flags;
-            w[326] = c.vu0_clip_flags;
-            w[327] = c.vu0_cmsar0;
-            w[328] = c.cop0_status;
-        }
-
-        void fromRecord(const uint32_t *w, R5900Context &c)
-        {
-            for (int i = 0; i < 32; ++i)
-                std::memcpy(&c.r[i], w + i * 4, 16);
-            std::memcpy(&c.hi, w + 128, 8);
-            std::memcpy(&c.lo, w + 130, 8);
-            std::memcpy(&c.hi1, w + 132, 8);
-            std::memcpy(&c.lo1, w + 134, 8);
-            c.pc = w[136];
-            c.sa = w[137];
-            for (int i = 0; i < 32; ++i)
-                c.f[i] = floatOf(w[138 + i]);
-            c.fcr31 = w[170];
-            c.f_acc = floatOf(w[171]);
-            for (int i = 0; i < 32; ++i)
-                std::memcpy(&c.vu0_vf[i], w + 172 + i * 4, 16);
-            std::memcpy(&c.vu0_acc, w + 300, 16);
-            for (int i = 0; i < 16; ++i)
-                c.vi[i] = static_cast<uint16_t>(w[304 + i]);
-            c.vu0_q = floatOf(w[320]);
-            c.vu0_i = floatOf(w[321]);
-            c.vu0_p = floatOf(w[322]);
-            std::memcpy(&c.vu0_r, w + 323, 4);
-            c.vu0_status = static_cast<uint16_t>(w[324]);
-            c.vu0_mac_flags = w[325];
-            c.vu0_clip_flags = w[326];
-            c.vu0_cmsar0 = w[327];
-            c.cop0_status = w[328];
-        }
-
-        std::string wordName(uint32_t i)
-        {
-            static const char *const gpr[32] = {"zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2",
-                                                "t3", "t4", "t5", "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5",
-                                                "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra"};
-            char text[48];
-            if (i < 128)
-                std::snprintf(text, sizeof(text), "%s.w%u", gpr[i / 4], i % 4);
-            else if (i < 136)
-            {
-                static const char *const n[4] = {"hi", "lo", "hi1", "lo1"};
-                std::snprintf(text, sizeof(text), "%s.w%u", n[(i - 128) / 2], (i - 128) % 2);
-            }
-            else if (i == 136)
-                return "pc";
-            else if (i == 137)
-                return "sa";
-            else if (i < 170)
-                std::snprintf(text, sizeof(text), "f%u", i - 138);
-            else if (i == 170)
-                return "fcr31";
-            else if (i == 171)
-                return "facc";
-            else if (i < 300)
-                std::snprintf(text, sizeof(text), "vf%u.%c", (i - 172) / 4, "xyzw"[(i - 172) % 4]);
-            else if (i < 304)
-                std::snprintf(text, sizeof(text), "acc.%c", "xyzw"[i - 300]);
-            else if (i < 320)
-                std::snprintf(text, sizeof(text), "vi%u", i - 304);
-            else
-            {
-                static const char *const n[12] = {"Q", "I", "P", "R", "vu0_status", "vu0_mac", "vu0_clip",
-                                                  "vu0_cmsar0", "cop0_status", "reserved", "reserved", "reserved"};
-                return n[i - 320];
-            }
-            return text;
-        }
-
-        // Runs of the bytes that differ between two pages (a run ends at 8 equal bytes), each as {address, length,
-        // bytes, padding to 4} at flat address base + offset.
-        uint32_t diffPage(const uint8_t *before, const uint8_t *after, uint32_t base, Buf &out)
-        {
-            if (std::memcmp(before, after, kPage) == 0)
-                return 0;
-            uint32_t runs = 0;
-            uint32_t i = 0;
-            while (i < kPage)
-            {
-                if (before[i] == after[i])
-                {
-                    ++i;
-                    continue;
-                }
-                const uint32_t start = i;
-                uint32_t end = i + 1;
-                uint32_t same = 0;
-                for (uint32_t j = i + 1; j < kPage; ++j)
-                {
-                    if (before[j] == after[j])
-                    {
-                        if (++same >= 8u)
-                            break;
-                    }
-                    else
-                    {
-                        same = 0;
-                        end = j + 1;
-                    }
-                }
-                out.u32(base + start);
-                out.u32(end - start);
-                out.put(after + start, end - start);
-                out.pad4();
-                ++runs;
-                i = end;
-            }
-            return runs;
-        }
 
         // ---- State ----------------------------------------------------------------------------------------------------
         struct OpenSample
@@ -703,23 +507,6 @@ namespace ps2x::capture
             const uint8_t *next;
         };
 
-        uint32_t rd32(const uint8_t *p)
-        {
-            uint32_t v;
-            std::memcpy(&v, p, 4);
-            return v;
-        }
-
-        const uint8_t *skipRuns(const uint8_t *p, uint32_t count)
-        {
-            for (uint32_t i = 0; i < count; ++i)
-            {
-                const uint32_t len = rd32(p + 4);
-                p += 8 + ((len + 3u) & ~3u);
-            }
-            return p;
-        }
-
         OutRecord parseOut(const uint8_t *p)
         {
             OutRecord r{};
@@ -857,6 +644,13 @@ namespace ps2x::capture
         s.configured = true;
         const char *check = std::getenv("PS2X_CAPTURE_CHECK");
         const char *capture = std::getenv("PS2X_CAPTURE");
+        if (ps2x::calllog::configure())
+        {
+            s.mode = Mode::CallLog;
+            s.overrideSlots.assign(g_ps2RecompiledFunctionTableSlotCount, 0);
+            g_active = true;
+            return true;
+        }
         if (check && *check)
         {
             readConfig(s, check);
@@ -957,8 +751,13 @@ namespace ps2x::capture
                 s.overrideList.push_back(address);
             if (s.overridesWritten)
                 writeOverrides(s);
+            if (s.mode == Mode::CallLog)
+                ps2x::calllog::overridesChanged();
         }
     }
+
+    const std::vector<uint32_t> &overrideAddresses() noexcept { return state().overrideList; }
+    uint8_t *watchedRam() noexcept { return state().watched; }
 
     bool isOverride(uint32_t address) noexcept
     {
@@ -1090,6 +889,8 @@ namespace ps2x::capture
     bool nativeEnter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, OutKind kind, uint32_t target,
                      uint32_t &token)
     {
+        if (ps2x::calllog::g_on)
+            return ps2x::calllog::callEnter(rdram, ctx, runtime, kind, target, token);
         (void)rdram;
         (void)runtime;
         State &s = state();
@@ -1137,6 +938,8 @@ namespace ps2x::capture
     bool ioEnter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, OutKind kind, uint32_t address,
                  uint32_t size, void *value, uint32_t &token)
     {
+        if (ps2x::calllog::g_on)
+            return ps2x::calllog::ioEnter(rdram, ctx, runtime, kind, address, size, value, token);
         State &s = state();
         if (s.mode == Mode::Replay)
         {
@@ -1175,6 +978,11 @@ namespace ps2x::capture
 
     void ioValue(uint32_t token, const void *value, uint32_t size) noexcept
     {
+        if (ps2x::calllog::g_on)
+        {
+            ps2x::calllog::ioValue(token, value, size);
+            return;
+        }
         State &s = state();
         OpenSample &o = s.open;
         if (!token || !o.active || o.id != token || !o.inOutcall)
@@ -1184,6 +992,11 @@ namespace ps2x::capture
 
     void nativeLeave(uint32_t token) noexcept
     {
+        if (ps2x::calllog::g_on)
+        {
+            ps2x::calllog::callLeave(token);
+            return;
+        }
         State &s = state();
         OpenSample &o = s.open;
         if (!o.active || o.id != token || !o.inOutcall)
@@ -1238,6 +1051,11 @@ namespace ps2x::capture
 
     void frameEnd() noexcept
     {
+        if (ps2x::calllog::g_on)
+        {
+            ps2x::calllog::frameEnd();
+            return;
+        }
         State &s = state();
         if (s.mode != Mode::Capture || !s.out)
             return;
@@ -1252,6 +1070,8 @@ namespace ps2x::capture
 
     void finish() noexcept
     {
+        if (ps2x::calllog::g_on)
+            ps2x::calllog::finish();
         State &s = state();
         if (s.mode != Mode::Capture || !s.out)
             return;

@@ -330,6 +330,9 @@ public:
     // handlers to start, a preemption): the capture's test that a call continued through the dispatcher saw nothing
     // else run.
     [[nodiscard]] bool captureWorkPending();
+    // The call log (ps2_calllog.h): whether a context is still a thread's or one of its handlers' (an out-call that left
+    // through the dispatcher may have taken it away).
+    [[nodiscard]] bool ownsContext(const R5900Context *context) const;
     void accountCycles(uint32_t cycles) noexcept;
     [[nodiscard]] bool isExecutingGuest() const noexcept;
 

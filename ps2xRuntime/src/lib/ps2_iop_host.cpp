@@ -1,3 +1,4 @@
+#include "runtime/ps2_calllog.h"
 #include "ps2_iop_host.h"
 
 #include "ps2_runtime.h"
@@ -154,6 +155,7 @@ bool PS2IopHostAdapter::readGuest(uint32_t address, void *destination, size_t si
 
 bool PS2IopHostAdapter::writeGuest(uint32_t address, const void *source, size_t size)
 {
+    ps2x::calllog::iopTouch(); // PS2X_CALL_LOG: the IOP may change EE state
     if (!source && size != 0)
     {
         return false;
@@ -174,6 +176,7 @@ bool PS2IopHostAdapter::writeGuest(uint32_t address, const void *source, size_t 
 
 bool PS2IopHostAdapter::zeroGuest(uint32_t address, size_t size)
 {
+    ps2x::calllog::iopTouch(); // PS2X_CALL_LOG: the IOP may change EE state
     uint8_t *destination = nullptr;
     if (!guestRange(address, size, destination))
     {
@@ -227,6 +230,7 @@ bool PS2IopHostAdapter::normalizeIopAddress(uint32_t address, uint32_t &normaliz
 
 uint32_t PS2IopHostAdapter::allocateIopHandle(ps2x::iop::IopHandleKind kind)
 {
+    ps2x::calllog::iopTouch(); // PS2X_CALL_LOG: the IOP may change EE state
     uint8_t *const rdram = m_activeRdram
                                ? m_activeRdram
                                : m_runtime.memory().getRDRAM();
@@ -241,11 +245,13 @@ uint32_t PS2IopHostAdapter::allocateIopHandle(ps2x::iop::IopHandleKind kind)
 
 uint32_t PS2IopHostAdapter::allocateGuest(uint32_t size, uint32_t alignment)
 {
+    ps2x::calllog::iopTouch(); // PS2X_CALL_LOG: the IOP may change EE state
     return m_runtime.guestMalloc(size, alignment);
 }
 
 void PS2IopHostAdapter::freeGuest(uint32_t address)
 {
+    ps2x::calllog::iopTouch(); // PS2X_CALL_LOG: the IOP may change EE state
     m_runtime.guestFree(address);
 }
 
@@ -254,6 +260,7 @@ void PS2IopHostAdapter::audioCommand(uint32_t sid,
                                      ps2x::iop::GuestBuffer send,
                                      ps2x::iop::GuestBuffer receive)
 {
+    ps2x::calllog::iopTouch(); // PS2X_CALL_LOG: the IOP may change EE state
     uint8_t *sendPointer = nullptr;
     uint8_t *receivePointer = nullptr;
     if (send.address && !guestRange(send.address, send.size, sendPointer))
@@ -631,6 +638,7 @@ void PS2IopHostAdapter::closeHostFile(uint64_t handle)
 
 int32_t PS2IopHostAdapter::memoryCard(const ps2x::iop::MemoryCardRequest &request)
 {
+    ps2x::calllog::iopTouch(); // PS2X_CALL_LOG: the IOP may change EE state
     using Handler = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
     Handler handler = nullptr;
     switch (request.operation)
@@ -731,6 +739,7 @@ bool PS2IopHostAdapter::sendSifCommand(uint32_t commandId,
                                        const void *packet,
                                        size_t packetSize)
 {
+    ps2x::calllog::iopTouch(); // PS2X_CALL_LOG: the IOP may change EE state
     uint8_t *const rdram = m_activeRdram
                                ? m_activeRdram
                                : m_runtime.memory().getRDRAM();
@@ -749,6 +758,7 @@ bool PS2IopHostAdapter::findEeRpcServer(uint32_t sid, EeRpcServer &server) const
 
 bool PS2IopHostAdapter::callEeRpc(EeRpcCall call)
 {
+    ps2x::calllog::iopTouch(); // PS2X_CALL_LOG: the IOP may change EE state
     PS2Runtime *const runtime = &m_runtime;
     uint8_t *const rdram = m_activeRdram ? m_activeRdram : m_runtime.memory().getRDRAM();
     const uint64_t token = call.token;
