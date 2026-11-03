@@ -3728,22 +3728,28 @@ void PS2Runtime::run()
             m_debugUiDrawCallback(*this, m_debugUiUserData);
         }
         // PS2X_CAPTURE_WINDOW_DIR=<folder>: the window as shown (whatever the GS renderer, native 3D included) as
-        // window_<tenths of seconds>.png every PS2X_CAPTURE_INTERVAL seconds (default 5).
+        // window_<tenths of seconds>.png every PS2X_CAPTURE_INTERVAL seconds (default 5); only from PS2X_CAPTURE_FROM
+        // to PS2X_CAPTURE_UNTIL seconds when set (a dense capture of one moment without slowing the whole run).
         static const char *s_windowCaptureDir = std::getenv("PS2X_CAPTURE_WINDOW_DIR");
         if (s_windowCaptureDir && *s_windowCaptureDir)
         {
-            static const double s_interval = []
+            const auto seconds = [](const char *name, double fallback)
             {
-                const char *value = std::getenv("PS2X_CAPTURE_INTERVAL");
-                const double parsed = value ? std::atof(value) : 0.0;
+                const char *value = std::getenv(name);
+                return value && *value ? std::atof(value) : fallback;
+            };
+            static const double s_interval = [&]
+            {
+                const double parsed = seconds("PS2X_CAPTURE_INTERVAL", 0.0);
                 return parsed > 0.0 ? parsed : 5.0;
             }();
+            static const double s_from = seconds("PS2X_CAPTURE_FROM", 0.0), s_until = seconds("PS2X_CAPTURE_UNTIL", 1e30);
             static const double s_start = GetTime();
-            static double s_next = s_interval;
+            static double s_next = std::max(s_interval, s_from);
             const double elapsed = GetTime() - s_start;
-            if (elapsed >= s_next)
+            if (elapsed >= s_next && elapsed <= s_until)
             {
-                s_next += s_interval;
+                s_next = std::max(s_next + s_interval, elapsed);
                 Image image = LoadImageFromScreen();
                 char path[1024];
                 std::snprintf(path, sizeof(path), "%s/window_%06d.png", s_windowCaptureDir, static_cast<int>(elapsed * 10.0));
