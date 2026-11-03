@@ -146,7 +146,8 @@ namespace ps2x::calllog
             size_t outAt = 0; // where the out-call part starts
             int thread = 0;
             size_t traceFrom = 0;               // the reference's traced calls of the frame before this call's
-            uint32_t ownTrace = 0;              // an override: its own traced entry, pushed after it opened (skipped)
+            uint32_t ownTrace = 0;              // an override's address or a syscall's id: its own traced entry, which
+                                                // the reference pushes after the call opened (skipped)
             std::vector<uint32_t> earlierPages; // pages written before a frame end inside it
         };
 
@@ -364,8 +365,10 @@ namespace ps2x::calllog
         {
             std::vector<ps2x::reference::TracedCall> traces;
             ps2x::reference::tracedCallsSince(from, traces);
-            // The override's own entry (the dispatcher records it as the call begins, after the call log opened it).
-            if (own != 0 && !traces.empty() && traces.front().pc == (own & (PS2_RAM_SIZE - 1u)))
+            // The call's own entry (the dispatcher records an override, the runtime a syscall, as the call begins,
+            // after the call log opened it).
+            if (own != 0 && !traces.empty() &&
+                ((own & 0x80000000u) ? traces.front().id == own : traces.front().pc == (own & (PS2_RAM_SIZE - 1u))))
                 traces.erase(traces.begin());
             own = 0;
             b.u32(static_cast<uint32_t>(traces.size()));
@@ -870,7 +873,8 @@ namespace ps2x::calllog
                               "replay: %" PRIu64 " calls answered from the log, %" PRIu64
                               " made by this runtime's kernel; %" PRIu64 " kernel operations of libraries, overrides "
                               "and continuations made again; %" PRIu64 " asynchronous records applied; %" PRIu64
-                              " handler contexts taken whole from the log; frame %" PRIu64
+                              " records whose contents only the log has (handlers' first contexts, library "
+                              "continuations' memory and contexts); frame %" PRIu64
                               "\n",
                               s.answered, s.native, s.reissued, s.appliedAsync, s.logSupplied,
                               static_cast<uint64_t>(ps2x::det::frame()));
@@ -1390,7 +1394,9 @@ namespace ps2x::calllog
             c.ctx = ctx;
             c.thread = s.scheduler->currentThreadId();
             c.traceFrom = ps2x::reference::tracedCallCount();
-            c.ownTrace = kind == capture::kOutOverride ? target : 0u;
+            c.ownTrace = kind == capture::kOutOverride ? target
+                         : kind == capture::kOutSyscall ? 0x80000000u | (getRegU32(ctx, 3) & 0x7FFFFFFFu)
+                                                        : 0u;
             c.earlierPages.clear();
             toRecord(*ctx, c.words);
             c.rec.b.clear();
