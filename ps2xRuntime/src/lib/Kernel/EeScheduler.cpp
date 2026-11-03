@@ -2,6 +2,7 @@
 #include "runtime/native/native_display.h"
 #include "runtime/ps2_determinism.h"
 #include "runtime/ps2_reference.h"
+#include "runtime/ps2_capture.h"
 
 #include "ps2_log.h"
 #include "ps2_runtime_macros.h"
@@ -229,6 +230,18 @@ EeScheduler::FieldRate EeScheduler::fieldRate() const noexcept
     return m_fieldRate;
 }
 
+bool EeScheduler::captureWorkPending()
+{
+    if (m_checkpointPending.load(std::memory_order_acquire) || m_pendingEeTimerInterrupts != 0u ||
+        !m_pendingInvocations.empty() || m_rescheduleRequested || m_heldUntilEi)
+        return true;
+    const uint64_t next = m_nextDeadlineCycle.load(std::memory_order_acquire);
+    if (next != 0u && m_eeCycle >= next)
+        return true;
+    std::lock_guard lock(m_eventMutex);
+    return !m_events.empty();
+}
+
 void EeScheduler::run()
 {
     assertExecutor();
@@ -236,6 +249,9 @@ void EeScheduler::run()
 
     while (!m_stopRequested.load(std::memory_order_acquire))
     {
+        // PS2X_CAPTURE: a sampled call continuing through the dispatcher (after a jump) must see nothing else run.
+        if (ps2x::capture::g_active) [[unlikely]]
+            ps2x::capture::schedulerPass(captureWorkPending());
         processPendingEvents();
         if (m_stopRequested.load(std::memory_order_acquire))
         {
@@ -292,6 +308,8 @@ void EeScheduler::run()
             }
         }
         R5900Context &context = running->activeContext();
+        if (ps2x::capture::g_active) [[unlikely]]
+            ps2x::capture::schedulerResume(&context, m_currentThreadId);
         if (m_debugPublishCountdown == 0u)
         {
             copyMainContextToRuntime();
@@ -352,6 +370,8 @@ void EeScheduler::run()
 
         if (!m_runtime.hasFunction(context.pc))
         {
+            if (ps2x::capture::g_active) [[unlikely]]
+                ps2x::capture::noteDispatcherOddity();
             if (m_runtime.isTrivialReturnStub(context.pc))
             {
                 context.pc = getRegU32(&context, 31); // an empty routine: return to the caller
@@ -378,6 +398,8 @@ void EeScheduler::run()
 
         if (checkpointDue(kGuestDispatchCycles))
         {
+            if (ps2x::capture::g_active) [[unlikely]]
+                (void)ps2x::capture::checkpoint(true);
             continue;
         }
 
@@ -386,6 +408,11 @@ void EeScheduler::run()
             m_transferToDispatcher = false;
             m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
             m_guestExecuting.store(true, std::memory_order_release);
+            // PS2X_CAPTURE: a port function reached by a jump inside a sampled call is one of its out-calls.
+            ps2x::capture::NativeScope captureScope;
+            if (ps2x::capture::g_active && ps2x::capture::isOverride(context.pc)) [[unlikely]]
+                (void)ps2x::capture::nativeEnter(m_rdram, &context, &m_runtime, ps2x::capture::kOutOverride, context.pc,
+                                                 captureScope.token);
             function(m_rdram, &context, &m_runtime);
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
@@ -403,6 +430,8 @@ void EeScheduler::run()
             throw;
         }
 
+        if (ps2x::capture::g_active) [[unlikely]]
+            ps2x::capture::schedulerPass(captureWorkPending());
         processPendingEvents();
         if (m_rescheduleRequested && m_currentThreadId != 0 && !threadSwitchDeferred())
         {
@@ -1869,6 +1898,7 @@ void EeScheduler::presentGuestFrame()
     latchGuestFrame();
     // The game frame that just ended: the reference record (PS2X_REFERENCE) of it, then the frame count moves on (the
     // pad scripts' clock in deterministic mode).
+    ps2x::capture::frameEnd();
     ps2x::reference::frameEnd(m_runtime);
     ps2x::det::frameCounter().fetch_add(1u, std::memory_order_relaxed);
 }

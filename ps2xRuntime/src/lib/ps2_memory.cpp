@@ -1,5 +1,6 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_address.h"
+#include "runtime/ps2_capture.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/native/native_vif1.h"
 #include "runtime/native/native_display.h"
@@ -431,7 +432,7 @@ PS2Memory::~PS2Memory()
     stopVif1Worker();
     if (m_rdram)
     {
-        delete[] m_rdram;
+        ps2x::capture::freeRam(m_rdram);
         m_rdram = nullptr;
     }
 
@@ -480,7 +481,7 @@ bool PS2Memory::initialize(size_t ramSize)
 {
     auto cleanup = [this]()
     {
-        delete[] m_rdram;
+        ps2x::capture::freeRam(m_rdram);
         delete[] m_scratchpad;
         delete[] iop_ram;
         delete[] m_gsVRAM;
@@ -525,7 +526,7 @@ bool PS2Memory::initialize(size_t ramSize)
     try
     {
         // Allocate main RAM
-        m_rdram = new uint8_t[ramSize];
+        m_rdram = ps2x::capture::allocateRam(ramSize); // PS2X_CAPTURE: write-tracked
         std::memset(m_rdram, 0, ramSize);
 
         // Allocate scratchpad
