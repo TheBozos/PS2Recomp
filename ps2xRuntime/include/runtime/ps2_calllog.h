@@ -15,11 +15,17 @@
 // capture_hooks (ps2_recomp_abi.h), like the per-function capture.
 //
 // PS2X_CALL_LOG=<file>: record. PS2X_CALL_LOG_STRICT=1: no lazy windows (the dispatcher's memory is compared after every
-//   guest run, the IOP's after every IOP slice); its log must equal the lazy one (the self-check of the windows).
+//   guest run, outside its phases too); its log must equal the lazy one (the self-check of the windows).
 // PS2X_CALL_LOG_CHECK=<file>: the self-check against a recorded log: the run made again, every record it produces
 //   compared with the log's, and every out-call's and asynchronous window's effects on guest memory and context
 //   replaced by the log's (the bytes and words the run itself wrote are thrown away first). The run's reference record
 //   (PS2X_REFERENCE) must still equal the one recorded without it. Report in <file>.check.txt.
+// PS2X_CALL_LOG_REPLAY=<file>: the full replay: the game runs with every call that is not the EE kernel's (libraries,
+//   port overrides, VU0 microprograms, hardware registers) answered from the log instead of made, the IOP stopped,
+//   and what the libraries and the IOP did outside calls (their writes, their continuations' operations on the
+//   kernel) done again at their logged points; only the guest code, this runtime's EE kernel (threads, semaphores,
+//   event flags, alarms, interrupt handlers, the syscalls) and its scheduler run. Every record the run produces is
+//   compared with the log's. Report in <file>.replay.txt.
 
 #include <cstddef>
 #include <cstdint>
@@ -39,7 +45,8 @@ namespace ps2x::reference
 
 namespace ps2x::calllog
 {
-    extern bool g_on; // recording or checking
+    extern bool g_on;     // recording, checking or replaying
+    extern bool g_replay; // replaying (PS2X_CALL_LOG_REPLAY)
 
     // Reads the environment once; true when the call log is on (deterministic mode).
     bool configure() noexcept;
@@ -91,7 +98,23 @@ namespace ps2x::calllog
         // 36 GS vsync callback (callback, gp, sp), 37 field rate (numerator, denominator), 38 thread setup (stack,
         // size, gp), 39 transfer if requested (interrupt safe).
     };
-    void op(uint32_t kind, const uint32_t *args, uint32_t count, uint64_t wide = 0) noexcept;
+    // Records an operation (true when it did: the caller must then call opEnd when the operation is over, so the ones it
+    // makes itself are recorded one level deeper).
+    bool op(uint32_t kind, const uint32_t *args, uint32_t count, uint64_t wide = 0) noexcept;
+    void opEnd() noexcept;
+    struct OpGuard
+    {
+        bool active = false;
+        OpGuard() = default;
+        OpGuard(OpGuard &&other) noexcept : active(other.active) { other.active = false; }
+        OpGuard(const OpGuard &) = delete;
+        OpGuard &operator=(const OpGuard &) = delete;
+        ~OpGuard()
+        {
+            if (active)
+                opEnd();
+        }
+    };
     void opQueue(uint32_t kind, const GuestInvocation &invocation) noexcept;
     void opBlock(int thread, const EeWaitState &wait) noexcept;
     // A task posted by the dispatcher runs (processEvent Task): the operations it makes are its own origin.
@@ -106,6 +129,9 @@ namespace ps2x::calllog
 
     void frameEnd() noexcept;
     void finish() noexcept;
+
+    // The replay's stand-in for a port override (the function table's entry while replaying).
+    void replayOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 }
 
 #endif // PS2_RUNTIME_CALLLOG_H

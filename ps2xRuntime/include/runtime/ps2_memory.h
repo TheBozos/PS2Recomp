@@ -198,6 +198,8 @@ public:
     // loop polling a timer faster than it ticks finishes in game time, not in host time.
     uint64_t takeTimerSpinCycles() noexcept { return m_timerSpinCycles.exchange(0u, std::memory_order_acq_rel); }
     uint64_t pendingTimerSpinCycles() const noexcept { return m_timerSpinCycles.load(std::memory_order_acquire); }
+    // The call log's replay: the timer polls' cycles a call answered from the log left pending.
+    void setTimerSpinCycles(uint64_t cycles) noexcept { m_timerSpinCycles.store(cycles, std::memory_order_release); }
     [[nodiscard]] uint64_t cyclesUntilNextEeTimerInterrupt() const noexcept;
     // Timer registers as last updated (no flush, no side effects): for diagnostics from any thread.
     struct EeTimerState

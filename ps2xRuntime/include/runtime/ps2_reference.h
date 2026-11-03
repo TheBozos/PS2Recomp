@@ -20,6 +20,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 class PS2Runtime;
 struct R5900Context;
@@ -58,6 +59,17 @@ namespace ps2x::reference
 
     // A build name for the header (default: the runtime's compile date); the port's version, say.
     void setBuild(const char *build);
+
+    // The call log (ps2_calllog.h): the frame's traced calls (the record's calls field) made inside an out-call, and,
+    // replaying, the same put back. flags: the record's flags (1 blocked, 2 open when the frame ended), bit 31 set once
+    // the call returned or blocked.
+    struct TracedCall
+    {
+        uint32_t id, pc, a[4], v0, flags;
+    };
+    size_t tracedCallCount() noexcept;
+    void tracedCallsSince(size_t from, std::vector<TracedCall> &out);
+    void injectTracedCalls(const TracedCall *calls, size_t count);
 }
 
 #endif // PS2_RUNTIME_REFERENCE_H
