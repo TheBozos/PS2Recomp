@@ -26,6 +26,8 @@ namespace ps2_stubs
     using MpegPictureHook = void (*)(uint32_t mpegAddr, uint32_t picture);
     void setMpegAudioSink(MpegAudioSink sink);
     void setMpegPictureHook(MpegPictureHook hook);
+    // True once a movie has shown its last picture (its stream ended and nothing is left to show).
+    bool mpegStreamEnded(uint32_t mpegAddr);
     // The game fed all of a movie's data: decode what is buffered, then let sceMpegIsEnd report the
     // end once the queued pictures are drained. libmpeg players end a stream by appending a
     // sequence_end_code to the IPU ring (the ezmpeg sample's videoDecFlush) and may never read

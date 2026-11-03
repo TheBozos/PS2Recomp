@@ -2035,6 +2035,14 @@ namespace ps2_stubs
         g_mpegPictureHook.store(hook, std::memory_order_release);
     }
 
+    bool mpegStreamEnded(uint32_t mpegAddr)
+    {
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        const auto playback = g_mpeg_stub_state.playbackByMpeg.find(mpegAddr);
+        return playback != g_mpeg_stub_state.playbackByMpeg.end() && playback->second.streamEnded &&
+               playback->second.decodedFrames.empty();
+    }
+
     void setMpegMaxPicturesAhead(size_t pictures)
     {
         g_maxDecodedPicturesAhead.store(std::max<size_t>(pictures, 1u), std::memory_order_relaxed);
@@ -2717,6 +2725,10 @@ namespace ps2_stubs
                 width = playback.width;
                 height = playback.height;
                 frameCount = playback.picturesServed;
+                // Past the end libmpeg's IPU input stays dry and it keeps calling sceMpegCbNodata. Valkyrie
+                // Profile 2 ends a movie that way: its callback counts the calls with no data left to give, and the
+                // movie closes after 11 (with the callback never called, the screen stayed black after the opening).
+                (void)requestNodataCallback(rdram, ctx, runtime, mpegAddr, playback);
             }
         }
 
