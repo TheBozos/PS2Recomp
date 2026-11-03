@@ -1737,7 +1737,9 @@ int EeScheduler::setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled)
                 pending &= ~(1u << cause);
                 constexpr uint32_t kDStat = 0x1000E010u;
                 const bool statusStillSet =
-                    !dmac || cause >= 10u || (m_runtime.memory().readIORegister(kDStat) & (1u << cause)) != 0u;
+                    ps2x::calllog::g_replay
+                        ? (!dmac || cause >= 10u || ps2x::calllog::replayUnmaskRaises(cause))
+                        : (!dmac || cause >= 10u || (m_runtime.memory().readIORegister(kDStat) & (1u << cause)) != 0u);
                 if (statusStillSet)
                 {
                     dispatchIrq(dmac, cause);
