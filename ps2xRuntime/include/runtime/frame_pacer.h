@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <thread>
 
 // Native frame pacing: a game that opts in runs its own loop on real time instead of on the PS2's vblanks. Its frame
@@ -27,6 +28,16 @@ public:
     [[nodiscard]] uint32_t cap() const noexcept { return m_cap.load(std::memory_order_relaxed); }
     [[nodiscard]] uint64_t frames() const noexcept { return m_frames.load(std::memory_order_relaxed); }
     [[nodiscard]] double lastStepSeconds() const noexcept { return m_lastStep.load(std::memory_order_relaxed); }
+
+    // When the cap lets the next frame start (none when uncapped or before the first frame): a caller can let other
+    // work run until then, and frameEnd then barely waits.
+    [[nodiscard]] std::optional<std::chrono::steady_clock::time_point> due() const
+    {
+        const uint32_t cap = m_cap.load(std::memory_order_relaxed);
+        if (cap == 0u || m_frames.load(std::memory_order_relaxed) == 0u)
+            return std::nullopt;
+        return m_previous + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(1.0 / cap));
+    }
 
     // Waits until the cap allows the next frame to start, then returns the time since the previous frame end.
     double frameEnd()

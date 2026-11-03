@@ -453,6 +453,10 @@ public:
     void completeVSync(uint64_t tick);
     void completeExternalWait(uint32_t type, uint64_t token, int result);
     [[noreturn]] void waitExternal(EeWaitReason reason, uint32_t type, uint64_t token, std::function<void(R5900Context &)> completion = {});
+    // Blocks the running thread until the host time hostDeadline (or the EE clock's equivalent), the other ready
+    // threads running meanwhile as they would while a PS2 thread waits for its vblank, then runs completion on its
+    // context. For a host-paced frame end that must not hold the EE while it waits.
+    [[noreturn]] void waitUntil(std::chrono::steady_clock::time_point hostDeadline, std::function<void(R5900Context &)> completion = {});
 
     [[nodiscard]] GuestThread *thread(int id);
     [[nodiscard]] const GuestThread *thread(int id) const;
@@ -612,6 +616,7 @@ private:
     std::vector<ScheduledEvent> m_deadlines;
     std::deque<GuestInvocation> m_pendingInvocations;
     uint64_t m_eventSequence = 0;
+    uint64_t m_hostWaitToken = 0;
     uint64_t m_invocationSequence = 0;
     uint64_t m_vsyncTick = 0;
     uint32_t m_vsyncFlagAddress = 0;

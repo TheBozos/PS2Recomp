@@ -1660,6 +1660,18 @@ void EeScheduler::completeExternalWait(uint32_t type, uint64_t token, int result
     blockCurrent(std::move(wait));
 }
 
+[[noreturn]] void EeScheduler::waitUntil(std::chrono::steady_clock::time_point hostDeadline,
+                                         std::function<void(R5900Context &)> completion)
+{
+    constexpr uint32_t kHostWaitType = 0x484F5354u; // waitExternal type: a thread in waitUntil
+    const auto now = std::chrono::steady_clock::now();
+    const double seconds = hostDeadline > now ? std::chrono::duration<double>(hostDeadline - now).count() : 0.0;
+    const uint64_t cycles = std::max<uint64_t>(1u, static_cast<uint64_t>(seconds * static_cast<double>(kEeClockHz)));
+    const uint64_t token = ++m_hostWaitToken;
+    scheduleEvent(m_eeCycle + cycles, hostDeadline, EeEvent{EeEventType::ExternalWake, kHostWaitType, token});
+    waitExternal(EeWaitReason::External, kHostWaitType, token, std::move(completion));
+}
+
 GuestThread *EeScheduler::thread(int id)
 {
     auto it = m_threads.find(id);
@@ -2574,9 +2586,30 @@ void EeScheduler::waitForEvent()
 
     std::string blocked = m_idleObserver ? describeBlockedThreads() : std::string();
     const auto waitStart = std::chrono::steady_clock::now();
-    const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
+    // The IOP's clock follows the EE cycles accounted: crediting a long wait only at its end stalled the IOP for the
+    // whole wait, and each exchange between the two (a sound driver's bank sent in 4 KiB pieces, one per IOP reply)
+    // took a whole frame. The wait is credited as it goes, a millisecond at a time.
+    constexpr auto kIdleCreditSlice = std::chrono::milliseconds(1);
+    const auto sliceEnd = std::min(hostDeadline, waitStart + kIdleCreditSlice);
+    const bool signaled = m_eventCv.wait_until(lock, sliceEnd, [this]()
                                                { return !m_events.empty() ||
                                                         m_stopRequested.load(std::memory_order_acquire); });
+    if (signaled || std::chrono::steady_clock::now() < hostDeadline)
+    {
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - waitStart).count();
+        const uint64_t waited = static_cast<uint64_t>(seconds * static_cast<double>(kEeClockHz));
+        const uint64_t room = deadlineCycle > m_eeCycle + 1u ? deadlineCycle - m_eeCycle - 1u : 0u;
+        const uint64_t credit = std::min<uint64_t>({waited, room, std::numeric_limits<uint32_t>::max()});
+        lock.unlock();
+        noteIdleWait(waitStart);
+        if (credit != 0u)
+        {
+            m_idleCycles += credit;
+            accountCycles(static_cast<uint32_t>(credit));
+            m_checkpointPending.store(true, std::memory_order_release);
+        }
+        return;
+    }
     noteIdleWait(waitStart);
     if (m_idleObserver)
         reportIdle(waitStart,
