@@ -408,6 +408,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_reference.cpp
     src/lib/ps2_capture.cpp
     src/lib/ps2_capture_watch.cpp
+    src/lib/ps2_calllog.cpp
     src/lib/ps2_input_bindings.cpp
     src/lib/ps2_rom_device.cpp
     src/lib/ps2_vfs.cpp
@@ -436,7 +437,7 @@ foreach(_ps2x_app_var PS2X_APP_TITLE PS2X_APP_FOLDER PS2X_APP_XDG_FOLDER PS2X_AP
 endforeach()
 # The per-function capture (PS2X_CAPTURE, include/runtime/ps2_capture.h): its own names, and <windows.h> for the write
 # tracking; zlib compresses its file.
-set_source_files_properties(src/lib/ps2_capture.cpp src/lib/ps2_capture_watch.cpp PROPERTIES
+set_source_files_properties(src/lib/ps2_capture.cpp src/lib/ps2_capture_watch.cpp src/lib/ps2_calllog.cpp PROPERTIES
     SKIP_UNITY_BUILD_INCLUSION ON SKIP_PRECOMPILE_HEADERS ON)
 set(ZLIB_USE_STATIC_LIBS ON) # no zlib1.dll next to the runner
 find_package(ZLIB REQUIRED)

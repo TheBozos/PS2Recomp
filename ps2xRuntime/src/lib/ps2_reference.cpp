@@ -2,6 +2,7 @@
 
 #include "runtime/ps2_reference.h"
 #include "runtime/ps2_capture.h"
+#include "runtime/ps2_calllog.h"
 #include "runtime/ps2_determinism.h"
 #include "runtime/ee_scheduler.h"
 
@@ -386,6 +387,7 @@ namespace ps2x::reference
 
     void setCallNames(const CallName *names, size_t count)
     {
+        ps2x::calllog::setCallNames(names, count); // PS2X_CALL_LOG: the names in its file
         State &s = state();
         if (!active())
             return;
