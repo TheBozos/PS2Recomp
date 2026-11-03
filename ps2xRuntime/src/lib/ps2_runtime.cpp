@@ -5,6 +5,7 @@
 #include "runtime/ps2_store_patch.h"
 #include "runtime/ps2_determinism.h"
 #include "runtime/ps2_reference.h"
+#include "runtime/ps2_capture.h"
 
 #include "raylib.h"
 #include "rlgl.h"
@@ -2108,6 +2109,8 @@ bool PS2Runtime::replaceFunction(uint32_t address, RecompiledFunction func)
         return false;
     }
 
+    if (ps2x::capture::configure()) [[unlikely]]
+        ps2x::capture::noteFunctionReplaced(address, reinterpret_cast<void *>(*entry), reinterpret_cast<void *>(func));
     *entry = func;
     return true;
 }
@@ -2417,7 +2420,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     // Every inter-function transfer is also a deterministic EE safe point.
     // Backward edges inside generated functions use eeCheckpointDue(), while
     // this charge bounds straight-line call chains that have no local loop.
-    if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
+    if (m_eeScheduler && ps2rCheckpointDue(this, EeScheduler::kGuestDispatchCycles))
     {
         return false;
     }
@@ -2472,11 +2475,25 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     RecompiledFunction targetFn = lookupFunction(targetPc);
     const uint32_t entryPc = ctx->pc;
     const uint64_t jumpSerial = g_guestJumpSerial;
+    // PS2X_CAPTURE: a port function bound to the address is a call out of guest code (recorded, or answered from the
+    // capture in the self-check).
+    ps2x::capture::NativeScope captureScope;
+    if (ps2x::capture::g_active && ps2x::capture::isOverride(targetPc) &&
+        ps2x::capture::nativeEnter(rdram, ctx, this, ps2x::capture::kOutOverride, targetPc, captureScope.token))
+        [[unlikely]]
+    {
+        // Answered from the capture (the self-check): its effects applied, the call not made.
+    }
     // PS2X_REFERENCE: the port's library and kernel stubs recorded with their arguments and result.
-    if (ps2x::reference::g_tracingCalls && ps2x::reference::tracesAddress(targetPc)) [[unlikely]]
+    else if (ps2x::reference::g_tracingCalls && ps2x::reference::tracesAddress(targetPc)) [[unlikely]]
         ps2x::reference::tracedCall(targetPc, targetFn, rdram, ctx, this);
     else
         targetFn(rdram, ctx, this);
+    if (captureScope.token) [[unlikely]]
+    {
+        ps2x::capture::nativeLeave(captureScope.token);
+        captureScope.token = 0;
+    }
 
     // The callee is unwinding to the dispatcher with ctx->pc = where to resume. That pc can be
     // this call's own target (recursion: A calls B, B calls A, a checkpoint fires at the inner
@@ -3724,6 +3741,13 @@ bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 
 bool ps2rCheckpointDue(PS2Runtime *runtime, uint32_t cycles) noexcept
 {
+    // PS2X_CAPTURE: a checkpoint that fires inside a sample makes it unreplayable; none fires in the self-check.
+    if (ps2x::capture::g_active) [[unlikely]]
+    {
+        if (ps2x::capture::replaying())
+            return ps2x::capture::replayCheckpoint(runtime);
+        return ps2x::capture::checkpoint(runtime->m_eeScheduler->checkpointDue(cycles));
+    }
     return runtime->m_eeScheduler->checkpointDue(cycles);
 }
 
@@ -3854,6 +3878,13 @@ void PS2Runtime::HandleIntegerOverflow(R5900Context *ctx)
 
 void PS2Runtime::run()
 {
+    // PS2X_CAPTURE_CHECK=<folder>: the capture's self-check instead of the game.
+    if (ps2x::capture::selfCheckRequested())
+    {
+        const int status = ps2x::capture::runSelfCheck(*this);
+        std::fflush(nullptr);
+        std::_Exit(status);
+    }
     m_stopRequested.store(false, std::memory_order_relaxed);
     ps2_stubs::resetSifState();
     resetIop();

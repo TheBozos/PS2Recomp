@@ -1,6 +1,7 @@
 // The reference recorder (runtime/ps2_reference.h).
 
 #include "runtime/ps2_reference.h"
+#include "runtime/ps2_capture.h"
 #include "runtime/ps2_determinism.h"
 #include "runtime/ee_scheduler.h"
 
@@ -555,6 +556,7 @@ namespace ps2x::reference
                 std::fclose(s.callsOut);
             std::fprintf(stderr, "[ref] %llu frames recorded to %s: done\n", static_cast<unsigned long long>(s.records),
                          s.path.c_str());
+            ps2x::capture::finish(); // PS2X_CAPTURE: its file completed first
             std::fflush(nullptr);
             std::_Exit(0);
         }

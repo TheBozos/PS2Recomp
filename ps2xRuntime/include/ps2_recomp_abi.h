@@ -298,4 +298,71 @@ void ps2rWriteCop0Perf(PS2Runtime *runtime, uint32_t select, uint32_t value);
 void ps2rKickGifDmaChainFromMMIO(PS2Runtime *runtime, uint8_t *rdram, R5900Context *ctx, uint32_t dPcrValue,
                                  uint32_t dStatValue, uint32_t tadr, uint32_t chcr);
 
+// The per-function capture (PS2X_CAPTURE, runtime/ps2_capture.h): code generated with capture_hooks opens every
+// function with PS2X_CAPTURE_GUEST(<start>) and every stub with PS2X_CAPTURE_NATIVE(<start>). Off (g_active false),
+// each costs one test of a global.
+namespace ps2x::capture
+{
+    extern bool g_active; // capturing (PS2X_CAPTURE) or replaying (PS2X_CAPTURE_CHECK)
+
+    // What a call out of guest code is (the out-call kinds of the capture format).
+    enum OutKind : uint8_t
+    {
+        kOutStub = 1,      // a stub of the generated code (a library or kernel function bound to the runtime)
+        kOutOverride = 2,  // a port function bound to a guest address in the function table
+        kOutSyscall = 3,   // a SYSCALL instruction
+        kOutVu0 = 4,       // a VU0 microprogram (VCALLMS / VCALLMSR)
+        kOutIoLoad = 5,    // a load from an address that is not memory (hardware registers, VU1, BIOS...)
+        kOutIoStore = 6,   // a store to one
+        kOutException = 7, // BREAK, a trap, an exception or a TLB instruction (the sample is not replayable)
+    };
+
+    // A function's start (ctx->pc == start: a call, otherwise a resume): returns a nonzero token when it opens a
+    // sample, which guestLeave closes.
+    uint32_t guestEnter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t start) noexcept;
+    void guestLeave(uint32_t token) noexcept;
+    // An out-call: true when it was answered from the capture (the self-check's replay), so the caller skips the
+    // native code; otherwise token is set when the call is recorded (nativeLeave records its effects).
+    bool nativeEnter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, OutKind kind, uint32_t target,
+                     uint32_t &token);
+    void nativeLeave(uint32_t token) noexcept;
+
+    struct GuestScope
+    {
+        uint32_t token = 0;
+        PS2_ALWAYS_INLINE GuestScope(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t start) noexcept
+        {
+            if (g_active) [[unlikely]]
+                token = guestEnter(rdram, ctx, runtime, start);
+        }
+        PS2_ALWAYS_INLINE ~GuestScope()
+        {
+            if (token) [[unlikely]]
+                guestLeave(token);
+        }
+        GuestScope(const GuestScope &) = delete;
+        GuestScope &operator=(const GuestScope &) = delete;
+    };
+
+    struct NativeScope
+    {
+        uint32_t token = 0;
+        NativeScope() = default;
+        PS2_ALWAYS_INLINE ~NativeScope()
+        {
+            if (token) [[unlikely]]
+                nativeLeave(token);
+        }
+        NativeScope(const NativeScope &) = delete;
+        NativeScope &operator=(const NativeScope &) = delete;
+    };
+}
+
+#define PS2X_CAPTURE_GUEST(start) ::ps2x::capture::GuestScope ps2xCaptureGuest_(rdram, ctx, runtime, (start))
+#define PS2X_CAPTURE_NATIVE(start)                                                                                  \
+    ::ps2x::capture::NativeScope ps2xCaptureNative_;                                                                \
+    if (::ps2x::capture::g_active &&                                                                                \
+        ::ps2x::capture::nativeEnter(rdram, ctx, runtime, ::ps2x::capture::kOutStub, (start), ps2xCaptureNative_.token)) \
+    return
+
 #endif // PS2_RECOMP_ABI_H

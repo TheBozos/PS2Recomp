@@ -324,6 +324,12 @@ public:
     // read ctx->pc as the result of their call (see dispatchGuestBranch).
     void noteTransferToDispatcher() noexcept { m_transferToDispatcher = true; }
     [[nodiscard]] bool transferToDispatcherPending() const noexcept { return m_transferToDispatcher; }
+    // The capture's self-check (ps2_capture.h), which calls generated functions outside run().
+    void clearTransferToDispatcher() noexcept { m_transferToDispatcher = false; }
+    // Whether the dispatcher has anything to do besides running guest code (events, due deadlines, timer interrupts,
+    // handlers to start, a preemption): the capture's test that a call continued through the dispatcher saw nothing
+    // else run.
+    [[nodiscard]] bool captureWorkPending();
     void accountCycles(uint32_t cycles) noexcept;
     [[nodiscard]] bool isExecutingGuest() const noexcept;
 
