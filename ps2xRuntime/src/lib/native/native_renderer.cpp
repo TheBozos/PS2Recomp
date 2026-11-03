@@ -143,8 +143,8 @@ void main()
 )";
 
         // postEffect's depth-weighted mix (PostEffect::depthWeights): the frame (texture0), the blurred copy, the
-        // frame's depth and the weight table (R, 128 = 1); uDepthFrom > 0: the weight is uAlpha where the depth is at
-        // least uDepthFrom, else none. Both are premultiplied (colour and coverage): mixed as a whole.
+        // frame's depth and the weight table (R, 128 = 1, uTable 1) or uAlpha (uTable 0); uDepthFrom > 0: only where the
+        // depth is at least uDepthFrom. Both are premultiplied (colour and coverage): mixed as a whole.
         const char *kMixShader = R"(#version 330
 in vec2 fragTexCoord;
 in vec4 fragColor;
@@ -155,6 +155,7 @@ uniform sampler2D uWeights;
 uniform float uDivisor;
 uniform float uAlpha;
 uniform float uDepthFrom;
+uniform float uTable;
 out vec4 finalColor;
 void main()
 {
@@ -162,8 +163,10 @@ void main()
     float z = (1.0 - texture(uDepth, fragTexCoord).r) * 16777215.0;
     float i = min(255.0, floor(z / uDivisor));
     float w = clamp(texture(uWeights, vec2((i + 0.5) / 256.0, 0.5)).r * 255.0 / 128.0, 0.0, 1.0) * uAlpha;
-    if (uDepthFrom > 0.0)
-        w = texture(uDepth, fragTexCoord).r >= uDepthFrom ? uAlpha : 0.0;
+    if (uTable < 0.5)
+        w = uAlpha;
+    if (uDepthFrom > 0.0 && texture(uDepth, fragTexCoord).r < uDepthFrom)
+        w = 0.0;
     vec4 blurred = texture(uBlurred, fragTexCoord);
     finalColor = mix(frame, blurred, w);
 }
@@ -225,7 +228,7 @@ void main()
         uint64_t movieGeneration = 0;
         // The depth-weighted mix: its shader and weight table (scatterOut is its result too).
         Shader mix{};
-        int locMixBlurred = -1, locMixDepth = -1, locMixWeights = -1, locMixDivisor = -1, locMixAlpha = -1, locMixDepthFrom = -1;
+        int locMixBlurred = -1, locMixDepth = -1, locMixWeights = -1, locMixDivisor = -1, locMixAlpha = -1, locMixDepthFrom = -1, locMixTable = -1;
         unsigned int weightTexture = 0;
 
         // The frame's target: colour and a depth texture (a pass can read the depth).
@@ -481,6 +484,7 @@ void main()
                 locMixDivisor = GetShaderLocation(mix, "uDivisor");
                 locMixAlpha = GetShaderLocation(mix, "uAlpha");
                 locMixDepthFrom = GetShaderLocation(mix, "uDepthFrom");
+                locMixTable = GetShaderLocation(mix, "uTable");
             }
             unsigned char table[256 * 4];
             for (int i = 0; i < 256; ++i)
@@ -509,8 +513,10 @@ void main()
             const float alpha = std::clamp(e.alpha, 0.0f, 1.0f);
             SetShaderValue(mix, locMixDivisor, &divisor, SHADER_UNIFORM_FLOAT);
             SetShaderValue(mix, locMixAlpha, &alpha, SHADER_UNIFORM_FLOAT);
-            const float depthFrom = e.depthWeights ? 0.0f : std::clamp(e.depthFrom - 0.00001f, 0.0f, 1.0f);
+            const float depthFrom = e.depthWeights && !e.depthLimit ? 0.0f : std::clamp(e.depthFrom - 0.00001f, 0.0f, 1.0f);
+            const float useTable = e.depthWeights ? 1.0f : 0.0f;
             SetShaderValue(mix, locMixDepthFrom, &depthFrom, SHADER_UNIFORM_FLOAT);
+            SetShaderValue(mix, locMixTable, &useTable, SHADER_UNIFORM_FLOAT);
             SetShaderValueTexture(mix, locMixBlurred, post[1].texture);
             SetShaderValueTexture(mix, locMixDepth, Texture2D{target.depth.id, w, h, 1, target.depth.format});
             SetShaderValueTexture(mix, locMixWeights, Texture2D{weightTexture, 256, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8});
