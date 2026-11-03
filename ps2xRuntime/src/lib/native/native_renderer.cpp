@@ -872,11 +872,44 @@ void main()
             rlUpdateVertexBuffer(gpu.vbo, frame->vertices.data(), static_cast<int>(bytes), 0);
         rlDisableVertexArray();
 
+        // A movie playing (movieFrame within 0.25 s): its latest picture, uploaded for the frame below.
+        bool movie = false;
+        {
+            std::lock_guard<std::mutex> lock(m_movieMutex);
+            const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (!m_movie.empty() && now - m_movieTime < 0.25)
+            {
+                if (gpu.movie.id == 0 || gpu.movie.width != m_movieWidth || gpu.movie.height != m_movieHeight)
+                {
+                    if (gpu.movie.id != 0)
+                        UnloadTexture(gpu.movie);
+                    Image image{m_movie.data(), m_movieWidth, m_movieHeight, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                    gpu.movie = LoadTextureFromImage(image);
+                    SetTextureFilter(gpu.movie, TEXTURE_FILTER_BILINEAR);
+                    gpu.movieGeneration = m_movieGeneration;
+                }
+                else if (gpu.movieGeneration != m_movieGeneration)
+                {
+                    UpdateTexture(gpu.movie, m_movie.data());
+                    gpu.movieGeneration = m_movieGeneration;
+                }
+                movie = true;
+            }
+        }
+
         BeginTextureMode(gpu.target);
         if (frame->cleared)
             ClearBackground(Color{frame->clearColour[0], frame->clearColour[1], frame->clearColour[2], 255});
         else
             ClearBackground(BLANK);
+        // The movie's picture first, as the PS2 has it in its frame buffer: what the game draws during the movie (a
+        // "skip this sequence?" window) goes over it.
+        if (movie)
+        {
+            rlDisableDepthTest();
+            DrawTexturePro(gpu.movie, Rectangle{0, 0, static_cast<float>(gpu.movie.width), static_cast<float>(gpu.movie.height)},
+                           Rectangle{0, 0, static_cast<float>(w), static_cast<float>(h)}, Vector2{0, 0}, 0.0f, WHITE);
+        }
         rlDrawRenderBatchActive();
         const Screen &screen = frame->screen;
         const float screenRect[4] = {screen.originX, screen.originY, screen.width, screen.height};
@@ -1157,30 +1190,6 @@ void main()
         DrawTexturePro(gpu.target.texture, Rectangle{0, 0, static_cast<float>(w), -static_cast<float>(h)},
                        Rectangle{x, y, width, height}, Vector2{0, 0}, 0.0f, WHITE);
         EndBlendMode();
-        // A movie playing (movieFrame within 0.25 s): its latest picture over the frame.
-        {
-            std::lock_guard<std::mutex> lock(m_movieMutex);
-            const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-            if (!m_movie.empty() && now - m_movieTime < 0.25)
-            {
-                if (gpu.movie.id == 0 || gpu.movie.width != m_movieWidth || gpu.movie.height != m_movieHeight)
-                {
-                    if (gpu.movie.id != 0)
-                        UnloadTexture(gpu.movie);
-                    Image image{m_movie.data(), m_movieWidth, m_movieHeight, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
-                    gpu.movie = LoadTextureFromImage(image);
-                    SetTextureFilter(gpu.movie, TEXTURE_FILTER_BILINEAR);
-                    gpu.movieGeneration = m_movieGeneration;
-                }
-                else if (gpu.movieGeneration != m_movieGeneration)
-                {
-                    UpdateTexture(gpu.movie, m_movie.data());
-                    gpu.movieGeneration = m_movieGeneration;
-                }
-                DrawTexturePro(gpu.movie, Rectangle{0, 0, static_cast<float>(m_movieWidth), static_cast<float>(m_movieHeight)},
-                               Rectangle{x, y, width, height}, Vector2{0, 0}, 0.0f, WHITE);
-            }
-        }
         return true;
     }
 
