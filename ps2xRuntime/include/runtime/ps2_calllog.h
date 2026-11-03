@@ -130,6 +130,10 @@ namespace ps2x::calllog
     void frameEnd() noexcept;
     void finish() noexcept;
 
+    // The replay: whether the kernel call being made raised DMAC cause `cause` when it unmasked it (the reference
+    // read the channel's D_STAT, hardware state the replay does not keep: the log's nested irq operation says).
+    bool replayUnmaskRaises(uint32_t cause) noexcept;
+
     // The replay's stand-in for a port override (the function table's entry while replaying).
     void replayOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 }

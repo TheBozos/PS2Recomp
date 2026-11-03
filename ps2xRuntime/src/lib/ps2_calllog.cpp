@@ -2155,6 +2155,21 @@ namespace ps2x::calllog
         std::fflush(stderr);
     }
 
+    bool replayUnmaskRaises(uint32_t cause) noexcept
+    {
+        State &s = state();
+        if (s.mode != Mode::Replay || s.desynced || !s.call.open)
+            return false;
+        // The records inside the kernel call being made: a cause-enable for this channel followed by its irq.
+        for (size_t off : s.expected.insideCall())
+        {
+            const uint8_t *p = s.expected.raw.data() + off;
+            if (p[0] == kOpRecord && (p[2] | (p[3] << 8)) == kOpIrq && rd32(p + 72) == 1u && rd32(p + 76) == cause)
+                return true;
+        }
+        return false;
+    }
+
     void replayOverride(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         State &s = state();
