@@ -1088,20 +1088,11 @@ namespace ps2_syscalls
         SifCallRpc(rdram, ctx, runtime);
     }
 
-    void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    static void sendSifCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t cid, uint32_t packetAddr,
+                           uint32_t packetSize, uint32_t srcExtra, uint32_t destExtra, uint32_t sizeExtra)
     {
-        // sceSifSendCmd(cid, packet, packet_size, src_extra, dest_extra, size_extra): the extra
-        // data goes to IOP RAM by SIF DMA, then the packet reaches the IOP handler of cid.
         constexpr uint32_t kHeaderSize = 16u;
         constexpr uint32_t kMaxPacketSize = 112u;
-        // EE EABI: the 5th and 6th arguments are in t0 and t1, not on the stack.
-        uint32_t cid = getRegU32(ctx, 4);
-        uint32_t packetAddr = getRegU32(ctx, 5);
-        uint32_t packetSize = getRegU32(ctx, 6);
-        uint32_t srcExtra = getRegU32(ctx, 7);
-        uint32_t destExtra = getRegU32(ctx, 8);
-        uint32_t sizeExtra = getRegU32(ctx, 9);
-
         if (!runtime || packetSize < kHeaderSize || packetSize > kMaxPacketSize)
         {
             setReturnS32(ctx, 0);
@@ -1162,6 +1153,25 @@ namespace ps2_syscalls
         static uint32_t nextCommandId = 1u;
         setReturnS32(ctx, static_cast<int32_t>(nextCommandId));
         nextCommandId = nextCommandId >= 0x7FFFFFFFu ? 1u : nextCommandId + 1u;
+    }
+
+    void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // sceSifSendCmd(cid, packet, packet_size, src_extra, dest_extra, size_extra): the extra
+        // data goes to IOP RAM by SIF DMA, then the packet reaches the IOP handler of cid.
+        // EE EABI: the 5th and 6th arguments are in t0 and t1, not on the stack.
+        sendSifCmd(rdram, ctx, runtime, getRegU32(ctx, 4), getRegU32(ctx, 5), getRegU32(ctx, 6), getRegU32(ctx, 7),
+                   getRegU32(ctx, 8), getRegU32(ctx, 9));
+    }
+
+    void _sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // The SDK's internal _sceSifSendCmd(cid, mode, packet, packet_size, src_extra, dest_extra, size_extra), behind
+        // sceSifSendCmd (mode 0) and isceSifSendCmd (mode 1): its own entry, or the leading-underscore alias would
+        // read it as sceSifSendCmd, one argument off, and drop every command (Valkyrie Profile 2's sound driver got
+        // its bank pieces only from the IOP's own 60 Hz poll: seconds per bank).
+        sendSifCmd(rdram, ctx, runtime, getRegU32(ctx, 4), getRegU32(ctx, 6), getRegU32(ctx, 7), getRegU32(ctx, 8),
+                   getRegU32(ctx, 9), getRegU32(ctx, 10));
     }
 
     void sceRpcGetPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
