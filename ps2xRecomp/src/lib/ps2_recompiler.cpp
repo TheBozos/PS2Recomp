@@ -1069,6 +1069,7 @@ namespace ps2recomp
             m_codeGenerator->setBootstrapInfo(m_bootstrapInfo);
             m_codeGenerator->setConfiguredJumpTables(m_config.jumpTables);
             m_codeGenerator->setEmitInstructionComments(true);
+            m_codeGenerator->setEmitCaptureHooks(m_config.captureHooks);
 
             if (!m_config.moduleName.empty())
             {
@@ -1410,6 +1411,10 @@ namespace ps2recomp
                     stub << "#ifdef _DEBUG\n";
                     stub << "    PS_LOG_ENTRY(\"" << generatedName << "\");\n";
                     stub << "#endif\n";
+                    if (m_config.captureHooks)
+                    {
+                        stub << "    PS2X_CAPTURE_NATIVE(0x" << std::hex << function.start << std::dec << "u);\n";
+                    }
                     stub << "    ctx->pc = getRegU32(ctx, 31);\n"
                          << "    ";
 

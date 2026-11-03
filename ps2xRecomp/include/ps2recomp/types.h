@@ -180,6 +180,10 @@ namespace ps2recomp
         std::string ghidraMapPath;
         bool singleFileOutput = false;
         bool lowMemoryMode = false;
+        // capture_hooks: every generated function opens with PS2X_CAPTURE_GUEST(<start>) and every stub with
+        // PS2X_CAPTURE_NATIVE(<start>) (ps2_recomp_abi.h): the runtime's per-function capture (PS2X_CAPTURE) sees each
+        // call, direct C++ calls included. Off: the output is as before.
+        bool captureHooks = false;
         uint32_t outputWorkerThreads = 0;
         bool patchSyscalls = false;
         bool patchCop0 = true;

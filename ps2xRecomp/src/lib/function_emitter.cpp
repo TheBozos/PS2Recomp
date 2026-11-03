@@ -74,6 +74,12 @@ namespace ps2recomp
         ss << "#ifdef PS2_FUNCTION_LOG_TRACKER\n";
         ss << "    PS_LOG_ENTRY(\"" << sanitizedName << "\");\n";
         ss << "#endif\n";
+        if (cg.m_emitCaptureHooks)
+        {
+            // Before the resume switch (its gotos must not cross the guard's initialization); the guard tells a call
+            // (ctx->pc at the start) from a resume.
+            ss << "    PS2X_CAPTURE_GUEST(0x" << std::hex << function.start << std::dec << "u);\n";
+        }
         ss << "\n";
         if (!resumeTargets.empty())
         {

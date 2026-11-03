@@ -68,6 +68,7 @@ namespace ps2recomp
         void setConfiguredJumpTables(const std::vector<JumpTable> &jumpTables);
         void setResumeEntryTargets(const std::unordered_map<uint32_t, std::vector<uint32_t>> &resumeTargetsByOwner);
         void setEmitInstructionComments(bool emitInstructionComments);
+        void setEmitCaptureHooks(bool emitCaptureHooks) { m_emitCaptureHooks = emitCaptureHooks; }
         void setReporter(RecompilerReporter *reporter);
 
         AnalysisResult collectInternalBranchTargets(const Function &function,
@@ -84,6 +85,7 @@ namespace ps2recomp
         BootstrapInfo m_bootstrapInfo;
         ModuleInfo m_moduleInfo;
         bool m_emitInstructionComments = true;
+        bool m_emitCaptureHooks = false; // RecompilerConfig::captureHooks
         RecompilerReporter *m_reporter = nullptr;
         std::string m_currentFunctionName;
         // Generated functions the current function calls by name: its file declares just these instead of

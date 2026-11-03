@@ -43,6 +43,7 @@ namespace ps2recomp
             config.outputPath = toml::find<std::string>(general, "output");
             config.singleFileOutput = toml::find_or<bool>(general, "single_file_output", false);
             config.lowMemoryMode = toml::find_or<bool>(general, "low_memory_mode", config.lowMemoryMode);
+            config.captureHooks = toml::find_or<bool>(general, "capture_hooks", false);
             const int64_t configuredOutputWorkers = toml::find_or<int64_t>(
                 general,
                 "output_worker_threads",
@@ -323,6 +324,8 @@ namespace ps2recomp
         general["output"] = config.outputPath;
         general["single_file_output"] = config.singleFileOutput;
         general["low_memory_mode"] = config.lowMemoryMode;
+        if (config.captureHooks)
+            general["capture_hooks"] = true;
         general["output_worker_threads"] = static_cast<int64_t>(config.outputWorkerThreads);
         general["patch_syscalls"] = config.patchSyscalls;
         general["patch_cop0"] = config.patchCop0;
