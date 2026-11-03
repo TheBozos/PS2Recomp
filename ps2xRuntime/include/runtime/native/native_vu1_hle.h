@@ -44,6 +44,19 @@ namespace ps2x::native
     inline std::atomic<bool> g_vif1Dropped{false};
     inline void setVif1Dropped(bool dropped) { g_vif1Dropped.store(dropped, std::memory_order_release); }
 
+    // With VIF1 dropped, the chains this returns true for (by their first tag address, D1_TADR) still run: VU1 work
+    // that is not drawing, such as a game's audio decoder whose output the EE reads back from VU1 memory.
+    using Vif1ChainKept = bool (*)(uint32_t tadr);
+    inline std::atomic<Vif1ChainKept> g_vif1ChainKept{nullptr};
+    inline void setVif1ChainKept(Vif1ChainKept kept) { g_vif1ChainKept.store(kept, std::memory_order_release); }
+    inline bool vif1Dropped(uint32_t tadr)
+    {
+        if (!g_vif1Dropped.load(std::memory_order_acquire))
+            return false;
+        const Vif1ChainKept kept = g_vif1ChainKept.load(std::memory_order_acquire);
+        return !kept || !kept(tadr);
+    }
+
     inline std::atomic<Vu1Hle> g_vu1Hle{nullptr};
     inline void setVu1Hle(Vu1Hle handler) { g_vu1Hle.store(handler, std::memory_order_release); }
     inline Vu1Hle vu1Hle() { return g_vu1Hle.load(std::memory_order_acquire); }
