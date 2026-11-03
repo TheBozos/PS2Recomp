@@ -466,6 +466,39 @@ namespace ps2x::reference
         s.calls[index].done = true;
     }
 
+    size_t tracedCallCount() noexcept
+    {
+        return state().calls.size();
+    }
+
+    void tracedCallsSince(size_t from, std::vector<TracedCall> &out)
+    {
+        State &s = state();
+        for (size_t i = from; i < s.calls.size(); ++i)
+        {
+            const Call &c = s.calls[i];
+            out.push_back(TracedCall{c.id, c.pc, {c.a[0], c.a[1], c.a[2], c.a[3]}, c.v0,
+                                     c.flags | (c.done ? 0x80000000u : 0u)});
+        }
+    }
+
+    void injectTracedCalls(const TracedCall *calls, size_t count)
+    {
+        State &s = state();
+        for (size_t i = 0; i < count; ++i)
+        {
+            Call c;
+            c.id = calls[i].id;
+            c.pc = calls[i].pc;
+            for (int k = 0; k < 4; ++k)
+                c.a[k] = calls[i].a[k];
+            c.v0 = calls[i].v0;
+            c.flags = calls[i].flags & 0x7FFFFFFFu;
+            c.done = (calls[i].flags & 0x80000000u) != 0u;
+            s.calls.push_back(c);
+        }
+    }
+
     void noteDraws(uint64_t hash, uint32_t batches, uint32_t vertices)
     {
         State &s = state();

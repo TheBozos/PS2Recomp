@@ -6,6 +6,7 @@
 #include "runtime/ps2_determinism.h"
 #include "runtime/ps2_reference.h"
 #include "runtime/ps2_capture.h"
+#include "runtime/ps2_calllog.h"
 
 #include "raylib.h"
 #include "rlgl.h"
@@ -1037,6 +1038,9 @@ void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransf
 
 void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
 {
+    // PS2X_CALL_LOG_REPLAY: no IOP; what it did to the EE comes from the log.
+    if (ps2x::calllog::g_replay) [[unlikely]]
+        return;
     // PS2X_IOP_WALLCLOCK=1: the IOP's time follows the host's clock (in EE cycles, the IOP running at an eighth),
     // not the EE cycles the game ran: its timers, vblank interrupts and scheduler, and so the sound drivers' ticks,
     // keep real time whatever the frame rate. A gap longer than 50 ms (a pause, a debugger) counts as 50 ms.
@@ -2454,7 +2458,12 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     // PS2X_CAPTURE: a port function bound to the address is a call out of guest code (recorded, or answered from the
     // capture in the self-check).
     ps2x::capture::NativeScope captureScope;
-    if (ps2x::capture::g_active && ps2x::capture::isOverride(targetPc) &&
+    // PS2X_CALL_LOG_REPLAY: an override is answered from the log by the replay's thunk, recorded as the call it stands
+    // for.
+    const bool replayOverride = ps2x::calllog::g_replay && ps2x::capture::isOverride(targetPc);
+    if (replayOverride) [[unlikely]]
+        targetFn = &ps2x::calllog::replayOverride;
+    if (!replayOverride && ps2x::capture::g_active && ps2x::capture::isOverride(targetPc) &&
         ps2x::capture::nativeEnter(rdram, ctx, this, ps2x::capture::kOutOverride, targetPc, captureScope.token))
         [[unlikely]]
     {

@@ -333,6 +333,11 @@ public:
     // The call log (ps2_calllog.h): whether a context is still a thread's or one of its handlers' (an out-call that left
     // through the dispatcher may have taken it away).
     [[nodiscard]] bool ownsContext(const R5900Context *context) const;
+    // The call log's replay (PS2X_CALL_LOG_REPLAY): what a library or the IOP did to the kernel, done again; EE time
+    // moved to where a call answered from the log left it (timers follow, the IOP does not run).
+    [[noreturn]] void replayBlock(EeWaitState wait);
+    void replayWake(int id, int result);
+    void replayAdvanceTo(uint64_t cycle);
     void accountCycles(uint32_t cycles) noexcept;
     [[nodiscard]] bool isExecutingGuest() const noexcept;
 
