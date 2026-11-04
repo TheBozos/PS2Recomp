@@ -1546,6 +1546,12 @@ bool PS2Runtime::initialize(const char *title)
         // plays: taking the focus would leave that game without its pad, the host input going to the focused window).
         if (const char *noFocus = std::getenv("PS2X_WINDOW_NO_FOCUS"); noFocus && noFocus[0] == '1')
             SetConfigFlags(FLAG_WINDOW_UNFOCUSED);
+        // Scripted probes can create a hidden window, then reveal it outside
+        // the desktop with focus-on-show disabled, avoiding startup activation.
+        const char *offscreen = std::getenv("PS2X_WINDOW_OFFSCREEN");
+        const bool startOffscreen = offscreen && offscreen[0] == '1';
+        if (startOffscreen)
+            SetConfigFlags(FLAG_WINDOW_HIDDEN);
         // PS2X_WINDOW_SIZE=<width>x<height>: the window's size when it opens (it can be resized after).
         int windowWidth = HOST_WINDOW_WIDTH, windowHeight = HOST_WINDOW_HEIGHT;
         if (const char *size = std::getenv("PS2X_WINDOW_SIZE"); size && *size)
@@ -1555,6 +1561,15 @@ bool PS2Runtime::initialize(const char *title)
                 windowWidth = w, windowHeight = h;
         }
         InitWindow(windowWidth, windowHeight, title);
+        if (startOffscreen)
+        {
+            // Reapply after creation: raylib's initial UNFOCUSED hint only sets
+            // GLFW_FOCUSED, whereas SetWindowState sets GLFW_FOCUS_ON_SHOW.
+            ClearWindowState(FLAG_WINDOW_UNFOCUSED);
+            SetWindowState(FLAG_WINDOW_UNFOCUSED);
+            SetWindowPosition(-30000, -30000);
+            ClearWindowState(FLAG_WINDOW_HIDDEN);
+        }
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
 #endif
