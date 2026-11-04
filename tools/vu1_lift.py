@@ -559,8 +559,8 @@ class Program:
         p = self.pairs[pc >> 3] if (pc >> 3) < len(self.pairs) else None
         if p is None:
             raise GenError(f'{self.name}: no instruction at {pc:#x}')
-        if p.dbit or p.tbit:
-            raise GenError(f'{self.name}: D/T bit at {pc:#x}')
+        # The D and T bits stop the VU only when FBRST enables debug / terminate breaks, which games leave off: as on
+        # the console, the instruction runs as any other (VP2's town effects carry a T bit at 0x10d0).
         return p
 
     def build(self, entries, targets):
@@ -571,7 +571,9 @@ class Program:
         while self.work:
             n = self.work.pop()
             self.step(n)
-            if len(self.nodes) > 200000:
+            # A bound for code whose timing states never settle; a large program's output is compiled in pieces by the
+            # caller (VP2S tools/vu1_split.py).
+            if len(self.nodes) > 1000000:
                 raise GenError('too many nodes')
         for n in self.nodes:
             for _, s in n.succ:
