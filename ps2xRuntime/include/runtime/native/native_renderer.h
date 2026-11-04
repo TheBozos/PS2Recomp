@@ -145,6 +145,12 @@ namespace ps2x::native
             int gridWidth = 0, gridHeight = 0;
             std::vector<uint32_t> scatterGrid;
             float levelGain[3] = {1.0f, 1.0f, 1.0f}, levelHigh[3] = {1.0f, 1.0f, 1.0f}, levelLow[3] = {0.0f, 0.0f, 0.0f};
+            // glow instead: a game's bloom. The frame x gain less glowThreshold (0..1, at least 0) shrunk to width x
+            // height, then glowLevelCount levels (each half the last, from the unblurred one), each blurred by sigma
+            // texels, all added onto the frame (Cs x As + Cd) with As = alpha x glowLevelWeight.
+            bool glow = false;
+            float glowThreshold = 0.0f, glowLevelWeight = 1.0f;
+            int glowLevelCount = 1;
         };
         // at: the batch it goes before (batchCount() when that point was reached; past the end: at the end).
         // Returns the pass's index in the frame being built, for adjustPostEffect.

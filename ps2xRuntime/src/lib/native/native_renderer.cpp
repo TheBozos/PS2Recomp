@@ -89,7 +89,7 @@ void main()
 )";
 
         // postEffect's blur: one direction of a Gaussian (uStep a texel along it), the colour first brightened by uGain
-        // and clamped; sigma 0: the brightened copy alone.
+        // and clamped; sigma 0: the brightened copy alone, less uThreshold (at least 0).
         const char *kBlurShader = R"(#version 330
 in vec2 fragTexCoord;
 in vec4 fragColor;
@@ -97,12 +97,13 @@ uniform sampler2D texture0;
 uniform vec2 uStep;
 uniform float uSigma;
 uniform float uGain;
+uniform float uThreshold;
 out vec4 finalColor;
 void main()
 {
     if (uSigma <= 0.0)
     {
-        finalColor = vec4(min(texture(texture0, fragTexCoord).rgb * uGain, vec3(1.0)), 1.0);
+        finalColor = vec4(max(min(texture(texture0, fragTexCoord).rgb * uGain, vec3(1.0)) - vec3(uThreshold), vec3(0.0)), 1.0);
         return;
     }
     int radius = int(ceil(uSigma * 3.0));
@@ -214,8 +215,10 @@ void main()
         int targetWidth = 0, targetHeight = 0;
         // postEffect: its shader and two work textures of the effect's size.
         Shader blur{};
-        int locStep = -1, locSigma = -1, locGain = -1;
+        int locStep = -1, locSigma = -1, locGain = -1, locThreshold = -1;
         RenderTexture2D post[2]{};
+        RenderTexture2D glowLevels[4][2]{}; // PostEffect::glow: each level's pair (blurred in [1])
+        int glowWidth = 0, glowHeight = 0;
         int postWidth = 0, postHeight = 0;
         // The scatter pass: its shader, the table and grid textures, a frame-sized result copied back.
         Shader scatter{};
@@ -539,6 +542,84 @@ void main()
             rlEnableDepthTest();
         }
 
+        // PostEffect::glow: the frame shrunk to pw x ph (x gain, less glowThreshold), then glowLevelCount levels each half
+        // the last, each blurred (sigma texels), all added onto the frame x alpha x glowLevelWeight.
+        void glowPass(const Renderer::PostEffect &e, int w, int h, int pw, int ph)
+        {
+            const int levels = std::clamp(e.glowLevelCount, 1, 4);
+            if (glowWidth != pw || glowHeight != ph)
+            {
+                for (int k = 0; k < 4; ++k)
+                    for (RenderTexture2D &t : glowLevels[k])
+                    {
+                        if (t.id != 0)
+                            UnloadRenderTexture(t);
+                        t = LoadRenderTexture(std::max(1, pw >> k), std::max(1, ph >> k));
+                        SetTextureFilter(t.texture, TEXTURE_FILTER_BILINEAR);
+                        SetTextureWrap(t.texture, TEXTURE_WRAP_CLAMP);
+                    }
+                glowWidth = pw;
+                glowHeight = ph;
+            }
+            SetTextureFilter(target.texture, TEXTURE_FILTER_BILINEAR);
+            const auto pass = [&](const Texture2D &source, int sw, int sh, RenderTexture2D &into, float stepX, float stepY, float sigma,
+                                  float gain, float threshold) {
+                BeginTextureMode(into);
+                ClearBackground(BLANK);
+                BeginShaderMode(blur);
+                const float step[2] = {stepX, stepY};
+                SetShaderValue(blur, locStep, step, SHADER_UNIFORM_VEC2);
+                SetShaderValue(blur, locSigma, &sigma, SHADER_UNIFORM_FLOAT);
+                SetShaderValue(blur, locGain, &gain, SHADER_UNIFORM_FLOAT);
+                SetShaderValue(blur, locThreshold, &threshold, SHADER_UNIFORM_FLOAT);
+                DrawTexturePro(source, Rectangle{0, 0, static_cast<float>(sw), -static_cast<float>(sh)},
+                               Rectangle{0, 0, static_cast<float>(into.texture.width), static_cast<float>(into.texture.height)}, Vector2{0, 0}, 0.0f,
+                               WHITE);
+                EndShaderMode();
+                EndTextureMode();
+            };
+            // The levels unblurred (each the last one halved), then each blurred: [1] -> [0] -> [1].
+            pass(target.texture, w, h, glowLevels[0][1], 0.0f, 0.0f, 0.0f, e.gain, e.glowThreshold);
+            for (int k = 1; k < levels; ++k)
+                pass(glowLevels[k - 1][1].texture, glowLevels[k - 1][1].texture.width, glowLevels[k - 1][1].texture.height, glowLevels[k][1], 0.0f,
+                     0.0f, 0.0f, 1.0f, 0.0f);
+            for (int k = 0; k < levels; ++k)
+            {
+                RenderTexture2D *level = glowLevels[k];
+                const int lw = level[1].texture.width, lh = level[1].texture.height;
+                pass(level[1].texture, lw, lh, level[0], 1.0f / lw, 0.0f, e.sigma, 1.0f, 0.0f);
+                pass(level[0].texture, lw, lh, level[1], 0.0f, 1.0f / lh, e.sigma, 1.0f, 0.0f);
+            }
+            BeginTextureMode(target);
+            rlDrawRenderBatchActive();
+            setDepthAlways(false);
+            rlDisableDepthTest();
+            rlDisableDepthMask();
+            rlEnableColorBlend();
+            rlSetBlendMode(RL_BLEND_ADDITIVE); // Cs x As + Cd
+            const unsigned char a = static_cast<unsigned char>(std::clamp(e.alpha * e.glowLevelWeight, 0.0f, 1.0f) * 255.0f + 0.5f);
+            for (int k = 0; k < levels; ++k)
+            {
+                rlSetTexture(glowLevels[k][1].texture.id);
+                rlBegin(RL_QUADS);
+                rlColor4ub(255, 255, 255, a);
+                rlTexCoord2f(0.0f, 1.0f);
+                rlVertex2f(0.0f, 0.0f);
+                rlTexCoord2f(0.0f, 0.0f);
+                rlVertex2f(0.0f, static_cast<float>(h));
+                rlTexCoord2f(1.0f, 0.0f);
+                rlVertex2f(static_cast<float>(w), static_cast<float>(h));
+                rlTexCoord2f(1.0f, 1.0f);
+                rlVertex2f(static_cast<float>(w), 0.0f);
+                rlEnd();
+                rlDrawRenderBatchActive();
+            }
+            rlSetTexture(0);
+            rlSetBlendMode(RL_BLEND_ALPHA);
+            rlEnableDepthMask();
+            rlEnableDepthTest();
+        }
+
         void postPass(const Renderer::PostEffect &e, int w, int h)
         {
             if (e.levels)
@@ -558,6 +639,14 @@ void main()
                 locStep = GetShaderLocation(blur, "uStep");
                 locSigma = GetShaderLocation(blur, "uSigma");
                 locGain = GetShaderLocation(blur, "uGain");
+                locThreshold = GetShaderLocation(blur, "uThreshold");
+            }
+            const float noThreshold = 0.0f;
+            SetShaderValue(blur, locThreshold, &noThreshold, SHADER_UNIFORM_FLOAT);
+            if (e.glow)
+            {
+                glowPass(e, w, h, pw, ph);
+                return;
             }
             if (postWidth != pw || postHeight != ph)
             {
