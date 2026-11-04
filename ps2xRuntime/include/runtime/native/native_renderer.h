@@ -151,6 +151,12 @@ namespace ps2x::native
             bool glow = false;
             float glowThreshold = 0.0f, glowLevelWeight = 1.0f;
             int glowLevelCount = 1;
+            // With the glow, a glare: the frame x gain less glareThreshold at width x height, blurred along a line at
+            // each of glareAngleCount angles (degrees, from the x axis; Gaussian sigma glareLength texels along it),
+            // each added at alpha x glareWeight.
+            int glareAngleCount = 0;
+            float glareAngles[4] = {};
+            float glareThreshold = 1.0f, glareLength = 0.0f, glareWeight = 0.0f;
         };
         // at: the batch it goes before (batchCount() when that point was reached; past the end: at the end).
         // Returns the pass's index in the frame being built, for adjustPostEffect.

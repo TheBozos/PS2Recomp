@@ -246,6 +246,8 @@ void main()
         RenderTexture2D post[2]{};
         RenderTexture2D glowLevels[4][2]{}; // PostEffect::glow: each level's pair (blurred in [1])
         int glowWidth = 0, glowHeight = 0;
+        RenderTexture2D glare[5]{}; // PostEffect::glow's glare: its source, then one line blur an angle
+        int glareWidth = 0, glareHeight = 0;
         int postWidth = 0, postHeight = 0;
         // The scatter pass: its shader, the table and grid textures, a frame-sized result copied back.
         Shader scatter{};
@@ -709,6 +711,30 @@ void main()
                 pass(level[1].texture, lw, lh, level[0], 1.0f / lw, 0.0f, e.sigma, 1.0f, 0.0f);
                 pass(level[0].texture, lw, lh, level[1], 0.0f, 1.0f / lh, e.sigma, 1.0f, 0.0f);
             }
+            // The glare: the brighter part (its own threshold) blurred along a line at each angle.
+            const int angles = e.glareWeight > 0.0f ? std::clamp(e.glareAngleCount, 0, 4) : 0;
+            if (angles > 0)
+            {
+                if (glareWidth != pw || glareHeight != ph)
+                {
+                    for (RenderTexture2D &t : glare)
+                    {
+                        if (t.id != 0)
+                            UnloadRenderTexture(t);
+                        t = LoadRenderTexture(pw, ph);
+                        SetTextureFilter(t.texture, TEXTURE_FILTER_BILINEAR);
+                        SetTextureWrap(t.texture, TEXTURE_WRAP_CLAMP);
+                    }
+                    glareWidth = pw;
+                    glareHeight = ph;
+                }
+                pass(target.texture, w, h, glare[0], 0.0f, 0.0f, 0.0f, e.gain, e.glareThreshold);
+                for (int i = 0; i < angles; ++i)
+                {
+                    const float radians = e.glareAngles[i] * 3.14159265f / 180.0f;
+                    pass(glare[0].texture, pw, ph, glare[1 + i], std::cos(radians) / pw, std::sin(radians) / ph, e.glareLength, 1.0f, 0.0f);
+                }
+            }
             BeginTextureMode(target);
             rlDrawRenderBatchActive();
             setDepthAlways(false);
@@ -716,12 +742,10 @@ void main()
             rlDisableDepthMask();
             rlEnableColorBlend();
             rlSetBlendMode(RL_BLEND_ADDITIVE); // Cs x As + Cd
-            const unsigned char a = static_cast<unsigned char>(std::clamp(e.alpha * e.glowLevelWeight, 0.0f, 1.0f) * 255.0f + 0.5f);
-            for (int k = 0; k < levels; ++k)
-            {
-                rlSetTexture(glowLevels[k][1].texture.id);
+            const auto addOver = [&](unsigned int id, float alpha) {
+                rlSetTexture(id);
                 rlBegin(RL_QUADS);
-                rlColor4ub(255, 255, 255, a);
+                rlColor4ub(255, 255, 255, static_cast<unsigned char>(std::clamp(alpha, 0.0f, 1.0f) * 255.0f + 0.5f));
                 rlTexCoord2f(0.0f, 1.0f);
                 rlVertex2f(0.0f, 0.0f);
                 rlTexCoord2f(0.0f, 0.0f);
@@ -732,7 +756,11 @@ void main()
                 rlVertex2f(static_cast<float>(w), 0.0f);
                 rlEnd();
                 rlDrawRenderBatchActive();
-            }
+            };
+            for (int k = 0; k < levels; ++k)
+                addOver(glowLevels[k][1].texture.id, e.alpha * e.glowLevelWeight);
+            for (int i = 0; i < angles; ++i)
+                addOver(glare[1 + i].texture.id, e.alpha * e.glareWeight);
             rlSetTexture(0);
             rlSetBlendMode(RL_BLEND_ALPHA);
             rlEnableDepthMask();
