@@ -320,7 +320,8 @@ static bool writeMinimalMipsElfWithTailJumpIntoBoundRoutine(const std::filesyste
     return writer.save(elfPath.string());
 }
 
-static bool writeMinimalMipsElfWithStandaloneEntryBlock(const std::filesystem::path &elfPath)
+static bool writeMinimalMipsElfWithStandaloneEntryBlock(const std::filesystem::path &elfPath,
+                                                       bool splitContinuation = false, bool indirectCall = false)
 {
     ELFIO::elfio writer;
     writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
@@ -336,8 +337,8 @@ static bool writeMinimalMipsElfWithStandaloneEntryBlock(const std::filesystem::p
     text->set_address(0x00100000u);
 
     const std::array<uint32_t, 8> textWords = {
-        0x0C040004u, // entry_00100000: jal 0x00100010
-        0x00000000u, // nop
+        indirectCall ? 0x0320F809u : 0x0C040004u, // jalr t9 / jal 0x00100010
+        0x24840001u, // addiu a0,a0,1: delay slot must not execute again on resume
         0x03E00008u, // jr $ra (the JAL return address, 0x00100008, is a resume point)
         0x00000000u, // nop
         0x03E00008u, // callee at 0x00100010: jr $ra
@@ -363,8 +364,13 @@ static bool writeMinimalMipsElfWithStandaloneEntryBlock(const std::filesystem::p
     ELFIO::string_section_accessor strings(strtab);
     symbols.add_symbol(strings, "", 0, 0,
                        ELFIO::STB_LOCAL, ELFIO::STT_NOTYPE, 0, ELFIO::SHN_UNDEF);
-    symbols.add_symbol(strings, "entry_00100000", 0x00100000u, 0x10u,
+    symbols.add_symbol(strings, "entry_00100000", 0x00100000u, splitContinuation ? 4u : 0x10u,
                        ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+    if (splitContinuation)
+    {
+        symbols.add_symbol(strings, "entry_00100004", 0x00100004u, 0xCu,
+                           ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
+    }
     symbols.add_symbol(strings, "callee", 0x00100010u, 8u,
                        ELFIO::STB_GLOBAL, ELFIO::STT_FUNC, 0, text->get_index());
     symbols.add_symbol(strings, "other", 0x00100018u, 8u,
@@ -1686,6 +1692,43 @@ void register_ps2_recompiler_tests()
 
             std::error_code removeError;
             std::filesystem::remove_all(tempRoot, removeError);
+        });
+
+        tc.Run("calls across standalone block boundaries register an interior continuation", [](TestCase &t) {
+            for (bool indirectCall : {false, true})
+            {
+                const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+                const auto root = std::filesystem::temp_directory_path() / ("ps2recomp-split-call-" + suffix);
+                const auto elf = root / "split.elf";
+                const auto config = root / "split.toml";
+                const auto output = root / "output";
+                std::filesystem::create_directories(root);
+                t.IsTrue(writeMinimalMipsElfWithStandaloneEntryBlock(elf, true, indirectCall) &&
+                         writeRecompilerTestConfig(config, elf, output, {}), "write split call fixture");
+                PS2Recompiler recompiler(config.string());
+                t.IsTrue(recompiler.initialize() && recompiler.recompile(), "recompile split call fixture");
+                recompiler.generateOutput();
+                bool registered = false, switched = false, delayBeforeResume = false;
+                for (const auto &file : std::filesystem::directory_iterator(output))
+                {
+                    if (file.path().extension() != ".cpp") continue;
+                    std::ifstream in(file.path());
+                    const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+                    if (file.path().filename() == "register_functions.cpp")
+                        registered = text.find("// 0x100008") != std::string::npos;
+                    if (text.find("// Address: 0x100004") != std::string::npos)
+                    {
+                        switched = text.find("case 0x100008u: goto label_100008;") != std::string::npos;
+                        const auto label = text.find("label_100008:");
+                        delayBeforeResume = label != std::string::npos && text.find("// 0x100004:") < label;
+                    }
+                }
+                t.IsTrue(registered, "JAL/JALR return inside the next standalone block must be registered");
+                t.IsTrue(switched, "the owner must enter at the continuation instead of its delay slot");
+                t.IsTrue(delayBeforeResume, "resuming must skip the side-effecting call delay slot");
+                std::error_code error;
+                std::filesystem::remove_all(root, error);
+            }
         });
 
         tc.Run("elf parser ignores STT_FUNC symbols in non-executable sections", [](TestCase &t) {

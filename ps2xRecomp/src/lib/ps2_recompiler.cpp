@@ -2150,11 +2150,6 @@ namespace ps2recomp
                     continue;
                 }
 
-                if (isEntryFunctionName(function.name))
-                {
-                    continue;
-                }
-
                 if (address < function.start || address >= function.end)
                 {
                     continue;
@@ -2175,7 +2170,10 @@ namespace ps2recomp
                     continue;
                 }
 
-                if (!best || function.start > best->start)
+                const bool candidateEntry = isEntryFunctionName(function.name);
+                const bool bestEntry = best && isEntryFunctionName(best->name);
+                if (!best || (bestEntry && !candidateEntry) ||
+                    (candidateEntry == bestEntry && function.start > best->start))
                 {
                     best = &function;
                 }

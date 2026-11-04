@@ -61,17 +61,17 @@ namespace ps2recomp
                     continue;
                 }
 
-                if (candidateFn.name.rfind("entry_", 0) == 0)
-                {
-                    continue;
-                }
-
                 if (address < candidateFn.start || address >= candidateFn.end)
                 {
                     continue;
                 }
 
-                if (!best || candidateFn.start > best->start)
+                // Prefer a real function over a synthetic entry wrapper, but allow a
+                // standalone entry block to own an interior continuation.
+                const bool candidateEntry = candidateFn.name.rfind("entry_", 0) == 0;
+                const bool bestEntry = best && best->name.rfind("entry_", 0) == 0;
+                if (!best || (bestEntry && !candidateEntry) ||
+                    (candidateEntry == bestEntry && candidateFn.start > best->start))
                 {
                     best = &candidateFn;
                 }
@@ -108,6 +108,12 @@ namespace ps2recomp
             {
                 result.entryPoints.insert(resumeAddr);
                 result.resumeEntryPoints.insert(resumeAddr);
+            }
+            else
+            {
+                // Exported code blocks can end at the call or its delay slot.
+                // The return then belongs to a different block, not this wrapper.
+                queueExternalEntryTarget(resumeAddr);
             }
         };
 
