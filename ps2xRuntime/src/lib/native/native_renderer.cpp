@@ -64,6 +64,7 @@ uniform int uGsUntextured;
 uniform float uTexAlphaScale;
 uniform vec3 uFogColour;
 uniform int uShadowCount;
+uniform int uAlphaAsColour;
 out vec4 fragColor;
 void main()
 {
@@ -92,6 +93,8 @@ void main()
         fragColor.rgb = mix(uFogColour, fragColor.rgb, clamp(vFog, 0.0, 1.0));
     if (uOpaque != 0)
         fragColor.a = 1.0;
+    if (uAlphaAsColour != 0)
+        fragColor.rgb = vec3(fragColor.a); // Material::Blend::Brighten: Cd + Cd As
 }
 )";
 
@@ -228,7 +231,7 @@ void main()
     {
         unsigned int shader = 0;
         int locM = -1, locScreen = -1, locDepthMax = -1, locTex = -1, locTextured = -1, locAlphaTest = -1, locAlphaRef = -1, locOpaque = -1, locFog = -1,
-            locFogColour = -1, locFunction = -1, locTextureAlpha = -1, locGsUntextured = -1, locTexAlphaScale = -1, locShadowCount = -1;
+            locFogColour = -1, locFunction = -1, locTextureAlpha = -1, locGsUntextured = -1, locTexAlphaScale = -1, locShadowCount = -1, locAlphaAsColour = -1;
         // Shadow volumes: a float count image with the target's depth attached (tested, not written), then the
         // target darkened where the count is not 0.
         unsigned int shadowFbo = 0, shadowCount = 0;
@@ -386,6 +389,7 @@ void main()
             locAlphaRef = rlGetLocationUniform(shader, "uAlphaRef");
             locOpaque = rlGetLocationUniform(shader, "uOpaque");
             locShadowCount = rlGetLocationUniform(shader, "uShadowCount");
+            locAlphaAsColour = rlGetLocationUniform(shader, "uAlphaAsColour");
             locFog = rlGetLocationUniform(shader, "uFog");
             locFogColour = rlGetLocationUniform(shader, "uFogColour");
             locFunction = rlGetLocationUniform(shader, "uFunction");
@@ -1269,8 +1273,53 @@ void main()
             else
             {
                 rlEnableColorBlend();
-                rlSetBlendFactorsSeparate(kGlSrcAlpha, m.blend == Material::Blend::Additive ? kGlOne : kGlOneMinusSrcAlpha,
-                                          kGlOne, m_gsAlphaWrites ? 0 : kGlOneMinusSrcAlpha, kGlFuncAdd, kGlFuncAdd);
+                // The colour's factors and equation by the blend (as the GS-stream path draws them); the alpha as the
+                // alpha blend writes it for Alpha and Additive, kept for the others.
+                constexpr int kZero = 0, kDstAlpha = 0x0304, kOneMinusDstAlpha = 0x0305, kDstColour = 0x0306, kSubtract = 0x800A,
+                              kReverseSubtract = 0x800B;
+                int src = kGlSrcAlpha, dst = kGlOneMinusSrcAlpha, equation = kGlFuncAdd;
+                bool keepAlpha = true;
+                switch (m.blend)
+                {
+                case Material::Blend::Additive: dst = kGlOne; keepAlpha = false; break;
+                case Material::Blend::Subtract: dst = kGlOne; equation = kReverseSubtract; break;        // Cd - Cs As
+                case Material::Blend::Darken: src = kZero; break;                                         // Cd (1 - As)
+                case Material::Blend::Brighten: src = kDstColour; dst = kGlOne; break;                    // Cd + Cd As (As as the colour)
+                case Material::Blend::Gs:
+                {
+                    // (A - B) C + D, A B D: 0 Cs, 1 Cd, 2 zero; C: 0 As, 1 Ad, 2 FIX (0x80 = 1: taken as 1).
+                    const uint32_t a = m.gsAlpha & 3u, b = (m.gsAlpha >> 2) & 3u, c = (m.gsAlpha >> 4) & 3u, d = (m.gsAlpha >> 6) & 3u;
+                    const int cf = c == 0u ? kGlSrcAlpha : c == 1u ? kDstAlpha : kGlOne;
+                    const int oneMinusCf = c == 0u ? kGlOneMinusSrcAlpha : c == 1u ? kOneMinusDstAlpha : kZero;
+                    const auto pick = [&](int s, int t, int e) { src = s, dst = t, equation = e; };
+                    switch (a | (b << 2) | (d << 4))
+                    {
+                    case 0 | (1 << 2) | (1 << 4): pick(cf, oneMinusCf, kGlFuncAdd); break;
+                    case 0 | (1 << 2) | (2 << 4): pick(cf, cf, kSubtract); break;
+                    case 0 | (1 << 2) | (0 << 4): pick(kGlOne, cf, kSubtract); break;
+                    case 0 | (2 << 2) | (1 << 4): pick(cf, kGlOne, kGlFuncAdd); break;
+                    case 0 | (2 << 2) | (2 << 4): pick(cf, kZero, kGlFuncAdd); break;
+                    case 0 | (2 << 2) | (0 << 4): pick(kGlOne, kZero, kGlFuncAdd); break;
+                    case 1 | (0 << 2) | (0 << 4): pick(oneMinusCf, cf, kGlFuncAdd); break;
+                    case 1 | (0 << 2) | (2 << 4): pick(cf, cf, kReverseSubtract); break;
+                    case 1 | (0 << 2) | (1 << 4): pick(cf, kGlOne, kReverseSubtract); break;
+                    case 1 | (2 << 2) | (0 << 4): pick(kGlOne, cf, kGlFuncAdd); break;
+                    case 1 | (2 << 2) | (2 << 4): pick(kZero, cf, kGlFuncAdd); break;
+                    case 1 | (2 << 2) | (1 << 4): pick(kZero, kGlOne, kGlFuncAdd); break;
+                    case 2 | (0 << 2) | (1 << 4): pick(cf, kGlOne, kReverseSubtract); break;
+                    case 2 | (0 << 2) | (0 << 4): pick(oneMinusCf, kZero, kGlFuncAdd); break;
+                    case 2 | (1 << 2) | (1 << 4): pick(kZero, oneMinusCf, kGlFuncAdd); break;
+                    case 2 | (1 << 2) | (0 << 4): pick(kGlOne, cf, kSubtract); break;
+                    default: pick(d == 0u ? kGlOne : kZero, d == 1u ? kGlOne : kZero, kGlFuncAdd); break; // A = B: D alone
+                    }
+                    break;
+                }
+                default: keepAlpha = false; break;
+                }
+                if (keepAlpha)
+                    rlSetBlendFactorsSeparate(src, dst, kZero, kGlOne, equation, kGlFuncAdd);
+                else
+                    rlSetBlendFactorsSeparate(src, dst, kGlOne, m_gsAlphaWrites ? 0 : kGlOneMinusSrcAlpha, equation, kGlFuncAdd);
                 rlSetBlendMode(RL_BLEND_CUSTOM_SEPARATE);
             }
             if (m.depthWrite)
@@ -1310,6 +1359,8 @@ void main()
             const int textured = m.textured && texture ? 1 : 0, alphaTest = m.alphaTest ? 1 : 0;
             const int opaque = m.blend == Material::Blend::Opaque ? 1 : 0;
             rlSetUniform(gpu.locOpaque, &opaque, RL_SHADER_UNIFORM_INT, 1);
+            const int alphaAsColour = m.blend == Material::Blend::Brighten ? 1 : 0;
+            rlSetUniform(gpu.locAlphaAsColour, &alphaAsColour, RL_SHADER_UNIFORM_INT, 1);
             const int fog = m.fog ? 1 : 0;
             const float fogColour[3] = {static_cast<float>(m.fogColour & 0xffu) / 255.0f, static_cast<float>((m.fogColour >> 8) & 0xffu) / 255.0f,
                                         static_cast<float>((m.fogColour >> 16) & 0xffu) / 255.0f};
