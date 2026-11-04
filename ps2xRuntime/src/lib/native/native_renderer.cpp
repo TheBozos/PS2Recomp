@@ -63,9 +63,16 @@ uniform int uTextureAlpha;
 uniform int uGsUntextured;
 uniform float uTexAlphaScale;
 uniform vec3 uFogColour;
+uniform int uShadowCount;
 out vec4 fragColor;
 void main()
 {
+    if (uShadowCount != 0)
+    {
+        // A shadow volume's face (Material::Blend::ShadowVolume): +1 seen from the front, -1 from the back.
+        fragColor = vec4(gl_FrontFacing ? 1.0 : -1.0, 0.0, 0.0, 0.0);
+        return;
+    }
     vec4 colour = vCol * (255.0 / 128.0);
     vec4 texel = uTextured != 0 ? texture(uTex, vUv) : vec4(1.0);
     texel.a *= uTexAlphaScale;
@@ -116,6 +123,19 @@ void main()
         weights += w;
     }
     finalColor = vec4(sum / weights, 1.0);
+}
+)";
+
+        // A shadow volume's darkening: black at uAlpha where its face count (texture0's red) is not 0.
+        const char *kDarkenShader = R"(#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+uniform sampler2D texture0;
+uniform float uAlpha;
+out vec4 finalColor;
+void main()
+{
+    finalColor = vec4(0.0, 0.0, 0.0, abs(texture(texture0, fragTexCoord).r) > 0.5 ? uAlpha : 0.0);
 }
 )";
 
@@ -208,7 +228,14 @@ void main()
     {
         unsigned int shader = 0;
         int locM = -1, locScreen = -1, locDepthMax = -1, locTex = -1, locTextured = -1, locAlphaTest = -1, locAlphaRef = -1, locOpaque = -1, locFog = -1,
-            locFogColour = -1, locFunction = -1, locTextureAlpha = -1, locGsUntextured = -1, locTexAlphaScale = -1;
+            locFogColour = -1, locFunction = -1, locTextureAlpha = -1, locGsUntextured = -1, locTexAlphaScale = -1, locShadowCount = -1;
+        // Shadow volumes: a float count image with the target's depth attached (tested, not written), then the
+        // target darkened where the count is not 0.
+        unsigned int shadowFbo = 0, shadowCount = 0;
+        int shadowWidth = 0, shadowHeight = 0;
+        unsigned int shadowDepth = 0;
+        Shader darken{};
+        int locDarkenAlpha = -1;
         unsigned int vao = 0, vbo = 0;
         size_t vboBytes = 0;
         RenderTexture2D target{};
@@ -356,6 +383,7 @@ void main()
             locAlphaTest = rlGetLocationUniform(shader, "uAlphaTest");
             locAlphaRef = rlGetLocationUniform(shader, "uAlphaRef");
             locOpaque = rlGetLocationUniform(shader, "uOpaque");
+            locShadowCount = rlGetLocationUniform(shader, "uShadowCount");
             locFog = rlGetLocationUniform(shader, "uFog");
             locFogColour = rlGetLocationUniform(shader, "uFogColour");
             locFunction = rlGetLocationUniform(shader, "uFunction");
@@ -537,6 +565,97 @@ void main()
                            Rectangle{0, 0, static_cast<float>(w), static_cast<float>(h)}, Vector2{0, 0}, 0.0f, WHITE);
             rlDrawRenderBatchActive();
             rlEnableColorBlend();
+            rlSetBlendMode(RL_BLEND_ALPHA);
+            rlEnableDepthMask();
+            rlEnableDepthTest();
+        }
+
+        // A Material::Blend::ShadowVolume batch (vertices first..first + count, drawn with the frame's shader): its faces
+        // counted where they are in front of the scene (the target's depth, tested, not written), then the target
+        // darkened once by alpha where the count is not 0. Leaves the target bound, as postPass does.
+        void shadowPass(int w, int h, int first, int count, const float matrix[16], const float screenRect[4], float depthMax, float alpha)
+        {
+            if (shadowFbo == 0 || shadowWidth != w || shadowHeight != h || shadowDepth != target.depth.id)
+            {
+                if (shadowFbo != 0)
+                    rlUnloadFramebuffer(shadowFbo);
+                if (shadowCount != 0)
+                    rlUnloadTexture(shadowCount);
+                shadowFbo = rlLoadFramebuffer();
+                shadowCount = rlLoadTexture(nullptr, w, h, RL_PIXELFORMAT_UNCOMPRESSED_R32, 1);
+                rlFramebufferAttach(shadowFbo, shadowCount, RL_ATTACHMENT_COLOR_CHANNEL0, RL_ATTACHMENT_TEXTURE2D, 0);
+                rlFramebufferAttach(shadowFbo, target.depth.id, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_TEXTURE2D, 0);
+                if (!rlFramebufferComplete(shadowFbo))
+                {
+                    rlUnloadFramebuffer(shadowFbo);
+                    shadowFbo = 0;
+                }
+                shadowWidth = w;
+                shadowHeight = h;
+                shadowDepth = target.depth.id;
+            }
+            if (shadowFbo == 0 || count <= 0)
+            {
+                BeginTextureMode(target);
+                return;
+            }
+            RenderTexture2D counts{};
+            counts.id = shadowFbo;
+            counts.texture = Texture2D{shadowCount, w, h, 1, PIXELFORMAT_UNCOMPRESSED_R32};
+            counts.depth = target.depth;
+            BeginTextureMode(counts);
+            rlDrawRenderBatchActive();
+            // Cleared to 0 by a quad (a clear would clear the shared depth too).
+            rlDisableColorBlend();
+            rlDisableDepthTest();
+            rlDisableDepthMask();
+            rlSetTexture(0);
+            rlBegin(RL_QUADS);
+            rlColor4ub(0, 0, 0, 0);
+            rlVertex2f(0.0f, 0.0f);
+            rlVertex2f(0.0f, static_cast<float>(h));
+            rlVertex2f(static_cast<float>(w), static_cast<float>(h));
+            rlVertex2f(static_cast<float>(w), 0.0f);
+            rlEnd();
+            rlDrawRenderBatchActive();
+            constexpr int kZero = 0;
+            rlEnableColorBlend();
+            rlSetBlendFactors(kGlOne, kGlOne, kGlFuncAdd);
+            rlSetBlendMode(RL_BLEND_CUSTOM);
+            rlEnableDepthTest();
+            setDepthAlways(false);
+            rlDisableDepthMask();
+            rlDisableBackfaceCulling();
+            rlEnableShader(shader);
+            rlEnableVertexArray(vao);
+            rlSetUniform(locScreen, screenRect, RL_SHADER_UNIFORM_VEC4, 1);
+            rlSetUniform(locDepthMax, &depthMax, RL_SHADER_UNIFORM_FLOAT, 1);
+            rlSetUniform(locM, matrix, RL_SHADER_UNIFORM_VEC4, 4);
+            const int on = 1, off = 0;
+            rlSetUniform(locShadowCount, &on, RL_SHADER_UNIFORM_INT, 1);
+            rlDrawVertexArray(first, count);
+            rlSetUniform(locShadowCount, &off, RL_SHADER_UNIFORM_INT, 1);
+            rlDisableVertexArray();
+            rlDisableShader();
+            EndTextureMode();
+            if (darken.id == 0)
+            {
+                darken = LoadShaderFromMemory(nullptr, kDarkenShader);
+                locDarkenAlpha = GetShaderLocation(darken, "uAlpha");
+            }
+            BeginTextureMode(target);
+            rlDrawRenderBatchActive();
+            rlDisableDepthTest();
+            rlDisableDepthMask();
+            rlEnableColorBlend();
+            rlSetBlendFactorsSeparate(kZero, kGlOneMinusSrcAlpha, kZero, kGlOne, kGlFuncAdd, kGlFuncAdd); // Cd x (1 - As)
+            rlSetBlendMode(RL_BLEND_CUSTOM_SEPARATE);
+            BeginShaderMode(darken);
+            SetShaderValue(darken, locDarkenAlpha, &alpha, SHADER_UNIFORM_FLOAT);
+            DrawTexturePro(counts.texture, Rectangle{0, 0, static_cast<float>(w), -static_cast<float>(h)},
+                           Rectangle{0, 0, static_cast<float>(w), static_cast<float>(h)}, Vector2{0, 0}, 0.0f, WHITE);
+            EndShaderMode();
+            rlDrawRenderBatchActive();
             rlSetBlendMode(RL_BLEND_ALPHA);
             rlEnableDepthMask();
             rlEnableDepthTest();
@@ -1100,6 +1219,21 @@ void main()
                     for (int i = 0; i < 16; ++i)
                         matrix[i] = from[i] + (batch.matrix[i] - from[i]) * alpha;
                 }
+            if (m.blend == Material::Blend::ShadowVolume)
+            {
+                // Counted and darkened in passes of its own: leave the frame's drawing state as for a postEffect.
+                rlDisableScissorTest();
+                scissored = false;
+                rlDisableVertexArray();
+                rlDisableShader();
+                rlDisableTexture();
+                EndTextureMode();
+                const float darkness = batch.count > 0u ? std::min(1.0f, static_cast<float>(frame->vertices[batch.first].rgba >> 24) / 128.0f) : 0.0f;
+                gpu.shadowPass(w, h, static_cast<int>(batch.first), static_cast<int>(batch.count), matrix, screenRect, screen.depthMax, darkness);
+                rlDisableBackfaceCulling();
+                rlEnableDepthTest();
+                continue;
+            }
             // Blend state first: rlSetBlendMode flushes raylib's own batch, which unbinds the shader and the vertex
             // array (even with nothing to draw), so they are bound after it.
             if (m.blend == Material::Blend::Opaque)
