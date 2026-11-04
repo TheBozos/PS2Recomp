@@ -177,6 +177,9 @@ namespace ps2x::native
         // published another meanwhile) is read back once drawn, RGBA8 with row 0 the top and alpha opaque, as
         // capturedFrame(), a new texture each capture (null before the first). Any thread.
         void captureFrame();
+        // Snapshot the completed target before drawing the next frame (pause/background copies).
+        // If no target exists yet, capture the first frame as it completes instead.
+        void capturePreviousFrame();
         std::shared_ptr<const TextureCache::Texture> capturedFrame();
         // A material's tex0 for capturedFrame() as it is when present() draws the batch (drawn without a texture): a
         // capture asked for while a frame is built is ready by the time that frame is presented.
@@ -325,6 +328,7 @@ namespace ps2x::native
         std::atomic<double> m_depthWantedAt{-10.0};      // wantDepth()'s time (seconds)
         std::mutex m_depthMutex;
         std::atomic<double> m_captureAt{-1.0}; // captureFrame()'s time (seconds), -1 when none is waiting
+        std::atomic<bool> m_capturePrevious{false};
         std::mutex m_captureMutex;
         std::shared_ptr<const TextureCache::Texture> m_captured;
         uint64_t m_captures = 0;

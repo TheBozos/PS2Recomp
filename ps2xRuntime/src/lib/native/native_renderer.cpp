@@ -1003,6 +1003,7 @@ void main()
     void Renderer::wantDepth() { m_depthWantedAt.store(secondsNow(), std::memory_order_relaxed); }
 
     void Renderer::captureFrame() { m_captureAt.store(secondsNow(), std::memory_order_release); }
+    void Renderer::capturePreviousFrame() { m_capturePrevious.store(true, std::memory_order_release); }
 
     std::shared_ptr<const TextureCache::Texture> Renderer::capturedFrame()
     {
@@ -1082,6 +1083,7 @@ void main()
         }
         Gpu &gpu = *m_gpu;
         const int w = std::max(1, static_cast<int>(width)), h = std::max(1, static_cast<int>(height));
+        const bool previousTarget = gpu.targetWidth == w && gpu.targetHeight == h;
         if (gpu.targetWidth != w || gpu.targetHeight != h)
         {
             if (gpu.targetWidth != 0)
@@ -1089,6 +1091,31 @@ void main()
             gpu.target = Gpu::loadTarget(w, h);
             gpu.targetWidth = w;
             gpu.targetHeight = h;
+        }
+
+        const auto captureTarget = [&] {
+            if (auto *pixels = static_cast<uint32_t *>(rlReadTexturePixels(gpu.target.texture.id, w, h, gpu.target.texture.format)))
+            {
+                auto picture = std::make_shared<TextureCache::Texture>();
+                picture->width = static_cast<uint32_t>(w);
+                picture->height = static_cast<uint32_t>(h);
+                picture->rgba.resize(static_cast<size_t>(w) * h);
+                for (int row = 0; row < h; ++row)
+                    for (int column = 0; column < w; ++column)
+                        picture->rgba[static_cast<size_t>(row) * w + column] = pixels[static_cast<size_t>(h - 1 - row) * w + column] | 0xFF000000u;
+                RL_FREE(pixels);
+                std::lock_guard<std::mutex> lock(m_captureMutex);
+                picture->key = 0xCA97000000000000ull | ++m_captures;
+                picture->version = m_captures;
+                m_captured = std::move(picture);
+            }
+        };
+        if (m_capturePrevious.exchange(false, std::memory_order_acq_rel))
+        {
+            if (previousTarget)
+                captureTarget();
+            else
+                captureFrame();
         }
 
         const size_t bytes = frame->vertices.size() * sizeof(Vertex);
@@ -1424,21 +1451,7 @@ void main()
 
         // captureFrame(): this frame as drawn, read back once (the target's rows are bottom-up).
         if (m_captureAt.exchange(-1.0, std::memory_order_acq_rel) >= 0.0)
-            if (auto *pixels = static_cast<uint32_t *>(rlReadTexturePixels(gpu.target.texture.id, w, h, gpu.target.texture.format)))
-            {
-                auto picture = std::make_shared<TextureCache::Texture>();
-                picture->width = static_cast<uint32_t>(w);
-                picture->height = static_cast<uint32_t>(h);
-                picture->rgba.resize(static_cast<size_t>(w) * h);
-                for (int row = 0; row < h; ++row)
-                    for (int column = 0; column < w; ++column)
-                        picture->rgba[static_cast<size_t>(row) * w + column] = pixels[static_cast<size_t>(h - 1 - row) * w + column] | 0xFF000000u;
-                RL_FREE(pixels);
-                std::lock_guard<std::mutex> lock(m_captureMutex);
-                picture->key = 0xCA97000000000000ull | ++m_captures;
-                picture->version = m_captures;
-                m_captured = std::move(picture);
-            }
+            captureTarget();
 
         static const bool s_stats = []
         {
