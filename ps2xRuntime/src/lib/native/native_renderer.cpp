@@ -136,10 +136,13 @@ in vec2 fragTexCoord;
 in vec4 fragColor;
 uniform sampler2D texture0;
 uniform float uAlpha;
+uniform sampler2D uReceivers;
+uniform int uReceiverMask;
 out vec4 finalColor;
 void main()
 {
-    finalColor = vec4(0.0, 0.0, 0.0, abs(texture(texture0, fragTexCoord).r) > 0.5 ? uAlpha : 0.0);
+    bool receiver = uReceiverMask == 0 || texture(uReceivers, fragTexCoord).a >= 1.0;
+    finalColor = vec4(0.0, 0.0, 0.0, receiver && abs(texture(texture0, fragTexCoord).r) > 0.5 ? uAlpha : 0.0);
 }
 )";
 
@@ -239,7 +242,8 @@ void main()
         int shadowWidth = 0, shadowHeight = 0;
         unsigned int shadowDepth = 0;
         Shader darken{};
-        int locDarkenAlpha = -1;
+        RenderTexture2D shadowReceivers{};
+        int locDarkenAlpha = -1, locDarkenReceivers = -1, locDarkenReceiverMask = -1;
         unsigned int vao = 0, vbo = 0;
         size_t vboBytes = 0;
         RenderTexture2D target{};
@@ -581,7 +585,8 @@ void main()
         // A Material::Blend::ShadowVolume batch (vertices first..first + count, drawn with the frame's shader): its faces
         // counted where they are in front of the scene (the target's depth, tested, not written), then the target
         // darkened once by alpha where the count is not 0. Leaves the target bound, as postPass does.
-        void shadowPass(int w, int h, int first, int count, const float matrix[16], const float screenRect[4], float depthMax, float alpha)
+        void shadowPass(int w, int h, int first, int count, const float matrix[16], const float screenRect[4], float depthMax, float alpha,
+                        bool receiverAlpha)
         {
             if (shadowFbo == 0 || shadowWidth != w || shadowHeight != h || shadowDepth != target.depth.id)
             {
@@ -606,6 +611,25 @@ void main()
             {
                 BeginTextureMode(target);
                 return;
+            }
+            if (receiverAlpha)
+            {
+                // Snapshot the scene alpha before darkening it. Sampling the colour
+                // attachment while writing the same target would be a feedback loop.
+                if (shadowReceivers.id == 0 || shadowReceivers.texture.width != w || shadowReceivers.texture.height != h)
+                {
+                    if (shadowReceivers.id != 0)
+                        UnloadRenderTexture(shadowReceivers);
+                    shadowReceivers = LoadRenderTexture(w, h);
+                    SetTextureFilter(shadowReceivers.texture, TEXTURE_FILTER_POINT);
+                }
+                BeginTextureMode(shadowReceivers);
+                rlDisableColorBlend();
+                rlDisableDepthTest();
+                rlDisableDepthMask();
+                DrawTexturePro(target.texture, Rectangle{0, 0, static_cast<float>(w), -static_cast<float>(h)},
+                               Rectangle{0, 0, static_cast<float>(w), static_cast<float>(h)}, Vector2{0, 0}, 0.0f, WHITE);
+                EndTextureMode();
             }
             RenderTexture2D counts{};
             counts.id = shadowFbo;
@@ -650,16 +674,25 @@ void main()
             {
                 darken = LoadShaderFromMemory(nullptr, kDarkenShader);
                 locDarkenAlpha = GetShaderLocation(darken, "uAlpha");
+                locDarkenReceivers = GetShaderLocation(darken, "uReceivers");
+                locDarkenReceiverMask = GetShaderLocation(darken, "uReceiverMask");
             }
             BeginTextureMode(target);
             rlDrawRenderBatchActive();
             rlDisableDepthTest();
             rlDisableDepthMask();
             rlEnableColorBlend();
-            rlSetBlendFactorsSeparate(kZero, kGlOneMinusSrcAlpha, kZero, kGlOne, kGlFuncAdd, kGlFuncAdd); // Cd x (1 - As)
+            // A receiver is consumed by the shadow, so another caster cannot
+            // darken the same pixel a second time. Unaffected alpha is retained.
+            rlSetBlendFactorsSeparate(kZero, kGlOneMinusSrcAlpha, kZero, receiverAlpha ? kGlOneMinusSrcAlpha : kGlOne,
+                                      kGlFuncAdd, kGlFuncAdd); // Cd x (1 - As)
             rlSetBlendMode(RL_BLEND_CUSTOM_SEPARATE);
             BeginShaderMode(darken);
             SetShaderValue(darken, locDarkenAlpha, &alpha, SHADER_UNIFORM_FLOAT);
+            const int useReceivers = receiverAlpha ? 1 : 0;
+            SetShaderValue(darken, locDarkenReceiverMask, &useReceivers, SHADER_UNIFORM_INT);
+            if (receiverAlpha)
+                SetShaderValueTexture(darken, locDarkenReceivers, shadowReceivers.texture);
             DrawTexturePro(counts.texture, Rectangle{0, 0, static_cast<float>(w), -static_cast<float>(h)},
                            Rectangle{0, 0, static_cast<float>(w), static_cast<float>(h)}, Vector2{0, 0}, 0.0f, WHITE);
             EndShaderMode();
@@ -1297,7 +1330,8 @@ void main()
                 rlDisableTexture();
                 EndTextureMode();
                 const float darkness = batch.count > 0u ? std::min(1.0f, static_cast<float>(frame->vertices[batch.first].rgba >> 24) / 128.0f) : 0.0f;
-                gpu.shadowPass(w, h, static_cast<int>(batch.first), static_cast<int>(batch.count), matrix, screenRect, screen.depthMax, darkness);
+                gpu.shadowPass(w, h, static_cast<int>(batch.first), static_cast<int>(batch.count), matrix, screenRect, screen.depthMax, darkness,
+                               m.shadowReceiverAlpha);
                 rlDisableBackfaceCulling();
                 rlEnableDepthTest();
                 continue;
@@ -1352,7 +1386,9 @@ void main()
                 }
                 default: keepAlpha = false; break;
                 }
-                if (keepAlpha)
+                if (m.writeSourceAlpha)
+                    rlSetBlendFactorsSeparate(src, dst, kGlOne, kZero, equation, kGlFuncAdd);
+                else if (keepAlpha)
                     rlSetBlendFactorsSeparate(src, dst, kZero, kGlOne, equation, kGlFuncAdd);
                 else
                     rlSetBlendFactorsSeparate(src, dst, kGlOne, m_gsAlphaWrites ? 0 : kGlOneMinusSrcAlpha, equation, kGlFuncAdd);
@@ -1393,7 +1429,7 @@ void main()
                 ExportImage(image, path);
             }
             const int textured = m.textured && texture ? 1 : 0, alphaTest = m.alphaTest ? 1 : 0;
-            const int opaque = m.blend == Material::Blend::Opaque ? 1 : 0;
+            const int opaque = m.blend == Material::Blend::Opaque && !m.writeSourceAlpha ? 1 : 0;
             rlSetUniform(gpu.locOpaque, &opaque, RL_SHADER_UNIFORM_INT, 1);
             const int alphaAsColour = m.blend == Material::Blend::Brighten ? 1 : 0;
             rlSetUniform(gpu.locAlphaAsColour, &alphaAsColour, RL_SHADER_UNIFORM_INT, 1);
