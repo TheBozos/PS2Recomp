@@ -16,6 +16,7 @@ namespace ps2x::native
 {
     namespace
     {
+        std::atomic<uint64_t> g_presentedFrames{0};
         // The object's matrix takes a vertex to PS2 screen space (x, y in GS window coordinates, z GS depth, w); the
         // PS2 divides by w. Here the same point goes to the window: NDC from the screen rectangle, depth from the Z
         // range (larger is nearer on the GS), and w kept so texture coordinates interpolate in perspective and the
@@ -374,6 +375,7 @@ void main()
             std::shared_ptr<const TextureCache::Texture> source; // held, so its address is not reused while compared
         };
         std::unordered_map<uint64_t, GpuTexture> textures;
+        std::unordered_map<uint64_t, GpuTexture> applicationTextures;
 
         bool init()
         {
@@ -866,9 +868,12 @@ void main()
             rlEnableDepthTest();
         }
 
-        unsigned int texture(uint64_t key, const std::shared_ptr<const TextureCache::Texture> &source)
+        unsigned int texture(uint64_t key, const std::shared_ptr<const TextureCache::Texture> &source, bool application)
         {
-            GpuTexture &slot = textures[key];
+            // Direct native draws supply an asset identity, without a TEX0 address.
+            // Keep these in their own namespace: otherwise every default TEX0=0
+            // material replaces the previous asset and uploads it again next draw.
+            GpuTexture &slot = application ? applicationTextures[source->key] : textures[key];
             if (slot.source != source || slot.id == 0)
             {
                 if (slot.id != 0)
@@ -884,6 +889,8 @@ void main()
             return slot.id;
         }
     };
+
+    uint64_t presentedFrameCount() { return g_presentedFrames.load(std::memory_order_relaxed); }
 
     Renderer::Renderer() = default;
     Renderer::~Renderer() = default;
@@ -1054,6 +1061,8 @@ void main()
             if (next && next != m_shown && (!m_shown || next->time > m_shown->time))
             {
                 ++s_new;
+                if (m_enabled && !m_drewIntoGs.load(std::memory_order_relaxed))
+                    g_presentedFrames.fetch_add(1, std::memory_order_relaxed);
                 s_longest = std::max(s_longest, now - s_lastNew); // the longest the picture stood still (a hitch)
                 s_lastNew = now;
                 s_late += (next == published && !reached(published) && !reached(before)) ? 1u : 0u;
@@ -1406,7 +1415,7 @@ void main()
             rlSetUniform(gpu.locAlphaRef, &alphaRef, RL_SHADER_UNIFORM_FLOAT, 1);
             if (textured)
             {
-                const unsigned int id = gpu.texture(m.tex0 ^ (m.texa * 0x9e3779b97f4a7c15ull), texture);
+                const unsigned int id = gpu.texture(m.tex0 ^ (m.texa * 0x9e3779b97f4a7c15ull), texture, !m.fromGsContext);
                 // Wrap per draw (rlTextureParameters binds and unbinds the texture: before enabling it).
                 rlTextureParameters(id, RL_TEXTURE_WRAP_S, m.clampU ? RL_TEXTURE_WRAP_CLAMP : RL_TEXTURE_WRAP_REPEAT);
                 rlTextureParameters(id, RL_TEXTURE_WRAP_T, m.clampV ? RL_TEXTURE_WRAP_CLAMP : RL_TEXTURE_WRAP_REPEAT);

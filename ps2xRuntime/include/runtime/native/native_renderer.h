@@ -336,6 +336,8 @@ namespace ps2x::native
         int m_depthWidth = 0, m_depthHeight = 0;
         Screen m_depthScreen;
     };
+    // Distinct application frames selected for native presentation, excluding host redraws.
+    uint64_t presentedFrameCount();
 }
 
 #endif
