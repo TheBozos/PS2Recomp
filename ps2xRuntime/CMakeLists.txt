@@ -439,7 +439,9 @@ endforeach()
 # tracking; zlib compresses its file.
 set_source_files_properties(src/lib/ps2_capture.cpp src/lib/ps2_capture_watch.cpp src/lib/ps2_calllog.cpp PROPERTIES
     SKIP_UNITY_BUILD_INCLUSION ON SKIP_PRECOMPILE_HEADERS ON)
-set(ZLIB_USE_STATIC_LIBS ON) # no zlib1.dll next to the runner
+if(WIN32)
+    set(ZLIB_USE_STATIC_LIBS ON) # no zlib1.dll next to the runner
+endif()
 find_package(ZLIB REQUIRED)
 target_link_libraries(ps2_runtime PRIVATE ZLIB::ZLIB)
 set_source_files_properties(src/lib/ps2_app.cpp PROPERTIES
