@@ -5,6 +5,14 @@
 
 #include "runtime/ps2_memory_map.h"
 
+#ifndef PS2_ALWAYS_INLINE
+#if defined(_MSC_VER)
+#define PS2_ALWAYS_INLINE __forceinline
+#else
+#define PS2_ALWAYS_INLINE inline __attribute__((always_inline))
+#endif
+#endif
+
 static inline constexpr uint32_t PS2_EE_UNCACHED_RAM_MIRROR_BASE = 0x20000000u;
 static inline constexpr uint32_t PS2_EE_UNCACHED_RAM_MIRROR_SIZE = 0x20000000u;
 static inline constexpr uint32_t PS2_KSEG0_BASE = 0x80000000u;
